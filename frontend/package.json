@@ -1,0 +1,29 @@
+{
+  "dependencies": {
+    "@wailsio/runtime": "3.0.0",
+    "lucide-react": "0.469.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zustand": "5.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.5",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "6.3.0",
+    "tailwindcss": "4.3.5",
+    "typescript": "5.9.3",
+    "vite": "8.3.7"
+  },
+  "name": "debrowser-frontend",
+  "private": true,
+  "scripts": {
+    "build": "tsc && vite build --mode production",
+    "build:dev": "tsc && vite build --minify false --mode development",
+    "dev": "vite",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}
