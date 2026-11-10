@@ -1,0 +1,11 @@
+# Enforce LF line endings on every platform. Without this, Git on Windows
+# (core.autocrlf) converts text files to CRLF at checkout, which makes
+# gofmt and other Unix-oriented checks fail on Windows runners.
+* text=auto eol=lf
+
+# Binary assets are never treated as text.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.ttf binary
