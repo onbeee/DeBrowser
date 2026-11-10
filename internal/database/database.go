@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -23,17 +24,50 @@ var migrationsFS embed.FS
 
 // DB wraps the SQLite connection pool. Access is safe for concurrent use;
 // the pool is limited to a single open connection because SQLite allows
-// only one writer at a time.
+// only one writer at a time. A single connection also guarantees the
+// per-connection pragmas (foreign_keys, synchronous) apply to every
+// statement, which a multi-connection pool could not promise.
 type DB struct {
-	sql *sql.DB
+	sql       *sql.DB
+	path      string
+	backupDir string
+}
+
+// Options configures optional database behaviour.
+type Options struct {
+	// BackupDir, when set, receives a verified pre-migration backup
+	// (see Migrate) before any pending migration is applied to an
+	// existing database. In production this is the portable layout's
+	// backups directory.
+	BackupDir string
 }
 
 // Open opens (creating when needed) the SQLite database at path and applies
 // the connection pragmas required by AGENTS.md: WAL mode and foreign key
 // enforcement.
 func Open(path string) (*DB, error) {
+	return OpenWithOptions(path, Options{})
+}
+
+// OpenWithOptions is Open with explicit options.
+//
+// Pragmas, and why:
+//   - journal_mode=WAL: readers do not block the single writer and the
+//     database survives application crashes.
+//   - synchronous=FULL: with WAL, NORMAL only guarantees durability
+//     across application crashes; FULL also survives OS crashes and
+//     power loss for committed transactions. DeBrowser is a local-first
+//     metadata store with a low write rate, so the small extra commit
+//     latency is the right trade for never losing committed instance,
+//     proxy or bookmark data (AGENTS.md prioritises data integrity).
+//   - foreign_keys=1: SQLite disables FK enforcement by default; the
+//     schema's referential integrity depends on it.
+//   - busy_timeout=5000: brief lock contention (for example a backup
+//     snapshot) waits instead of failing with SQLITE_BUSY.
+func OpenWithOptions(path string, opts Options) (*DB, error) {
 	dsn := "file:" + filepath.ToSlash(path) +
 		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(1)" +
 		"&_pragma=busy_timeout(5000)"
 	sqlDB, err := sql.Open("sqlite", dsn)
@@ -48,8 +82,12 @@ func Open(path string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("database: ping %q: %w", path, err)
 	}
-	return &DB{sql: sqlDB}, nil
+	return &DB{sql: sqlDB, path: path, backupDir: opts.BackupDir}, nil
 }
+
+// Path returns the database file location (from internal/paths in
+// production).
+func (db *DB) Path() string { return db.path }
 
 // SQL exposes the underlying handle for the business modules built on top
 // of this foundation in later stages.
@@ -105,10 +143,64 @@ func loadMigrations() ([]migration, error) {
 	return migrations, nil
 }
 
+// WithTx runs fn inside a single transaction and commits it when fn
+// returns nil; any error rolls the whole unit of work back. It is the
+// shared transaction entry point for cross-repository operations.
+func (db *DB) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: begin transaction: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("database: commit transaction: %w", err)
+	}
+	return nil
+}
+
 // Migrate applies every not-yet-applied migration in version order. Each
 // migration runs in its own transaction together with its bookkeeping row,
 // so a failed migration never leaves the schema half-applied.
+//
+// When a backup directory is configured (production) and the database
+// already holds applied migrations, a verified backup of the current
+// state is taken BEFORE the first pending migration runs. The backup
+// uses VACUUM INTO, which captures WAL-resident data consistently —
+// copying the .db file alone would silently lose uncheckpointed
+// transactions. If the backup fails, no migration is attempted.
 func (db *DB) Migrate(ctx context.Context) error {
+	migrations, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	return db.applyMigrations(ctx, migrations)
+}
+
+// pendingMigrations returns the subset of migrations not yet recorded
+// in schema_migrations, preserving version order.
+func (db *DB) pendingMigrations(ctx context.Context, migrations []migration) ([]migration, int, error) {
+	var applied int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations`).Scan(&applied); err != nil {
+		return nil, 0, fmt.Errorf("database: count applied migrations: %w", err)
+	}
+	var pending []migration
+	for _, m := range migrations {
+		var count int
+		if err := db.sql.QueryRowContext(ctx,
+			`SELECT COUNT(1) FROM schema_migrations WHERE version = ?`, m.version).Scan(&count); err != nil {
+			return nil, 0, fmt.Errorf("database: check migration %d: %w", m.version, err)
+		}
+		if count == 0 {
+			pending = append(pending, m)
+		}
+	}
+	return pending, applied, nil
+}
+
+func (db *DB) applyMigrations(ctx context.Context, migrations []migration) error {
 	if _, err := db.sql.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
 		name       TEXT NOT NULL,
@@ -116,20 +208,21 @@ func (db *DB) Migrate(ctx context.Context) error {
 	)`); err != nil {
 		return fmt.Errorf("database: create schema_migrations: %w", err)
 	}
-
-	migrations, err := loadMigrations()
+	pending, applied, err := db.pendingMigrations(ctx, migrations)
 	if err != nil {
 		return err
 	}
-	for _, m := range migrations {
-		var count int
-		if err := db.sql.QueryRowContext(ctx,
-			`SELECT COUNT(1) FROM schema_migrations WHERE version = ?`, m.version).Scan(&count); err != nil {
-			return fmt.Errorf("database: check migration %d: %w", m.version, err)
+	if len(pending) == 0 {
+		return nil
+	}
+	// Protect existing data before changing the schema. A brand-new
+	// database (nothing applied yet) has nothing to protect.
+	if applied > 0 && db.backupDir != "" {
+		if err := db.backupBeforeMigration(ctx, migrations[len(migrations)-1].version); err != nil {
+			return err
 		}
-		if count > 0 {
-			continue
-		}
+	}
+	for _, m := range pending {
 		tx, err := db.sql.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("database: begin migration %d: %w", m.version, err)
@@ -148,4 +241,93 @@ func (db *DB) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// AppliedVersion returns the highest applied migration version, or 0
+// for a database that has not been migrated yet.
+func (db *DB) AppliedVersion(ctx context.Context) (int, error) {
+	var version sql.NullInt64
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT MAX(version) FROM schema_migrations`).Scan(&version)
+	if err != nil {
+		// schema_migrations may not exist yet on a brand-new file.
+		if strings.Contains(err.Error(), "no such table") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("database: applied version: %w", err)
+	}
+	if !version.Valid {
+		return 0, nil
+	}
+	return int(version.Int64), nil
+}
+
+// backupBeforeMigration snapshots the current database into the backup
+// directory and verifies the snapshot before any schema change runs.
+// The snapshot uses VACUUM INTO (see snapshotTo), so data still living
+// in the WAL is included. Any failure aborts the migration.
+func (db *DB) backupBeforeMigration(ctx context.Context, toVersion int) error {
+	current, err := db.AppliedVersion(ctx)
+	if err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
+	name := fmt.Sprintf("debrowser-pre-migration-%s-from-v%d-to-v%d.db", stamp, current, toVersion)
+	target := filepath.Join(db.backupDir, name)
+	if err := db.snapshotTo(ctx, target); err != nil {
+		return fmt.Errorf("database: pre-migration backup to %s failed, migration aborted: %w", target, err)
+	}
+	return nil
+}
+
+// snapshotTo writes a transactionally consistent copy of the database
+// to target (which must not exist yet) using VACUUM INTO and verifies
+// it with integrity_check. It is the only supported way to copy the
+// live database: copying the .db file directly would miss data that
+// still lives in the WAL.
+func (db *DB) snapshotTo(ctx context.Context, target string) error {
+	if _, err := os.Stat(target); err == nil {
+		return fmt.Errorf("database: backup target already exists: %s", target)
+	}
+	escaped := strings.ReplaceAll(filepath.ToSlash(target), "'", "''")
+	if _, err := db.sql.ExecContext(ctx, "VACUUM INTO '"+escaped+"'"); err != nil {
+		_ = os.Remove(target)
+		return fmt.Errorf("database: snapshot: %w", err)
+	}
+	check, err := sql.Open("sqlite", "file:"+filepath.ToSlash(target)+"?mode=ro")
+	if err != nil {
+		_ = os.Remove(target)
+		return fmt.Errorf("database: open backup for verification: %w", err)
+	}
+	defer func() { _ = check.Close() }()
+	var integrity string
+	if err := check.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		_ = os.Remove(target)
+		return fmt.Errorf("database: verify backup: %w", err)
+	}
+	if integrity != "ok" {
+		_ = os.Remove(target)
+		return fmt.Errorf("database: backup failed integrity_check: %s", integrity)
+	}
+	return nil
+}
+
+// BackupNow writes a verified snapshot of the current database into
+// the configured backup directory and returns its path. It gives later
+// stages (manual backups, Stage 7) the same WAL-safe mechanism the
+// migration path uses.
+func (db *DB) BackupNow(ctx context.Context) (string, error) {
+	if db.backupDir == "" {
+		return "", fmt.Errorf("database: no backup directory configured")
+	}
+	version, err := db.AppliedVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	stamp := time.Now().UTC().Format("20060102-150405.000")
+	target := filepath.Join(db.backupDir, fmt.Sprintf("debrowser-backup-%s-v%d.db", stamp, version))
+	if err := db.snapshotTo(ctx, target); err != nil {
+		return "", err
+	}
+	return target, nil
 }
