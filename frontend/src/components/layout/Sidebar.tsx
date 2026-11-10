@@ -7,14 +7,14 @@ export default function Sidebar() {
   const setPage = useAppStore((state) => state.setPage);
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-[#262b36] bg-[#13161d]">
+    <aside className="flex w-60 shrink-0 flex-col border-r border-(--border) bg-(--chrome-bg)">
       <div className="flex items-center gap-2.5 px-5 pb-5 pt-6">
-        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#2f6fed] text-white">
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-(--accent) text-(--accent-contrast)">
           <Globe size={20} strokeWidth={2.2} />
         </span>
         <div className="leading-tight">
           <div className="text-[15px] font-semibold tracking-wide">DeBrowser</div>
-          <div className="text-[11px] text-[#8b93a5]">Multi-profile browser manager</div>
+          <div className="text-[11px] text-(--text-faint)">多配置文件浏览器管理</div>
         </div>
       </div>
 
@@ -28,14 +28,14 @@ export default function Sidebar() {
               onClick={() => setPage(item.key)}
               className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-[13px] transition-colors ${
                 active
-                  ? "bg-[#1d2739] text-white"
-                  : "text-[#a7aebd] hover:bg-[#1a1e27] hover:text-white"
+                  ? "bg-(--accent-soft) text-(--text-main)"
+                  : "text-(--text-dim) hover:bg-(--hover-bg) hover:text-(--text-main)"
               }`}
             >
               <Icon size={17} strokeWidth={2} />
               <span className="flex-1">{item.label}</span>
-              {item.key !== "overview" && (
-                <span className="rounded bg-[#222836] px-1.5 py-0.5 text-[10px] text-[#8b93a5]">
+              {item.key !== "overview" && item.key !== "settings" && (
+                <span className="rounded bg-(--badge-bg) px-1.5 py-0.5 text-[10px] text-(--text-faint)">
                   {item.stage}
                 </span>
               )}
@@ -44,8 +44,8 @@ export default function Sidebar() {
         })}
       </nav>
 
-      <div className="px-5 py-4 text-[11px] leading-relaxed text-[#646c7e]">
-        Local-first. Your profiles and data stay on this machine.
+      <div className="px-5 py-4 text-[11px] leading-relaxed text-(--text-faint)">
+        本地优先：你的配置文件与数据只保存在本机应用目录中。
       </div>
     </aside>
   );
