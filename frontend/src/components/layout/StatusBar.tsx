@@ -5,22 +5,22 @@ export default function StatusBar() {
   const statusError = useAppStore((state) => state.statusError);
 
   const dotClass = statusError
-    ? "bg-[#e5484d]"
+    ? "bg-(--danger)"
     : status
       ? status.database === "ok"
-        ? "bg-[#46a758]"
-        : "bg-[#e5484d]"
-      : "bg-[#646c7e]";
+        ? "bg-(--ok)"
+        : "bg-(--danger)"
+      : "bg-(--text-faint)";
   const label = statusError
-    ? "Backend unreachable"
+    ? "后端不可达"
     : status
       ? status.database === "ok"
-        ? "Backend connected · Database OK"
-        : "Backend connected · Database error"
-      : "Connecting to backend…";
+        ? "后端已连接 · 数据库正常"
+        : "后端已连接 · 数据库异常"
+      : "正在连接后端…";
 
   return (
-    <footer className="flex h-8 shrink-0 items-center gap-4 border-t border-[#262b36] bg-[#13161d] px-5 text-[11px] text-[#8b93a5]">
+    <footer className="flex h-8 shrink-0 items-center gap-4 border-t border-(--border) bg-(--chrome-bg) px-5 text-[11px] text-(--text-dim)">
       <span className="flex items-center gap-2">
         <span className={`h-2 w-2 rounded-full ${dotClass}`} />
         {label}
@@ -34,12 +34,14 @@ export default function StatusBar() {
             {status.platform}/{status.arch}
           </span>
           <span className="max-w-[380px] truncate" title={status.dataDir}>
-            Data: {status.dataDir}
+            数据目录：{status.dataDir}
           </span>
-          <span className="ml-auto">Checked {new Date(status.checkedAt).toLocaleTimeString()}</span>
+          <span className="ml-auto">
+            更新于 {new Date(status.checkedAt).toLocaleTimeString("zh-CN")}
+          </span>
         </>
       )}
-      {statusError && <span className="ml-auto text-[#e5484d]">{statusError}</span>}
+      {statusError && <span className="ml-auto text-(--danger)">{statusError}</span>}
     </footer>
   );
 }

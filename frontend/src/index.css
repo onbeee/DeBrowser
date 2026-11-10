@@ -5,6 +5,79 @@
   --font-mono: "Cascadia Code", Consolas, "SF Mono", monospace;
 }
 
+/*
+ * Design tokens. Every color in the UI comes from these variables;
+ * components never hard-code hex values. The active theme is chosen
+ * by the data-theme attribute on <html> (dark | light | warm) and is
+ * persisted by the backend in config/settings.json.
+ */
+:root,
+:root[data-theme="dark"] {
+  --app-bg: #0f1115;
+  --chrome-bg: #13161d;
+  --panel-bg: #15181f;
+  --console-bg: #0b0d11;
+  --border: #262b36;
+  --border-strong: #2b3140;
+  --text-main: #e6e9ef;
+  --text-dim: #a7aebd;
+  --text-faint: #646c7e;
+  --accent: #2f6fed;
+  --accent-contrast: #ffffff;
+  --accent-soft: #1d2739;
+  --hover-bg: #1a1e27;
+  --badge-bg: #222836;
+  --ok: #46a758;
+  --danger: #ff8589;
+  --danger-bg: #2a1517;
+  --danger-border: #5a2b2e;
+  --scrollbar: #2e3442;
+}
+
+:root[data-theme="light"] {
+  --app-bg: #f4f4f5;
+  --chrome-bg: #ececef;
+  --panel-bg: #ffffff;
+  --console-bg: #fafafa;
+  --border: #dddee3;
+  --border-strong: #c9cbd2;
+  --text-main: #1d2129;
+  --text-dim: #4e5564;
+  --text-faint: #8a919e;
+  --accent: #2f6fed;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e3ebfd;
+  --hover-bg: #e4e4e9;
+  --badge-bg: #e2e3e8;
+  --ok: #2f8f4e;
+  --danger: #c62f35;
+  --danger-bg: #fdecec;
+  --danger-border: #f2b8ba;
+  --scrollbar: #c4c7ce;
+}
+
+:root[data-theme="warm"] {
+  --app-bg: #f7f1e8;
+  --chrome-bg: #ede3d5;
+  --panel-bg: #fff9f1;
+  --console-bg: #fbf5ea;
+  --border: #decfbb;
+  --border-strong: #d8c6ac;
+  --text-main: #40352e;
+  --text-dim: #7a5f4b;
+  --text-faint: #92745d;
+  --accent: #c87955;
+  --accent-contrast: #2e211b;
+  --accent-soft: #f0dcc8;
+  --hover-bg: #e7dac5;
+  --badge-bg: #e9dcc8;
+  --ok: #647c2e;
+  --danger: #b3402a;
+  --danger-bg: #f9e4d8;
+  --danger-border: #e0a98f;
+  --scrollbar: #d5c3a8;
+}
+
 html,
 body,
 #root {
@@ -12,22 +85,27 @@ body,
 }
 
 body {
-  background-color: #0f1115;
-  color: #e6e9ef;
+  background-color: var(--app-bg);
+  color: var(--text-main);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
-/* Slim scrollbars to match the desktop look. */
+::selection {
+  background-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+/* Slim scrollbars that follow the active theme. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #2e3442 transparent;
+  scrollbar-color: var(--scrollbar) transparent;
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background-color: #2e3442;
+  background-color: var(--scrollbar);
   border-radius: 4px;
 }

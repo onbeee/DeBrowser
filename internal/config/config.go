@@ -1,68 +1,62 @@
-// Package config resolves DeBrowser's local directories and runtime
-// settings. DeBrowser is local-first: all application data lives under a
-// single per-user data directory, never inside the repository.
+// Package config resolves the runtime configuration: the portable
+// directory layout (see internal/paths) plus process-level options.
+//
+// DeBrowser is portable-first. The application root is the directory
+// containing the executable; data is never placed in %APPDATA% or
+// %LOCALAPPDATA%. Two environment overrides exist for development and
+// automated tests only:
+//
+//	DEBROWSER_APP_ROOT  use this directory as the application root
+//	DEBROWSER_LOG_LEVEL debug|info|warn|error (default info)
 package config
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/onbeee/DeBrowser/internal/paths"
 )
 
-// Environment overrides.
-const (
-	EnvDataDir  = "DEBROWSER_DATA_DIR"
-	EnvLogLevel = "DEBROWSER_LOG_LEVEL"
-)
+// EnvAppRoot overrides the executable directory (development/tests).
+const EnvAppRoot = "DEBROWSER_APP_ROOT"
 
-// Config holds the resolved runtime configuration.
+// LegacyDirName is the folder Stage 1 used under the OS config
+// directory (%APPDATA%\DeBrowser on Windows). It is kept only so the
+// migration can find the old data; new data never goes there.
+const LegacyDirName = "DeBrowser"
+
+// Config is the resolved startup configuration.
 type Config struct {
-	// DataDir is the root directory for all DeBrowser application data.
-	DataDir string
-	// DatabasePath is the SQLite database file inside DataDir.
-	DatabasePath string
-	// ProfilesDir holds one isolated user data directory per browser
-	// instance (created by later stages, one sub-directory per instance).
-	ProfilesDir string
-	// LogsDir holds structured application log files.
-	LogsDir string
-	// BackupsDir holds database and configuration backups.
-	BackupsDir string
-	// LogLevel is one of "debug", "info", "warn" or "error".
+	Layout   paths.Layout
 	LogLevel string
 }
 
-// Load resolves the configuration from the environment and the operating
-// system's per-user config location, creating the data directories when
-// they do not exist yet.
-//
-// On Windows the default data directory is %AppData%\DeBrowser.
-func Load() (Config, error) {
-	dataDir := strings.TrimSpace(os.Getenv(EnvDataDir))
-	if dataDir == "" {
-		userConfigDir, err := os.UserConfigDir()
+// Load resolves the configuration: application root, portable layout,
+// and directory creation with a writability check. A root that cannot
+// be written to is a hard error — there is no fallback location.
+func Load(getenv func(string) string) (Config, error) {
+	root := strings.TrimSpace(getenv(EnvAppRoot))
+	if root == "" {
+		exeDir, err := paths.ExecutableDir()
 		if err != nil {
-			return Config{}, fmt.Errorf("config: resolve user config dir: %w", err)
+			return Config{}, err
 		}
-		dataDir = filepath.Join(userConfigDir, "DeBrowser")
+		root = exeDir
 	}
-
-	cfg := Config{
-		DataDir:      dataDir,
-		DatabasePath: filepath.Join(dataDir, "debrowser.db"),
-		ProfilesDir:  filepath.Join(dataDir, "profiles"),
-		LogsDir:      filepath.Join(dataDir, "logs"),
-		BackupsDir:   filepath.Join(dataDir, "backups"),
-		LogLevel:     strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogLevel))),
+	layout, err := paths.Resolve(root)
+	if err != nil {
+		return Config{}, err
 	}
-	if cfg.LogLevel == "" {
-		cfg.LogLevel = "info"
+	if err := layout.Ensure(); err != nil {
+		return Config{}, err
 	}
-
-	for _, dir := range []string{cfg.DataDir, cfg.ProfilesDir, cfg.LogsDir, cfg.BackupsDir} {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return Config{}, fmt.Errorf("config: create data directory %q: %w", dir, err)
+	cfg := Config{Layout: layout, LogLevel: "info"}
+	if lv := strings.ToLower(strings.TrimSpace(getenv("DEBROWSER_LOG_LEVEL"))); lv != "" {
+		switch lv {
+		case "debug", "info", "warn", "error":
+			cfg.LogLevel = lv
+		default:
+			return Config{}, fmt.Errorf("invalid DEBROWSER_LOG_LEVEL %q", lv)
 		}
 	}
 	return cfg, nil

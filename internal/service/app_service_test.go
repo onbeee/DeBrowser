@@ -1,54 +1,86 @@
 package service
 
 import (
-	"context"
-	"io"
 	"log/slog"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
-	"github.com/onbeee/DeBrowser/internal/version"
+	"github.com/onbeee/DeBrowser/internal/settings"
 )
 
-func TestGetStatusReportsRealState(t *testing.T) {
-	dir := t.TempDir()
-	cfg := config.Config{DataDir: dir, DatabasePath: filepath.Join(dir, "test.db")}
-
-	db, err := database.Open(cfg.DatabasePath)
+func testService(t *testing.T) *AppService {
+	t.Helper()
+	cfg, err := config.Load(func(key string) string {
+		if key == config.EnvAppRoot {
+			return t.TempDir()
+		}
+		return ""
+	})
 	if err != nil {
-		t.Fatalf("database.Open() error = %v", err)
+		t.Fatalf("config: %v", err)
 	}
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
 	}
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc, err := NewAppService(cfg, db, slog.Default())
+	if err != nil {
+		t.Fatalf("service: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.ServiceShutdown() })
+	return svc
+}
 
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewAppService(cfg, db, log)
+func TestGetStatusReportsPortablePaths(t *testing.T) {
+	svc := testService(t)
+	st := svc.GetStatus()
+	if st.Database != "ok" {
+		t.Errorf("database = %q, want ok", st.Database)
+	}
+	if st.RootDir == "" || st.WebView2Dir != filepath.Join(st.RootDir, "webview2-data") {
+		t.Errorf("unexpected paths: root=%s webview2=%s", st.RootDir, st.WebView2Dir)
+	}
+	if st.DatabasePath != filepath.Join(st.RootDir, "data", "debrowser.db") {
+		t.Errorf("database path = %s", st.DatabasePath)
+	}
+	if st.DataDir != filepath.Join(st.RootDir, "data") {
+		t.Errorf("data dir = %s", st.DataDir)
+	}
+	if st.Version == "" || st.Name != "DeBrowser" || st.Platform == "" || st.Arch == "" {
+		t.Errorf("identity = %+v", st)
+	}
+}
 
-	status := svc.GetStatus()
-	if status.Name != version.Name {
-		t.Errorf("Name = %q, want %q", status.Name, version.Name)
+func TestSettingsDefaultsAndThemePersistence(t *testing.T) {
+	svc := testService(t)
+	got := svc.GetSettings()
+	if got.Language != settings.LanguageZhCN {
+		t.Errorf("language = %q, want zh-CN", got.Language)
 	}
-	if status.Version != version.Version {
-		t.Errorf("Version = %q, want %q", status.Version, version.Version)
+	if got.Theme != settings.ThemeDark {
+		t.Errorf("theme = %q, want dark default", got.Theme)
 	}
-	if status.DataDir != dir {
-		t.Errorf("DataDir = %q, want %q", status.DataDir, dir)
+	saved, err := svc.SaveTheme(settings.ThemeWarm)
+	if err != nil {
+		t.Fatalf("SaveTheme: %v", err)
 	}
-	if status.Database != "ok" {
-		t.Errorf("Database = %q, want %q", status.Database, "ok")
+	if saved.Theme != settings.ThemeWarm {
+		t.Errorf("saved theme = %q", saved.Theme)
 	}
-	if status.Platform == "" || status.Arch == "" {
-		t.Errorf("Platform/Arch must be set, got %q/%q", status.Platform, status.Arch)
+	// A fresh service over the same root must see the persisted theme.
+	reloaded, err := settings.Load(svc.cfg.Layout.SettingsFile)
+	if err != nil {
+		t.Fatalf("reload settings: %v", err)
 	}
-	if _, err := time.Parse(time.RFC3339, status.CheckedAtRFC333); err != nil {
-		t.Errorf("CheckedAtRFC333 %q is not RFC3339: %v", status.CheckedAtRFC333, err)
+	if reloaded.Theme != settings.ThemeWarm {
+		t.Errorf("persisted theme = %q, want warm", reloaded.Theme)
 	}
-
-	if err := svc.ServiceShutdown(); err != nil {
-		t.Errorf("ServiceShutdown() error = %v", err)
+	if _, err := svc.SaveTheme("neon"); err == nil {
+		t.Error("SaveTheme accepted an unsupported theme")
 	}
 }

@@ -56,6 +56,27 @@ jobs:
       - name: Generate Wails bindings
         run: wails3 generate bindings -clean=true -ts -i
 
+      - name: Verify generated bindings are committed
+        shell: pwsh
+        run: |
+          git diff --exit-code -- frontend/bindings
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Generated bindings differ from the committed ones. Run 'wails3 generate bindings' locally and commit the result."
+            exit 1
+          }
+
+      - name: Check UI language (Simplified Chinese only)
+        shell: pwsh
+        run: |
+          $forbidden = @('Backend status', 'Coming in later stages', 'PLANNED MODULE', 'LOCAL-FIRST DESKTOP', 'Refresh status', 'Toggle console', 'No messages yet', 'Multi-profile browser manager', 'Project foundation is running', 'What Stage 1 includes', 'Browser Instances', 'Backup & Recovery')
+          $hits = Select-String -Path frontend/src/*.tsx, frontend/src/*.ts, frontend/src/**/*.tsx, frontend/src/**/*.ts -Pattern $forbidden -SimpleMatch
+          if ($hits) {
+            $hits | ForEach-Object { Write-Error "$($_.Path):$($_.LineNumber): $($_.Line.Trim())" }
+            Write-Error "English UI strings found. The UI is Simplified Chinese only."
+            exit 1
+          }
+          Write-Host "UI language check passed"
+
       - name: Frontend type check
         working-directory: frontend
         run: npm run typecheck

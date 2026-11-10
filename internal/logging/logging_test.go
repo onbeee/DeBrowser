@@ -2,10 +2,11 @@ package logging
 
 import (
 	"log/slog"
-	"path/filepath"
+	"os"
 	"testing"
 
 	"github.com/onbeee/DeBrowser/internal/config"
+	"github.com/onbeee/DeBrowser/internal/paths"
 )
 
 func TestParseLevel(t *testing.T) {
@@ -25,7 +26,14 @@ func TestParseLevel(t *testing.T) {
 }
 
 func TestNewWritesToLogFile(t *testing.T) {
-	cfg := config.Config{LogsDir: t.TempDir(), LogLevel: "info"}
+	layout, err := paths.Resolve(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Layout: layout, LogLevel: "info"}
 	logger, closeFn, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -34,8 +42,7 @@ func TestNewWritesToLogFile(t *testing.T) {
 	if err := closeFn(); err != nil {
 		t.Fatalf("close() error = %v", err)
 	}
-	matches, err := filepath.Glob(filepath.Join(cfg.LogsDir, "debrowser.log"))
-	if err != nil || len(matches) != 1 {
-		t.Fatalf("expected debrowser.log to exist, matches=%v err=%v", matches, err)
+	if _, err := os.Stat(layout.LogFile); err != nil {
+		t.Fatalf("expected log file at %s: %v", layout.LogFile, err)
 	}
 }

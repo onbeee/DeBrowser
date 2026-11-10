@@ -29,7 +29,7 @@ wails3 dev                            # dev mode: hot-reload frontend, auto-rest
 
 | Variable | Effect |
 | --- | --- |
-| `DEBROWSER_DATA_DIR` | Overrides the data directory (default `%AppData%\DeBrowser`) |
+| `DEBROWSER_APP_ROOT` | Overrides the application root (development/tests only; default: the executable's directory). All data paths derive from it. |
 | `DEBROWSER_LOG_LEVEL` | `debug` / `info` / `warn` / `error` (default `info`) |
 
 ## Common tasks
@@ -37,7 +37,7 @@ wails3 dev                            # dev mode: hot-reload frontend, auto-rest
 ```powershell
 task build            # production Windows x64 build via build/windows/Taskfile.yml
 task package          # NSIS installer (requires makensis)
-wails3 generate bindings   # regenerate frontend/bindings after changing Go services
+wails3 generate bindings -clean=true -ts -i   # regenerate frontend/bindings after changing Go services (CI fails if the committed bindings differ)
 ```
 
 The full `task build` also generates the Windows icon and `.syso` resources, which requires `build/appicon.png` (a 1024×1024 PNG app icon). That binary asset is **not in the repository yet** — see "Known limitations" below. Until it is added, generate Wails' example icon as a placeholder: `wails3 generate icons -example` (run inside `build/`), which is exactly what CI does.

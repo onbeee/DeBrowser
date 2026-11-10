@@ -1,6 +1,7 @@
-// Package service contains the Wails services exposed to the frontend.
-// Services are plain Go structs; their exported methods are callable from
-// the frontend through the generated bindings (see frontend/bindings).
+// Package service contains the application services exposed to the
+// frontend through Wails bindings. Services are the only way the UI
+// can reach backend state; business logic of later stages lives here
+// and in dedicated domain packages, never in the app assembly package.
 package service
 
 import (
@@ -8,73 +9,117 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/settings"
 	"github.com/onbeee/DeBrowser/internal/version"
 )
 
-// StatusEvent is the name of the Wails event emitted with a fresh Status
-// while the application runs.
+// StatusEvent is the typed Wails event carrying Status snapshots.
 const StatusEvent = "app:status"
 
-// Status is a snapshot of the running application's real state, shown in
-// the frontend status bar and overview page. It contains no business data.
+// Status is a point-in-time snapshot of the running foundation. All
+// paths come from the portable layout (see internal/paths).
 type Status struct {
-	Name            string `json:"name"`
-	Version         string `json:"version"`
-	Platform        string `json:"platform"`
-	Arch            string `json:"arch"`
-	DataDir         string `json:"dataDir"`
-	Database        string `json:"database"` // "ok" or a short error description
-	UptimeSeconds   int64  `json:"uptimeSeconds"`
-	CheckedAtRFC333 string `json:"checkedAt"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Platform      string `json:"platform"`
+	Arch          string `json:"arch"`
+	RootDir       string `json:"rootDir"`
+	DataDir       string `json:"dataDir"`
+	Database      string `json:"database"` // "ok" or a short error description
+	DatabasePath  string `json:"databasePath"`
+	LogFile       string `json:"logFile"`
+	WebView2Dir   string `json:"webView2Dir"`
+	SettingsFile  string `json:"settingsFile"`
+	UptimeSeconds int64  `json:"uptimeSeconds"`
+	CheckedAt     string `json:"checkedAt"`
 }
 
-// AppService exposes application-level information and owns the database
-// handle for the lifetime of the application.
+// AppService exposes foundation status and user settings.
 type AppService struct {
-	cfg     config.Config
-	db      *database.DB
-	log     *slog.Logger
-	started time.Time
+	cfg       config.Config
+	db        *database.DB
+	log       *slog.Logger
+	startedAt time.Time
+
+	mu       sync.Mutex
+	settings settings.Settings
 }
 
-// NewAppService creates the service. The database is migrated by main
-// before the service is registered.
-func NewAppService(cfg config.Config, db *database.DB, log *slog.Logger) *AppService {
-	return &AppService{cfg: cfg, db: db, log: log, started: time.Now()}
+// NewAppService builds the service. The current user settings are
+// loaded from the portable config directory.
+func NewAppService(cfg config.Config, db *database.DB, log *slog.Logger) (*AppService, error) {
+	current, err := settings.Load(cfg.Layout.SettingsFile)
+	if err != nil {
+		return nil, err
+	}
+	return &AppService{
+		cfg:       cfg,
+		db:        db,
+		log:       log,
+		startedAt: time.Now(),
+		settings:  current,
+	}, nil
 }
 
-// GetStatus returns the current application status, including a live
-// database health check.
+// GetStatus returns a snapshot of the running application's real
+// state, shown in the frontend status bar and overview page. It
+// contains no business data.
 func (s *AppService) GetStatus() Status {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	databaseState := "ok"
-	if err := s.db.Health(ctx); err != nil {
-		databaseState = "error"
-		s.log.Error("database health check failed", "error", err)
+	dbStatus := "ok"
+	if err := s.db.Health(context.Background()); err != nil {
+		dbStatus = err.Error()
 	}
+	l := s.cfg.Layout
 	return Status{
-		Name:            version.Name,
-		Version:         version.Version,
-		Platform:        runtime.GOOS,
-		Arch:            runtime.GOARCH,
-		DataDir:         s.cfg.DataDir,
-		Database:        databaseState,
-		UptimeSeconds:   int64(time.Since(s.started).Seconds()),
-		CheckedAtRFC333: time.Now().Format(time.RFC3339),
+		Name:          version.Name,
+		Version:       version.Version,
+		Platform:      runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		RootDir:       l.Root,
+		DataDir:       l.Data,
+		Database:      dbStatus,
+		DatabasePath:  l.DatabaseFile,
+		LogFile:       l.LogFile,
+		WebView2Dir:   l.WebView2,
+		SettingsFile:  l.SettingsFile,
+		UptimeSeconds: int64(time.Since(s.startedAt).Seconds()),
+		CheckedAt:     time.Now().Format(time.RFC3339),
 	}
 }
 
-// ServiceShutdown is the Wails v3 service lifecycle hook: it closes the
-// database when the application shuts down.
-func (s *AppService) ServiceShutdown() error {
-	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("app service shutdown: %w", err)
+// GetSettings returns the current user settings. The language is
+// always Simplified Chinese (zh-CN); the theme is user-selectable.
+func (s *AppService) GetSettings() settings.Settings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.settings
+}
+
+// SaveTheme persists a new appearance theme ("dark" | "light" |
+// "warm") and returns the full settings. The change is stored in
+// <root>/config/settings.json so it survives restarts and travels
+// with the portable folder.
+func (s *AppService) SaveTheme(theme string) (settings.Settings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.settings
+	next.Theme = theme
+	if err := settings.Save(s.cfg.Layout.SettingsFile, next); err != nil {
+		return settings.Settings{}, fmt.Errorf("save theme: %w", err)
 	}
-	return nil
+	s.settings = next
+	s.log.Info("theme updated", "theme", theme)
+	return next, nil
+}
+
+// ServiceShutdown is called by Wails during application shutdown; it
+// releases the database handle owned by this service.
+func (s *AppService) ServiceShutdown() error {
+	s.log.Info("app service shutting down")
+	return s.db.Close()
 }

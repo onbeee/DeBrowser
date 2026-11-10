@@ -3,7 +3,7 @@
 ## Engine
 
 - SQLite, accessed through the pure-Go driver `modernc.org/sqlite` (no CGO required, which keeps Windows x64 builds simple).
-- The database file is `debrowser.db` inside the application data directory (`%AppData%\DeBrowser` by default; override with `DEBROWSER_DATA_DIR`).
+- The database file is `debrowser.db` inside the portable data directory (`<application root>\data\debrowser.db`; the root follows the executable - see `internal/paths`). Stage 1 databases left in `%AppData%\DeBrowser` are migrated automatically on first launch (see ARCHITECTURE.md).
 - Open-time pragmas (see `internal/database/database.go`): `journal_mode=WAL`, `foreign_keys=1`, `busy_timeout=5000`. The connection pool is limited to one open connection because SQLite permits a single writer.
 
 ## Rules (AGENTS.md section 5)

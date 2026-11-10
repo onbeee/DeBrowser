@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/onbeee/DeBrowser/internal/config"
 )
@@ -32,7 +31,7 @@ func ParseLevel(value string) slog.Level {
 // New creates a logger for the given configuration and returns it together
 // with a close function that flushes and closes the log file.
 func New(cfg config.Config) (*slog.Logger, func() error, error) {
-	logPath := filepath.Join(cfg.LogsDir, "debrowser.log")
+	logPath := cfg.Layout.LogFile
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, nil, fmt.Errorf("logging: open log file %q: %w", logPath, err)

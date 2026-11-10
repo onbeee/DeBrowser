@@ -15,17 +15,17 @@ export interface NavItem {
   key: PageKey;
   label: string;
   icon: LucideIcon;
-  /** Development stage that delivers this module (see docs/ROADMAP.md). */
+  /** 交付该模块的开发阶段（见 docs/ROADMAP.md）。 */
   stage: string;
 }
 
 export const NAV_ITEMS: NavItem[] = [
-  { key: "overview", label: "Overview", icon: LayoutDashboard, stage: "Stage 1" },
-  { key: "instances", label: "Browser Instances", icon: AppWindow, stage: "Stage 3" },
-  { key: "proxies", label: "Proxies", icon: Network, stage: "Stage 4" },
-  { key: "kernels", label: "Browser Kernels", icon: Cpu, stage: "Stage 5" },
-  { key: "bookmarks", label: "Bookmarks", icon: Bookmark, stage: "Stage 5" },
-  { key: "sync", label: "Synchronization", icon: RefreshCw, stage: "Stage 6" },
-  { key: "backup", label: "Backup & Recovery", icon: Archive, stage: "Stage 7" },
-  { key: "settings", label: "Settings", icon: Settings, stage: "Later stages" },
+  { key: "overview", label: "总览", icon: LayoutDashboard, stage: "阶段 1" },
+  { key: "instances", label: "浏览器实例", icon: AppWindow, stage: "阶段 3" },
+  { key: "proxies", label: "代理", icon: Network, stage: "阶段 4" },
+  { key: "kernels", label: "浏览器内核", icon: Cpu, stage: "阶段 5" },
+  { key: "bookmarks", label: "书签", icon: Bookmark, stage: "阶段 5" },
+  { key: "sync", label: "同步", icon: RefreshCw, stage: "阶段 6" },
+  { key: "backup", label: "备份与恢复", icon: Archive, stage: "阶段 7" },
+  { key: "settings", label: "系统设置", icon: Settings, stage: "基础设置" },
 ];

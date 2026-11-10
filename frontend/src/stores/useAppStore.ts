@@ -11,6 +11,8 @@ export type PageKey =
   | "backup"
   | "settings";
 
+export type Theme = "dark" | "light" | "warm";
+
 export interface LogLine {
   id: number;
   time: string;
@@ -24,6 +26,7 @@ interface AppState {
   status: Status | null;
   statusError: string | null;
   logs: LogLine[];
+  theme: Theme;
   setPage: (page: PageKey) => void;
   toggleConsole: () => void;
   setConsoleOpen: (open: boolean) => void;
@@ -31,9 +34,15 @@ interface AppState {
   setStatusError: (message: string | null) => void;
   log: (level: "info" | "error", message: string) => void;
   clearLogs: () => void;
+  setTheme: (theme: Theme) => void;
 }
 
 let nextLogId = 1;
+
+/** Apply a theme immediately by switching the design-token set. */
+export function applyTheme(theme: Theme) {
+  document.documentElement.dataset.theme = theme;
+}
 
 export const useAppStore = create<AppState>((set) => ({
   page: "overview",
@@ -41,6 +50,7 @@ export const useAppStore = create<AppState>((set) => ({
   status: null,
   statusError: null,
   logs: [],
+  theme: "dark",
   setPage: (page) => set({ page }),
   toggleConsole: () => set((state) => ({ consoleOpen: !state.consoleOpen })),
   setConsoleOpen: (open) => set({ consoleOpen: open }),
@@ -50,8 +60,12 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({
       logs: [
         ...state.logs.slice(-199),
-        { id: nextLogId++, time: new Date().toLocaleTimeString(), level, message },
+        { id: nextLogId++, time: new Date().toLocaleTimeString("zh-CN"), level, message },
       ],
     })),
   clearLogs: () => set({ logs: [] }),
+  setTheme: (theme) => {
+    applyTheme(theme);
+    set({ theme });
+  },
 }));
