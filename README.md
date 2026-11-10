@@ -45,7 +45,17 @@ Production build and further workflows are documented in [docs/DEVELOPMENT.md](d
 
 ## Data & privacy
 
-DeBrowser is local-first. Application data lives in `%AppData%\DeBrowser` (override with `DEBROWSER_DATA_DIR`): the SQLite database, one profile directory per browser instance, logs and backups. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
+DeBrowser is portable-first and local-first. Everything lives next to the executable - wherever you put the application folder, its data follows:
+
+```
+<application folder>\
+  debrowser.exe
+  data\            debrowser.db, backups\, logs\, profiles\, mihomo\
+  webview2-data\   WebView2 user data for the app window
+  config\          settings.json (language, theme)
+```
+
+Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch, Stage 1 data found in the legacy `%AppData%\DeBrowser` location is migrated safely (copy + verify, legacy folder kept as a backup; WebView2 data is re-initialized, never mixed with business data). The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
 
 ## License
 
