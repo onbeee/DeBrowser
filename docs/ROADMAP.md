@@ -16,7 +16,7 @@ Development follows AGENTS.md section 9: small, testable stages, one Pull Reques
 
 - Wails v3.0.0 + Go 1.26 + React 18 + TypeScript + Vite project, Windows 11 x64 target
 - Modular monolith layout (`internal/` backend modules, `frontend/` UI)
-- Configuration management and data-directory layout (`%AppData%\DeBrowser`)
+- Configuration management and data-directory layout (portable layout next to the executable, adopted after Stage 1; Stage 1 originally used `%AppData%\DeBrowser` and existing data is migrated automatically)
 - Structured JSON logging infrastructure
 - SQLite infrastructure: WAL, foreign keys, transactional migrations (foundation schema only)
 - `AppService` with live status over bindings and the typed `app:status` event
