@@ -1,1 +1,107 @@
-Ly8gQ29tbWFuZCBkZWJyb3dzZXIgc3RhcnRzIHRoZSBEZUJyb3dzZXIgZGVza3RvcCBhcHBsaWNhdGlvbi4KLy8KLy8gRGVCcm93c2VyIGlzIHBvcnRhYmxlLWZpcnN0OiBldmVyeSBwZXJzaXN0ZW50IGZpbGUgbGl2ZXMgdW5kZXIgdGhlCi8vIGRpcmVjdG9yeSB0aGF0IGNvbnRhaW5zIHRoZSBleGVjdXRhYmxlIChzZWUgaW50ZXJuYWwvcGF0aHMpLiBTdGFydHVwCi8vIG9yZGVyOiByZXNvbHZlIGNvbmZpZ3VyYXRpb24gYW5kIGRpcmVjdG9yaWVzLCBzZXQgdXAgbG9nZ2luZywgbWlncmF0ZQovLyBhbnkgU3RhZ2UgMSByb2FtaW5nIGRhdGEsIG9wZW4gYW5kIG1pZ3JhdGUgdGhlIFNRTGl0ZSBkYXRhYmFzZSwgbG9hZAovLyBzZXR0aW5ncywgdGhlbiBydW4gdGhlIFdhaWxzIGFwcGxpY2F0aW9uLiBBbnkgZmFpbHVyZSBiZWZvcmUgdGhlCi8vIHdpbmRvdyBvcGVucyBhYm9ydHMgc3RhcnR1cCB3aXRoIGEgY2xlYXIgZXJyb3Ig4oCUIHRoZSBhcHAgbmV2ZXIgZmFsbHMKLy8gYmFjayB0byB3cml0aW5nIGRhdGEgaW50byAlQVBQREFUQSUgb3IgJUxPQ0FMQVBQREFUQSUuCnBhY2thZ2UgbWFpbgoKaW1wb3J0ICgKCSJjb250ZXh0IgoJImVtYmVkIgoJImxvZyIKCSJvcyIKCSJwYXRoL2ZpbGVwYXRoIgoJInRpbWUiCgoJImdpdGh1Yi5jb20vd2FpbHNhcHAvd2FpbHMvdjMvcGtnL2FwcGxpY2F0aW9uIgoKCSJnaXRodWIuY29tL29uYmVlZS9EZUJyb3dzZXIvaW50ZXJuYWwvYXBwIgoJImdpdGh1Yi5jb20vb25iZWVlL0RlQnJvd3Nlci9pbnRlcm5hbC9jb25maWciCgkiZ2l0aHViLmNvbS9vbmJlZWUvRGVCcm93c2VyL2ludGVybmFsL2RhdGFiYXNlIgoJImdpdGh1Yi5jb20vb25iZWVlL0RlQnJvd3Nlci9pbnRlcm5hbC9sb2dnaW5nIgoJImdpdGh1Yi5jb20vb25iZWVlL0RlQnJvd3Nlci9pbnRlcm5hbC9taWdyYXRpb24iCgkiZ2l0aHViLmNvbS9vbmJlZWUvRGVCcm93c2VyL2ludGVybmFsL3NlcnZpY2UiCikKCi8vZ286ZW1iZWQgYWxsOmZyb250ZW5kL2Rpc3QKdmFyIGFzc2V0cyBlbWJlZC5GUwoKZnVuYyBpbml0KCkgewoJYXBwbGljYXRpb24uUmVnaXN0ZXJFdmVudFtzZXJ2aWNlLlN0YXR1c10oc2VydmljZS5TdGF0dXNFdmVudCkKfQoKZnVuYyBtYWluKCkgewoJY2ZnLCBlcnIgOj0gY29uZmlnLkxvYWQob3MuR2V0ZW52KQoJaWYgZXJyICE9IG5pbCB7CgkJbG9nLkZhdGFsZigiZGVicm93c2VyOiBjb25maWd1cmF0aW9uOiAldiIsIGVycikKCX0KCglsb2dnZXIsIGNsb3NlTG9nLCBlcnIgOj0gbG9nZ2luZy5OZXcoY2ZnKQoJaWYgZXJyICE9IG5pbCB7CgkJbG9nLkZhdGFsZigiZGVicm93c2VyOiAldiIsIGVycikKCX0KCWRlZmVyIGZ1bmMoKSB7IF8gPSBjbG9zZUxvZygpIH0oKQoKCWxvZ2dlci5JbmZvKCJzdGFydGluZyBkZWJyb3dzZXIiLAoJCSJyb290IiwgY2ZnLkxheW91dC5Sb290LAoJCSJkYXRhRGlyIiwgY2ZnLkxheW91dC5EYXRhLAoJCSJkYXRhYmFzZSIsIGNmZy5MYXlvdXQuRGF0YWJhc2VGaWxlLAoJKQoKCS8vIE9uZS10aW1lIG1pZ3JhdGlvbiBvZiBTdGFnZSAxIHJvYW1pbmcgZGF0YS4gUnVucyBiZWZvcmUgdGhlCgkvLyBkYXRhYmFzZSBpcyBvcGVuZWQ7IGEgZmFpbHVyZSBhYm9ydHMgc3RhcnR1cCBzbyB0aGUgdXNlciBuZXZlcgoJLy8gc2VlcyBhIHNpbGVudGx5IGNyZWF0ZWQgZW1wdHkgZGF0YWJhc2Ugd2hpbGUgdGhlaXIgcmVhbCBkYXRhCgkvLyBzdGlsbCBzaXRzIGluIHRoZSBsZWdhY3kgbG9jYXRpb24uCglsZWdhY3lSb290LCBlcnIgOj0gbWlncmF0aW9uLkRlZmF1bHRMZWdhY3lSb290KCkKCWlmIGVyciAhPSBuaWwgewoJCWxvZ2dlci5FcnJvcigibGVnYWN5IGRhdGEgZGV0ZWN0aW9uIGZhaWxlZCIsICJlcnJvciIsIGVycikKCQlsb2cuRmF0YWxmKCJkZWJyb3dzZXI6ICV2IiwgZXJyKQoJfQoJaWYgZmlsZXBhdGguQ2xlYW4obGVnYWN5Um9vdCkgIT0gZmlsZXBhdGguQ2xlYW4oY2ZnLkxheW91dC5Sb290KSB7CgkJcmVwb3J0LCBlcnIgOj0gbWlncmF0aW9uLlJ1bihjZmcuTGF5b3V0LCBsZWdhY3lSb290KQoJCWlmIGVyciAhPSBuaWwgewoJCQlsb2dnZXIuRXJyb3IoImxlZ2FjeSBkYXRhIG1pZ3JhdGlvbiBmYWlsZWQiLCAiZXJyb3IiLCBlcnIpCgkJCWxvZy5GYXRhbGYoImRlYnJvd3NlcjogbGVnYWN5IGRhdGEgbWlncmF0aW9uIGZhaWxlZDogJXYiLCBlcnIpCgkJfQoJCWlmIHJlcG9ydC5OZWVkZWQgewoJCQlsb2dnZXIuSW5mbygibGVnYWN5IGRhdGEgbWlncmF0ZWQiLAoJCQkJImRhdGFiYXNlQ29waWVkIiwgcmVwb3J0LkRhdGFiYXNlQ29waWVkLAoJCQkJImZpbGVzQ29waWVkIiwgcmVwb3J0LkZpbGVzQ29waWVkLAoJCQkJImZpbGVzU2tpcHBlZCIsIHJlcG9ydC5GaWxlc1NraXBwZWQsCgkJCQkibGVnYWN5Um9vdCIsIHJlcG9ydC5MZWdhY3lSb290LAoJCQkpCgkJfQoJfQoKCWRiLCBlcnIgOj0gZGF0YWJhc2UuT3BlbldpdGhPcHRpb25zKGNmZy5MYXlvdXQuRGF0YWJhc2VGaWxlLCBkYXRhYmFzZS5PcHRpb25zewoJCUJhY2t1cERpcjogY2ZnLkxheW91dC5CYWNrdXBzLAoJfSkKCWlmIGVyciAhPSBuaWwgewoJCWxvZ2dlci5FcnJvcigib3BlbiBkYXRhYmFzZSBmYWlsZWQiLCAiZXJyb3IiLCBlcnIpCgkJbG9nLkZhdGFsZigiZGVicm93c2VyOiAldiIsIGVycikKCX0KCgljdHgsIGNhbmNlbCA6PSBjb250ZXh0LldpdGhUaW1lb3V0KGNvbnRleHQuQmFja2dyb3VuZCgpLCAzMCp0aW1lLlNlY29uZCkKCWVyciA9IGRiLk1pZ3JhdGUoY3R4KQoJY2FuY2VsKCkKCWlmIGVyciAhPSBuaWwgewoJCWxvZ2dlci5FcnJvcigiZGF0YWJhc2UgbWlncmF0aW9uIGZhaWxlZCIsICJlcnJvciIsIGVycikKCQlsb2cuRmF0YWxmKCJkZWJyb3dzZXI6ICV2IiwgZXJyKQoJfQoKCWFwcFNlcnZpY2UsIGVyciA6PSBzZXJ2aWNlLk5ld0FwcFNlcnZpY2UoY2ZnLCBkYiwgbG9nZ2VyKQoJaWYgZXJyICE9IG5pbCB7CgkJbG9nZ2VyLkVycm9yKCJsb2FkIHNldHRpbmdzIGZhaWxlZCIsICJlcnJvciIsIGVycikKCQlsb2cuRmF0YWxmKCJkZWJyb3dzZXI6ICV2IiwgZXJyKQoJfQoKCXdhaWxzQXBwIDo9IGFwcC5OZXcoY2ZnLCBhcHBTZXJ2aWNlLCBsb2dnZXIsIGFzc2V0cykKCWlmIGVyciA6PSB3YWlsc0FwcC5SdW4oKTsgZXJyICE9IG5pbCB7CgkJbG9nZ2VyLkVycm9yKCJhcHBsaWNhdGlvbiBleGl0ZWQgd2l0aCBlcnJvciIsICJlcnJvciIsIGVycikKCQlsb2cuRmF0YWxmKCJkZWJyb3dzZXI6ICV2IiwgZXJyKQoJfQp9Cg==
+// Command debrowser starts the DeBrowser desktop application.
+//
+// DeBrowser is portable-first: every persistent file lives under the
+// directory that contains the executable (see internal/paths). Startup
+// order: resolve configuration and directories, set up logging, migrate
+// any Stage 1 roaming data, open and migrate the SQLite database, load
+// settings, then run the Wails application. Any failure before the
+// window opens aborts startup with a clear error — the app never falls
+// back to writing data into %APPDATA% or %LOCALAPPDATA%.
+package main
+
+import (
+	"context"
+	"embed"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/onbeee/DeBrowser/internal/app"
+	"github.com/onbeee/DeBrowser/internal/config"
+	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/logging"
+	"github.com/onbeee/DeBrowser/internal/migration"
+	"github.com/onbeee/DeBrowser/internal/service"
+)
+
+//go:embed all:frontend/dist
+var assets embed.FS
+
+func init() {
+	application.RegisterEvent[service.Status](service.StatusEvent)
+}
+
+func main() {
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		log.Fatalf("debrowser: configuration: %v", err)
+	}
+
+	logger, closeLog, err := logging.New(cfg)
+	if err != nil {
+		log.Fatalf("debrowser: %v", err)
+	}
+	defer func() { _ = closeLog() }()
+
+	logger.Info("starting debrowser",
+		"root", cfg.Layout.Root,
+		"dataDir", cfg.Layout.Data,
+		"database", cfg.Layout.DatabaseFile,
+	)
+
+	// One-time migration of Stage 1 roaming data. Runs before the
+	// database is opened; a failure aborts startup so the user never
+	// sees a silently created empty database while their real data
+	// still sits in the legacy location.
+	legacyRoot, err := migration.DefaultLegacyRoot()
+	if err != nil {
+		logger.Error("legacy data detection failed", "error", err)
+		log.Fatalf("debrowser: %v", err)
+	}
+	if filepath.Clean(legacyRoot) != filepath.Clean(cfg.Layout.Root) {
+		report, err := migration.Run(cfg.Layout, legacyRoot)
+		if err != nil {
+			logger.Error("legacy data migration failed", "error", err)
+			log.Fatalf("debrowser: legacy data migration failed: %v", err)
+		}
+		if report.Needed {
+			logger.Info("legacy data migrated",
+				"databaseCopied", report.DatabaseCopied,
+				"filesCopied", report.FilesCopied,
+				"filesSkipped", report.FilesSkipped,
+				"legacyRoot", report.LegacyRoot,
+			)
+		}
+	}
+
+	db, err := database.OpenWithOptions(cfg.Layout.DatabaseFile, database.Options{
+		BackupDir: cfg.Layout.Backups,
+	})
+	if err != nil {
+		logger.Error("open database failed", "error", err)
+		log.Fatalf("debrowser: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = db.Migrate(ctx)
+	cancel()
+	if err != nil {
+		logger.Error("database migration failed", "error", err)
+		log.Fatalf("debrowser: %v", err)
+	}
+
+	appService, err := service.NewAppService(cfg, db, logger)
+	if err != nil {
+		logger.Error("load settings failed", "error", err)
+		log.Fatalf("debrowser: %v", err)
+	}
+
+	wailsApp := app.New(cfg, appService, logger, assets)
+	if err := wailsApp.Run(); err != nil {
+		logger.Error("application exited with error", "error", err)
+		log.Fatalf("debrowser: %v", err)
+	}
+}
