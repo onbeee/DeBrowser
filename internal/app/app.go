@@ -17,8 +17,6 @@ import (
 // New builds the Wails application around the given AppService. The assets
 // filesystem holds the embedded frontend build (frontend/dist).
 func New(cfg config.Config, appService *service.AppService, log *slog.Logger, assets fs.FS) *application.App {
-	_ = cfg // Window and service configuration is extended in later stages.
-
 	wailsApp := application.New(application.Options{
 		Name:        version.Name,
 		Description: "Local-first multi-profile browser manager",
@@ -27,6 +25,11 @@ func New(cfg config.Config, appService *service.AppService, log *slog.Logger, as
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
+		},
+		Windows: application.WindowsOptions{
+			// Portable mode: WebView2 must keep its user data inside the
+			// application folder, never in %APPDATA%\<exe>\EBWebView.
+			WebviewUserDataPath: cfg.Layout.WebView2,
 		},
 	})
 
