@@ -1,0 +1,92 @@
+version: '3'
+
+# Common tasks shared by the platform Taskfiles (trimmed to what DeBrowser
+# uses: frontend install/build, binding generation, icon generation).
+
+tasks:
+  go:mod:tidy:
+    summary: Runs `go mod tidy`
+    internal: true
+    run: once
+    cmds:
+      - go mod tidy
+
+  install:frontend:deps:
+    summary: Installs frontend dependencies with npm
+    run: once
+    dir: frontend
+    sources:
+      - package.json
+      - package-lock.json
+    generates:
+      - node_modules
+    preconditions:
+      - sh: npm version
+        msg: "npm is not installed. It is part of the Node.js installer: https://nodejs.org/en/download/"
+    cmds:
+      - npm install
+
+  generate:bindings:
+    summary: Generates TypeScript bindings for the Go services
+    run: once
+    deps:
+      - task: go:mod:tidy
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - frontend/bindings/**/*
+    cmds:
+      - wails3 generate bindings -f '{{.BUILD_FLAGS}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}} -ts -i
+
+  build:frontend:
+    summary: Builds the frontend project
+    run: once
+    dir: frontend
+    sources:
+      - "**/*"
+      - exclude: node_modules/**/*
+    generates:
+      - dist/**/*
+    deps:
+      - task: install:frontend:deps
+      - task: generate:bindings
+        vars:
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+          OBFUSCATED:
+            ref: .OBFUSCATED
+    cmds:
+      - npm run {{if eq .DEV "true"}}build:dev{{else}}build{{end}} -q
+    env:
+      PRODUCTION: '{{if eq .DEV "true"}}false{{else}}true{{end}}'
+
+  generate:icons:
+    summary: Generates the Windows .ico from build/appicon.png
+    run: once
+    dir: build
+    sources:
+      - "appicon.png"
+    generates:
+      - "windows/icon.ico"
+    preconditions:
+      - sh: test -f appicon.png
+        msg: "build/appicon.png is missing. Add a 1024x1024 PNG application icon before running the full packaged build (see docs/DEVELOPMENT.md)."
+    cmds:
+      # -macfilename "" disables the macOS icon output (Windows-only project).
+      - wails3 generate icons -input appicon.png -macfilename "" -windowsfilename windows/icon.ico
+
+  dev:frontend:
+    summary: Runs the frontend dev server
+    deps:
+      - task: install:frontend:deps
+    dir: frontend
+    cmds:
+      - npm run dev -- --port {{.VITE_PORT}} --strictPort
+
+  update:build-assets:
+    summary: Regenerates build assets from build/config.yml
+    dir: build
+    cmds:
+      - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
