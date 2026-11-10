@@ -14,29 +14,29 @@ export default function TopBar({ onRefreshStatus }: TopBarProps) {
   const current = NAV_ITEMS.find((item) => item.key === page);
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[#262b36] bg-[#13161d] px-5">
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-(--border) bg-(--chrome-bg) px-5">
       <h1 className="text-sm font-semibold">{current?.label ?? "DeBrowser"}</h1>
-      <span className="text-xs text-[#646c7e]">{current?.stage}</span>
+      <span className="text-xs text-(--text-faint)">{current?.stage}</span>
       <div className="flex-1" />
       <button
         onClick={onRefreshStatus}
-        className="flex items-center gap-2 rounded-md border border-[#2b3140] px-3 py-1.5 text-xs text-[#c6ccda] transition-colors hover:bg-[#1a1e27]"
-        title="Refresh backend status"
+        className="flex items-center gap-2 rounded-md border border-(--border-strong) px-3 py-1.5 text-xs text-(--text-dim) transition-colors hover:bg-(--hover-bg) hover:text-(--text-main)"
+        title="刷新后端状态"
       >
         <RefreshCw size={14} />
-        Refresh status
+        刷新状态
       </button>
       <button
         onClick={toggleConsole}
         className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors ${
           consoleOpen
-            ? "border-[#2f6fed] bg-[#1d2739] text-white"
-            : "border-[#2b3140] text-[#c6ccda] hover:bg-[#1a1e27]"
+            ? "border-(--accent) bg-(--accent-soft) text-(--text-main)"
+            : "border-(--border-strong) text-(--text-dim) hover:bg-(--hover-bg) hover:text-(--text-main)"
         }`}
-        title="Toggle console"
+        title="开关控制台"
       >
         <TerminalSquare size={14} />
-        Console
+        控制台
       </button>
     </header>
   );
