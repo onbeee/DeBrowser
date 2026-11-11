@@ -1,8 +1,17 @@
 // Package app assembles the Wails v3 application: services, the main
-// window and the periodic status event. It contains no business logic.
+// window and the background loops. It contains no business logic.
+//
+// Lifecycle: New creates a cancellable application context. Both
+// background loops (status events, activation watcher) run under that
+// context via internal/lifecycle. Run blocks until the Wails app
+// exits, then cancels the context and waits for every loop to drain
+// before returning — so when Run returns, no goroutine touches the
+// services or the database any more, and main can close resources in
+// a deterministic order.
 package app
 
 import (
+	"context"
 	"io/fs"
 	"log/slog"
 	"time"
@@ -10,18 +19,33 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"github.com/onbeee/DeBrowser/internal/config"
+	"github.com/onbeee/DeBrowser/internal/lifecycle"
 	"github.com/onbeee/DeBrowser/internal/service"
+	"github.com/onbeee/DeBrowser/internal/singleinstance"
 	"github.com/onbeee/DeBrowser/internal/version"
 )
 
-// New builds the Wails application around the given AppService. The assets
-// filesystem holds the embedded frontend build (frontend/dist).
-func New(cfg config.Config, appService *service.AppService, log *slog.Logger, assets fs.FS) *application.App {
-	wailsApp := application.New(application.Options{
+// App owns the Wails application and its background loops.
+type App struct {
+	wails  *application.App
+	window *application.WebviewWindow
+	cancel context.CancelFunc
+	loops  []<-chan struct{}
+	log    *slog.Logger
+}
+
+// New builds the Wails application around the given services. The
+// assets filesystem holds the embedded frontend build (frontend/dist).
+func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, log *slog.Logger, assets fs.FS) *App {
+	ctx, cancel := context.WithCancel(context.Background())
+	a := &App{cancel: cancel, log: log}
+
+	a.wails = application.New(application.Options{
 		Name:        version.Name,
 		Description: "Local-first multi-profile browser manager",
 		Services: []application.Service{
 			application.NewService(appService),
+			application.NewService(instanceService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -31,9 +55,14 @@ func New(cfg config.Config, appService *service.AppService, log *slog.Logger, as
 			// application folder, never in %APPDATA%\<exe>\EBWebView.
 			WebviewUserDataPath: cfg.Layout.WebView2,
 		},
+		OnShutdown: func() {
+			// Begin draining background work as soon as shutdown
+			// starts; Run completes the wait after Wails returns.
+			cancel()
+		},
 	})
 
-	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
+	a.window = a.wails.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            version.Name,
 		Width:            1280,
 		Height:           800,
@@ -44,15 +73,53 @@ func New(cfg config.Config, appService *service.AppService, log *slog.Logger, as
 	})
 
 	// Emit a fresh status snapshot on the typed event channel every
-	// 10 seconds so the frontend status bar stays live without polling.
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			wailsApp.Event.Emit(service.StatusEvent, appService.GetStatus())
+	// 10 seconds so the frontend status bar stays live without
+	// polling. The loop stops with the application context.
+	a.loops = append(a.loops, lifecycle.RunTicker(ctx, 10*time.Second, func() {
+		a.wails.Event.Emit(service.StatusEvent, appService.GetStatus())
+	}))
+
+	// Watch for activation signals from second launches: bring the
+	// existing window to the foreground instead of starting a new
+	// process (see internal/singleinstance).
+	activationFile := cfg.Layout.ActivationFile
+	a.loops = append(a.loops, lifecycle.RunTicker(ctx, 500*time.Millisecond, func() {
+		pending, err := singleinstance.ConsumeActivation(activationFile)
+		if err != nil {
+			log.Debug("activation signal check failed", "error", err)
+			return
 		}
-	}()
+		if pending {
+			a.focusWindow()
+		}
+	}))
 
 	log.Info("application assembled", "name", version.Name, "version", version.Version)
-	return wailsApp
+	return a
+}
+
+// focusWindow restores and focuses the main window (best effort).
+func (a *App) focusWindow() {
+	if a.window == nil {
+		return
+	}
+	if a.window.IsMinimised() {
+		a.window.Restore()
+	}
+	a.window.Show()
+	a.window.Focus()
+}
+
+// Run runs the application until it exits, then drains every
+// background loop before returning. Only after Run returns may the
+// caller close the database and other shared resources.
+func (a *App) Run() error {
+	err := a.wails.Run()
+	a.cancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	if !lifecycle.WaitAll(waitCtx, a.loops...) {
+		a.log.Warn("background loops did not stop within 5s of shutdown")
+	}
+	return err
 }
