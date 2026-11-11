@@ -40,6 +40,13 @@ func TestMoveRestoreWipeCycle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, "sub", "Preferences")); err != nil {
 		t.Errorf("content missing after restore: %v", err)
 	}
+	// Release the first quarantine's handle before the second
+	// move: on Windows a still-open handle to the directory would
+	// keep its later deletion pending (production code holds one
+	// Quarantine per operation and closes it the same way).
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	q2, err := MoveToQuarantine(profiles, target, ".q-2")
 	if err != nil {
