@@ -25,8 +25,13 @@ const (
 	fileFlagBackupSemantics   = 0x02000000
 	fileFlagOpenReparsePoint  = 0x00200000
 	deleteAccess              = 0x00010000
-	errAlreadyExists          = 183
-	errFileExists             = 80
+	// The verified handle must also drive the anchored wipe:
+	// FILE_LIST_DIRECTORY for handle-based enumeration and
+	// FILE_READ_ATTRIBUTES for identity checks.
+	fileListDirectoryAccess = 0x00000001
+	fileReadAttributes      = 0x00000080
+	errAlreadyExists        = 183
+	errFileExists           = 80
 )
 
 var procSetFileInfoByHandle = syscall.NewLazyDLL("kernel32.dll").NewProc("SetFileInformationByHandle")
@@ -114,7 +119,7 @@ func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, 
 		return nil, fmt.Errorf("%w: target's resolved parent %s is not inside profiles %s", ErrUnsafe, resolvedParent, cleanRoot)
 	}
 
-	targetHandle, err := openDirHandle(cleanTarget, deleteAccess)
+	targetHandle, err := openDirHandle(cleanTarget, deleteAccess|fileListDirectoryAccess|fileReadAttributes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open target: %v", ErrUnsafe, err)
 	}
@@ -218,14 +223,19 @@ func (q *Quarantine) Restore() error {
 	return nil
 }
 
-// Wipe deletes the quarantined tree with safedelete's
-// handle-verified traversal. Our own handle is closed first.
+// Wipe deletes the quarantined tree THROUGH the verified object
+// handle itself: the handle is handed to safedelete's anchored
+// engine and stays open for the whole wipe, so the object deleted
+// is provably the object MoveToQuarantine verified and renamed —
+// whatever happens to the profiles path (renamed root, junction
+// substitution, an impostor directory at the quarantine path)
+// cannot redirect the deletion. The root's own deletion completes
+// when Close releases the handle afterwards.
 func (q *Quarantine) Wipe() error {
-	if q.platform.handle != 0 {
-		_ = syscall.CloseHandle(q.platform.handle)
-		q.platform.handle = 0
+	if q.platform.handle == 0 {
+		return fmt.Errorf("%w: quarantine handle already released; cannot wipe %s", ErrUnsafe, q.Path())
 	}
-	return safedelete.RemoveTree(q.ProfilesDir, q.Path())
+	return safedelete.RemoveTreeFromHandle(q.platform.handle, q.Path())
 }
 
 // Close releases the object's handle.
