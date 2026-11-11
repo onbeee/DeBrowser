@@ -29,6 +29,15 @@ func RunTicker(ctx context.Context, interval time.Duration, fn func()) <-chan st
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// A tick and the cancellation can both be ready
+				// when the select wakes; Go then chooses randomly.
+				// Re-check the context so a cancellation that has
+				// already landed never starts a new callback —
+				// only a callback that began before cancellation
+				// may still be running, and it is allowed to finish.
+				if ctx.Err() != nil {
+					return
+				}
 				fn()
 			}
 		}
