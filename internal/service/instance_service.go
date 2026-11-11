@@ -355,6 +355,14 @@ func (s *InstanceService) validateProfileDir(dir string) (string, error) {
 	if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "\\") {
 		return "", fmt.Errorf("数据目录必须是相对路径")
 	}
+	// Profile directories are specified in slash form only. A
+	// backslash is a separator on Windows but a plain name
+	// character elsewhere, so the same spelling would name
+	// different locations on different systems — reject it
+	// outright, deterministically on every platform.
+	if strings.Contains(dir, "\\") {
+		return "", fmt.Errorf("数据目录必须使用正斜杠分隔")
+	}
 	clean := filepath.Clean(strings.TrimSpace(dir))
 	slash := filepath.ToSlash(clean)
 	if slash == "profiles" || !strings.HasPrefix(slash, "profiles/") {
