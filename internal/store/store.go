@@ -48,6 +48,14 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx *Store) error) error {
 	})
 }
 
+// NewID returns a random RFC 4122 version 4 UUID. It is exported so
+// the service layer can pre-generate an instance ID when derived data
+// (such as the default profile directory profiles/<id>) must be known
+// before the row is inserted.
+func NewID() (string, error) {
+	return newID()
+}
+
 // newID returns a random RFC 4122 version 4 UUID. IDs are generated in
 // the application so rows can be referenced before they are inserted.
 func newID() (string, error) {
