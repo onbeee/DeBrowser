@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -109,6 +111,118 @@ func TestIntermediateJunctionBeforeMoveRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(parked, "prof", "Preferences")); err != nil {
 		t.Errorf("real profile was touched: %v", err)
+	}
+}
+
+// Wipe boundary: after the move, an attacker tries to replace
+// the profiles root path with a junction to an outside directory
+// holding an impostor quarantine slot and a sentinel — BEFORE the
+// verified handle is released. Two platform outcomes are possible
+// and both are safe:
+//
+//   - Windows freezes the namespace above an open object handle,
+//     so the root rename itself fails (the same semantics the
+//     rename-window canary pins). The swap cannot be staged at
+//     all; the wipe then proceeds on the verified object.
+//   - If a platform allowed the rename, the junction+impostor
+//     staging completes — and the wipe, driven by the handle, must
+//     still delete ONLY the original object (now parked) and leave
+//     the impostor and sentinel untouched.
+//
+// Either way the test fails if outside data is harmed.
+func TestWipeAfterProfilesRootSwapAttempt(t *testing.T) {
+	base := t.TempDir()
+	profiles := filepath.Join(base, "profiles")
+	outside := t.TempDir()
+	target := filepath.Join(profiles, "prof")
+	writeFile(t, filepath.Join(target, "Preferences"), "user-data")
+	const slot = ".q-wipe"
+	writeFile(t, filepath.Join(outside, slot, "sentinel.txt"), "impostor")
+	writeFile(t, filepath.Join(outside, "keep.txt"), "precious")
+
+	q, err := MoveToQuarantine(profiles, target, slot)
+	if err != nil {
+		t.Fatalf("MoveToQuarantine: %v", err)
+	}
+	defer func() { _ = q.Close() }()
+
+	parked := filepath.Join(base, "profiles-real")
+	swapStaged := false
+	if err := os.Rename(profiles, parked); err == nil {
+		// Namespace allowed the rename: complete the attack
+		// staging with a junction at the original root path.
+		cmd := exec.Command("cmd", "/c", "mklink", "/J", profiles, outside)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			swapStaged = true
+		} else {
+			t.Logf("mklink after root rename failed: %v (%s)", err, out)
+		}
+	} else {
+		t.Logf("profiles root rename blocked while the quarantine handle is open (namespace freeze): %v", err)
+	}
+
+	if err := q.Wipe(); err != nil {
+		t.Fatalf("Wipe after root swap attempt: %v", err)
+	}
+	// The ORIGINAL object must be gone, wherever it lives now.
+	origSlot := filepath.Join(profiles, slot)
+	if swapStaged {
+		origSlot = filepath.Join(parked, slot)
+	}
+	if _, err := os.Stat(origSlot); !os.IsNotExist(err) {
+		t.Errorf("original quarantine object was not wiped (err=%v)", err)
+	}
+	if swapStaged {
+		if _, err := os.Stat(filepath.Join(outside, slot, "sentinel.txt")); err != nil {
+			t.Errorf("impostor quarantine at the junction target was wiped: %v", err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep.txt")); err != nil {
+		t.Errorf("outside sentinel was touched: %v", err)
+	}
+}
+
+// A wipe that cannot complete (a locked file inside the
+// quarantine) fails with an error naming the quarantine path, and
+// the data is retained for a successful retry — never silently
+// lost.
+func TestWipeFailureReportsQuarantinePath(t *testing.T) {
+	profiles := t.TempDir()
+	target := filepath.Join(profiles, "prof")
+	lockedRel := filepath.Join("sub", "locked.txt")
+	writeFile(t, filepath.Join(target, lockedRel), "user-data")
+
+	q, err := MoveToQuarantine(profiles, target, ".q-lock")
+	if err != nil {
+		t.Fatalf("MoveToQuarantine: %v", err)
+	}
+	defer func() { _ = q.Close() }()
+
+	lockedPath := filepath.Join(q.Path(), lockedRel)
+	lockPtr, err := syscall.UTF16PtrFromString(lockedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockHandle, err := syscall.CreateFile(lockPtr, syscall.GENERIC_READ, 0, nil, syscall.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatalf("lock file: %v", err)
+	}
+	err = q.Wipe()
+	_ = syscall.CloseHandle(lockHandle)
+	if err == nil {
+		t.Fatal("wipe with a locked file succeeded; want a reported failure")
+	}
+	if !strings.Contains(err.Error(), q.Path()) {
+		t.Errorf("wipe failure must name the residual quarantine path %s, got: %v", q.Path(), err)
+	}
+	if _, serr := os.Stat(lockedPath); serr != nil {
+		t.Errorf("quarantine data was silently lost after the failed wipe: %v", serr)
+	}
+	if err := q.Wipe(); err != nil {
+		t.Fatalf("retry after unlock: %v", err)
+	}
+	if _, err := os.Stat(q.Path()); !os.IsNotExist(err) {
+		t.Errorf("quarantine still exists after successful retry (err=%v)", err)
 	}
 }
 
