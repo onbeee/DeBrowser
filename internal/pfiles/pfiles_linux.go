@@ -20,6 +20,11 @@ import (
 type platformState struct {
 	rootFd   int
 	parentFd int
+	// dev/ino are the verified identity of the quarantined object,
+	// recorded at move time; Wipe requires the quarantine slot to
+	// still hold exactly this object before deleting anything.
+	dev uint64
+	ino uint64
 }
 
 // MoveToQuarantine moves the directory at target (which must lie
@@ -143,6 +148,8 @@ func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, 
 
 	q := &Quarantine{ProfilesDir: cleanRoot, Name: quarantineName, OriginalTarget: cleanTarget}
 	q.platform.rootFd = rootFd
+	q.platform.dev = uint64(before.Dev)
+	q.platform.ino = uint64(before.Ino)
 	if ownParent {
 		q.platform.parentFd = parentFd
 	} else {
@@ -168,9 +175,12 @@ func (q *Quarantine) Restore() error {
 }
 
 // Wipe deletes the quarantined tree through the pinned root fd
-// (safedelete's anchored traversal).
+// (safedelete's anchored traversal). The slot must still hold the
+// exact object whose identity was verified at move time: if a
+// different directory was swapped into the slot meanwhile, Wipe
+// refuses and deletes nothing.
 func (q *Quarantine) Wipe() error {
-	return safedelete.RemoveAt(q.platform.rootFd, q.Name)
+	return safedelete.RemoveVerifiedAt(q.platform.rootFd, q.Name, q.platform.dev, q.platform.ino)
 }
 
 // Close releases the pinned descriptors.
