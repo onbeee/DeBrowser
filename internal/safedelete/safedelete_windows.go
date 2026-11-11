@@ -18,8 +18,10 @@ import (
 //     and renamed during quarantine — or, for RemoveTree, opened
 //     once here and identity-checked through its final path).
 //   - Directory contents are enumerated FROM the directory handle
-//     with NtQueryDirectoryFile (FileIdBothDirectoryInformation),
-//     which yields each child's name, attributes and 64-bit file
+//     with GetFileInformationByHandleEx and the extended directory
+//     information classes (FileIdExtdDirectoryRestartInfo for the
+//     first call of a scan, FileIdExtdDirectoryInfo to continue),
+//     which yield each child's name, attributes and 128-bit file
 //     ID. FindFirstFile(path) and os.ReadDir are never used: they
 //     re-resolve path strings and their opens conflict with the
 //     DELETE access the traversal holds.
@@ -29,10 +31,20 @@ import (
 //     path string is re-resolved at any depth, and replacing the
 //     profiles root, the tree root's path, or any intermediate
 //     path component cannot redirect the traversal.
-//   - Before a child is touched, its handle's file index must
-//     equal the file ID the enumeration recorded for it. A swap
-//     between enumeration and open therefore aborts the wipe
-//     (fail closed) instead of deleting the substitute.
+//   - Before a child is touched, its handle's 128-bit identity
+//     (volume serial number + FileId, read back with
+//     GetFileInformationByHandleEx(FileIdInfo)) must equal the
+//     identity the enumeration recorded for it, on the same volume
+//     as its parent. A swap between enumeration and open therefore
+//     aborts the wipe (fail closed) instead of deleting the
+//     substitute. Where a filesystem cannot provide the extended
+//     classes or a 128-bit identity, the wipe refuses to run at
+//     all — it never degrades to a weaker check.
+//   - Child handles are opened WITHOUT FILE_SHARE_DELETE: while
+//     the wipe holds an object open, no other process can rename
+//     or move it out of the tree (an attempt fails with a sharing
+//     violation instead of silently relocating the object the
+//     handle refers to).
 //   - Reparse points are opened as link objects
 //     (FILE_OPEN_REPARSE_POINT) and deleted as links only; their
 //     targets are never enumerated or opened.
@@ -73,34 +85,39 @@ const (
 	fileOpenReparsePoint  = 0x00200000
 	objCaseInsensitive    = 0x00000040
 
-	// NtQueryDirectoryFile takes the NT FILE_INFORMATION_CLASS
-	// enum (MS-FSCC "File Information Classes"): the directory
-	// query classes are FileDirectoryInformation=1,
-	// FileFullDirectoryInformation=2, FileBothDirectoryInformation=3,
-	// FileNamesInformation=12, FileIdBothDirectoryInformation=37,
-	// FileIdFullDirectoryInformation=38. Do NOT confuse this enum
-	// with the Win32 FILE_INFO_BY_HANDLE_CLASS used by
-	// GetFileInformationByHandleEx / SetFileInformationByHandle
-	// (where FileIdBothDirectoryInfo is 10, FileRenameInfo is 3
-	// and FileDispositionInfo is 4): in the NT enum the value 10
-	// is FileRenameInformation, a SET class — passing it to this
-	// QUERY returns STATUS_INVALID_INFO_CLASS (0xC0000003), as
-	// observed on the Windows runner.
-	fileIdBothDirectoryInformation = 37
+	// GetFileInformationByHandleEx takes the Win32
+	// FILE_INFO_BY_HANDLE_CLASS enum (winbase.h) — a DIFFERENT
+	// enum from the NT FILE_INFORMATION_CLASS used by the NT
+	// native API; never mix the two families. The classes used
+	// here (documented in the GetFileInformationByHandleEx and
+	// FILE_ID_EXTD_DIR_INFO / FILE_ID_INFO references):
+	//   FileIdInfo                    = 18  (FILE_ID_INFO)
+	//   FileIdExtdDirectoryInfo       = 19  (FILE_ID_EXTD_DIR_INFO)
+	//   FileIdExtdDirectoryRestartInfo= 20  (same, restarts scan)
+	fileIdInfoClass                     = 18
+	fileIdExtdDirectoryInfoClass        = 19
+	fileIdExtdDirectoryRestartInfoClass = 20
+
+	// FILE_ID_EXTD_DIR_INFO fixed header size: all fields through
+	// the 16-byte FileId at offset 72, with FileName at offset 88.
+	extdDirInfoHeader = 88
+
+	// Win32 error returned by GetFileInformationByHandleEx when a
+	// directory scan is exhausted (or the directory is empty).
+	errorNoMoreFiles = 18 // ERROR_NO_MORE_FILES
 
 	statusSuccess        = 0x00000000
-	statusNoMoreFiles    = 0x80000006
 	statusObjectNameNotF = 0xC0000034
 )
 
 var (
 	ntdllDLL                  = syscall.NewLazyDLL("ntdll.dll")
 	procNtCreateFile          = ntdllDLL.NewProc("NtCreateFile")
-	procNtQueryDirectoryFile  = ntdllDLL.NewProc("NtQueryDirectoryFile")
 	procRtlNtStatusToDosError = ntdllDLL.NewProc("RtlNtStatusToDosError")
 	kernel32DLL               = syscall.NewLazyDLL("kernel32.dll")
 	procSetFileInfoByHandle   = kernel32DLL.NewProc("SetFileInformationByHandle")
 	procGetFinalPathByHandle  = kernel32DLL.NewProc("GetFinalPathNameByHandleW")
+	procGetFileInfoByHandleEx = kernel32DLL.NewProc("GetFileInformationByHandleEx")
 )
 
 // removeTree implements RemoveTree on Windows: the target is
@@ -169,12 +186,43 @@ func RemoveTreeFromHandle(root syscall.Handle, displayPath string) error {
 }
 
 // dirEntry is one enumerated child: the name as stored, its
-// attributes, and its 64-bit file ID — the identity the opened
-// child handle must match.
+// attributes, and its 128-bit file ID — the identity the opened
+// child handle must match (together with the parent directory's
+// volume serial number).
 type dirEntry struct {
 	name   string
 	attrs  uint32
-	fileID uint64
+	fileID [16]byte
+}
+
+// fileIdentity is a filesystem object's full identity on Windows:
+// the volume serial number plus its 128-bit file ID, as reported
+// by GetFileInformationByHandleEx(FileIdInfo) (FILE_ID_INFO:
+// VolumeSerialNumber uint64 at offset 0, FileId FILE_ID_128 at
+// offset 8, 24 bytes total).
+type fileIdentity struct {
+	volume uint64
+	id     [16]byte
+}
+
+// identityOf reads h's 128-bit identity. Any failure is fatal to
+// the caller: without a verifiable identity the wipe must not
+// proceed (no silent downgrade to name/attribute checks).
+func identityOf(h syscall.Handle) (fileIdentity, error) {
+	var buf [24]byte
+	r1, _, callErr := procGetFileInfoByHandleEx.Call(
+		uintptr(h),
+		uintptr(fileIdInfoClass),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+	)
+	if r1 == 0 {
+		return fileIdentity{}, fmt.Errorf("GetFileInformationByHandleEx(FileIdInfo): %w", callErr)
+	}
+	var id fileIdentity
+	id.volume = binary.LittleEndian.Uint64(buf[0:8])
+	copy(id.id[:], buf[8:24])
+	return id, nil
 }
 
 // wipeChildren deletes every entry of the directory behind dirH.
@@ -184,6 +232,13 @@ type dirEntry struct {
 // from the listing and anything that could not be deleted aborts
 // the wipe instead of being chased by path.
 func wipeChildren(dirH syscall.Handle, display string) error {
+	// The parent's own identity anchors the volume every child
+	// must live on; if the filesystem cannot provide it, no child
+	// identity can be proven and the wipe refuses to start.
+	parentID, err := identityOf(dirH)
+	if err != nil {
+		return fmt.Errorf("safedelete: identity of %s: %w", display, err)
+	}
 	const maxPasses = 4
 	for pass := 0; ; pass++ {
 		entries, err := enumerateFromHandle(dirH)
@@ -200,7 +255,7 @@ func wipeChildren(dirH syscall.Handle, display string) error {
 			HookAfterEnumerate(display)
 		}
 		for _, e := range entries {
-			if err := wipeEntry(dirH, e, filepath.Join(display, e.name)); err != nil {
+			if err := wipeEntry(dirH, parentID.volume, e, filepath.Join(display, e.name)); err != nil {
 				return err
 			}
 		}
@@ -209,10 +264,10 @@ func wipeChildren(dirH syscall.Handle, display string) error {
 
 // wipeEntry opens one enumerated child RELATIVE to its verified
 // parent handle, proves the opened object is the enumerated one
-// (file index equality), and deletes it — recursing first when it
-// is a real directory.
-func wipeEntry(parentH syscall.Handle, e dirEntry, display string) error {
-	if e.fileID == 0 {
+// (128-bit identity equality on the parent's volume), and deletes
+// it — recursing first when it is a real directory.
+func wipeEntry(parentH syscall.Handle, parentVolume uint64, e dirEntry, display string) error {
+	if e.fileID == ([16]byte{}) {
 		return fmt.Errorf("safedelete: %s: enumeration provided no file ID; cannot prove identity, refusing to delete (tree left at %s)", display, display)
 	}
 	h, vanished, err := openChildRelative(parentH, e)
@@ -230,12 +285,15 @@ func wipeEntry(parentH syscall.Handle, e dirEntry, display string) error {
 	if err := syscall.GetFileInformationByHandle(h, &info); err != nil {
 		return fmt.Errorf("safedelete: stat %s: %w", display, err)
 	}
-	openedID := uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
-	if openedID != e.fileID {
+	openedID, err := identityOf(h)
+	if err != nil {
+		return fmt.Errorf("safedelete: identity of %s: %w", display, err)
+	}
+	if openedID.volume != parentVolume || openedID.id != e.fileID {
 		// The name was swapped between enumeration and open: the
 		// object behind the handle is NOT the enumerated one. Fail
 		// closed — delete nothing, including not this substitute.
-		return fmt.Errorf("safedelete: %s: object identity changed during wipe (enumerated file ID %d, opened %d); refusing to delete, tree left in place", display, e.fileID, openedID)
+		return fmt.Errorf("safedelete: %s: object identity changed during wipe (enumerated file ID %x on volume %d, opened %x on volume %d); refusing to delete, tree left in place", display, e.fileID, parentVolume, openedID.id, openedID.volume)
 	}
 	if HookAfterOpenChild != nil {
 		HookAfterOpenChild(display)
@@ -262,66 +320,104 @@ func wipeEntry(parentH syscall.Handle, e dirEntry, display string) error {
 	return nil
 }
 
-// enumerateFromHandle lists dirH's children with
-// NtQueryDirectoryFile(FileIdBothDirectoryInformation), starting
-// a fresh scan. Entries deleted since a previous scan simply do
-// not appear.
+// enumerateFromHandle lists dirH's children FROM the handle with
+// GetFileInformationByHandleEx: the first call of a scan uses
+// FileIdExtdDirectoryRestartInfo (restarts the scan), subsequent
+// calls use FileIdExtdDirectoryInfo until the API reports
+// ERROR_NO_MORE_FILES. A scan of an empty directory ends the same
+// way on the first call, which is the ONLY way an empty result is
+// produced — any other failure (including filesystems that do not
+// support the extended classes) is an error, never an empty list.
+//
+// GetFileInformationByHandleEx does not report how many bytes it
+// wrote; the entry chain is self-terminating (the last entry's
+// NextEntryOffset is 0), and every field access is bounds-checked
+// against the buffer, so bytes beyond the chain are never read.
 func enumerateFromHandle(dirH syscall.Handle) ([]dirEntry, error) {
-	buf := make([]byte, 64*1024)
 	var entries []dirEntry
-	restart := uintptr(1)
+	class := uintptr(fileIdExtdDirectoryRestartInfoClass)
 	for {
-		var iosb ioStatusBlock
-		status, _ := ntCall(procNtQueryDirectoryFile,
+		buf := make([]byte, 64*1024)
+		r1, _, callErr := procGetFileInfoByHandleEx.Call(
 			uintptr(dirH),
-			0, 0, 0,
-			uintptr(unsafe.Pointer(&iosb)),
+			class,
 			uintptr(unsafe.Pointer(&buf[0])),
 			uintptr(len(buf)),
-			uintptr(fileIdBothDirectoryInformation),
-			0, // ReturnSingleEntry = FALSE
-			0, // FileName = NULL (all entries)
-			restart,
 		)
-		restart = 0
-		if status == statusNoMoreFiles {
-			return entries, nil
+		class = fileIdExtdDirectoryInfoClass
+		if r1 == 0 {
+			if callErr == syscall.Errno(errorNoMoreFiles) {
+				return entries, nil
+			}
+			return nil, fmt.Errorf("GetFileInformationByHandleEx(FileIdExtdDirectoryInfo): %w", callErr)
 		}
-		if status != statusSuccess {
-			return nil, fmt.Errorf("NtQueryDirectoryFile: %s", ntStatusError(status))
+		walked, err := parseExtdDirEntries(buf, &entries)
+		if err != nil {
+			return nil, err
 		}
-		n := int(iosb.Information)
-		if n == 0 || n > len(buf) {
-			return entries, nil
+		if walked == 0 {
+			// A successful call that yields no entry at all is not
+			// a valid scan state; refuse rather than mistake it
+			// for an empty directory.
+			return nil, fmt.Errorf("GetFileInformationByHandleEx: successful call returned no directory entries; refusing to treat the directory as empty")
 		}
-		chunk := buf[:n]
-		for {
-			if len(chunk) < 104 {
-				return nil, fmt.Errorf("NtQueryDirectoryFile: truncated directory entry")
-			}
-			next := int(binary.LittleEndian.Uint32(chunk[0:4]))
-			attrs := binary.LittleEndian.Uint32(chunk[56:60])
-			nameLen := int(binary.LittleEndian.Uint32(chunk[60:64])) // bytes
-			fileID := binary.LittleEndian.Uint64(chunk[96:104])
-			if 104+nameLen > len(chunk) {
-				return nil, fmt.Errorf("NtQueryDirectoryFile: entry name overruns buffer")
-			}
-			nameUTF16 := make([]uint16, nameLen/2)
-			for i := range nameUTF16 {
-				nameUTF16[i] = binary.LittleEndian.Uint16(chunk[104+2*i : 106+2*i])
-			}
-			name := syscall.UTF16ToString(nameUTF16)
-			if name != "." && name != ".." {
-				entries = append(entries, dirEntry{name: name, attrs: attrs, fileID: fileID})
-			}
-			if next == 0 {
-				break
-			}
-			if next < 104 || next > len(chunk) {
-				return nil, fmt.Errorf("NtQueryDirectoryFile: invalid entry offset %d", next)
-			}
-			chunk = chunk[next:]
+	}
+}
+
+// parseExtdDirEntries walks one buffer of FILE_ID_EXTD_DIR_INFO
+// records (Microsoft layout: NextEntryOffset@0, FileAttributes@56,
+// FileNameLength@60 in BYTES, EaSize@64, ReparsePointTag@68,
+// FileId@72 (16 bytes), FileName@88 as WCHAR[1]) and appends the
+// entries to out, skipping "." and "..". It returns how many
+// records were walked. Parsing is strict and overflow-safe: a
+// truncated header, an odd or over-long file name, an empty name,
+// or a NextEntryOffset that is too small, misaligned, or out of
+// the buffer is an error — nothing is silently skipped.
+func parseExtdDirEntries(buf []byte, out *[]dirEntry) (int, error) {
+	walked := 0
+	off := 0
+	for {
+		remaining := len(buf) - off
+		if remaining < extdDirInfoHeader {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: truncated directory entry header (%d bytes left)", remaining)
 		}
+		e := buf[off:]
+		next := binary.LittleEndian.Uint32(e[0:4])
+		attrs := binary.LittleEndian.Uint32(e[56:60])
+		nameLen := binary.LittleEndian.Uint32(e[60:64]) // bytes
+		if nameLen == 0 {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: directory entry with an empty file name")
+		}
+		if nameLen%2 != 0 {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: directory entry with odd file name length %d", nameLen)
+		}
+		if uint64(extdDirInfoHeader)+uint64(nameLen) > uint64(remaining) {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: entry name overruns buffer")
+		}
+		var fileID [16]byte
+		copy(fileID[:], e[72:88])
+		nameUTF16 := make([]uint16, nameLen/2)
+		for i := range nameUTF16 {
+			nameUTF16[i] = binary.LittleEndian.Uint16(e[extdDirInfoHeader+2*i : extdDirInfoHeader+2*i+2])
+		}
+		name := syscall.UTF16ToString(nameUTF16)
+		walked++
+		if name != "." && name != ".." {
+			*out = append(*out, dirEntry{name: name, attrs: attrs, fileID: fileID})
+		}
+		if next == 0 {
+			return walked, nil
+		}
+		if next < extdDirInfoHeader {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: invalid NextEntryOffset %d", next)
+		}
+		if next%8 != 0 {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: NextEntryOffset %d is not 8-byte aligned", next)
+		}
+		if uint64(next) > uint64(remaining) {
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: NextEntryOffset %d overruns buffer", next)
+		}
+		off += int(next)
 	}
 }
 
@@ -365,7 +461,7 @@ func openChildRelative(parentH syscall.Handle, e dirEntry) (h syscall.Handle, va
 		Buffer:        &nameUTF16[0],
 	}
 	oa := objectAttributes{
-		Length:        48,
+		Length:        uint32(unsafe.Sizeof(objectAttributes{})),
 		RootDirectory: parentH,
 		ObjectName:    &us,
 		Attributes:    objCaseInsensitive,
@@ -387,7 +483,15 @@ func openChildRelative(parentH syscall.Handle, e dirEntry) (h syscall.Handle, va
 		uintptr(unsafe.Pointer(&iosb)),
 		0, // AllocationSize
 		0, // FileAttributes
-		uintptr(syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE),
+		// ShareAccess deliberately EXCLUDES FILE_SHARE_DELETE:
+		// while this handle is open, no other process can rename
+		// or move the object (such an attempt fails with a sharing
+		// violation), so a verified object can never be relocated
+		// outside the tree behind the wipe's back and then deleted
+		// "by handle" at its new location. If an external handle
+		// already prevents this open, NtCreateFile fails and the
+		// wipe aborts (fail closed) with the tree left in place.
+		uintptr(syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE),
 		uintptr(fileOpen),
 		uintptr(options),
 		0, // EaBuffer
