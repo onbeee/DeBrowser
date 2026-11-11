@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -291,6 +292,45 @@ func TestPurgeAllowsIntermediateSymlinkStayingInside(t *testing.T) {
 	}
 	if _, err := os.Stat(instDir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("resolved inside dir still exists (err=%v)", err)
+	}
+}
+
+func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	created, err := svc.CreateInstance(CreateInstanceInput{Name: "可恢复"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	profileDir := filepath.Join(cfg.Layout.Data, filepath.FromSlash(created.UserDataDir))
+	marker := filepath.Join(profileDir, "Preferences")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("user-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Inject a database failure AFTER the quarantine rename: the
+	// operation must abort with profile and record both intact.
+	svc.deleteRecord = func(ctx context.Context, id string) error {
+		return errors.New("injected database failure")
+	}
+	if err := svc.DeleteInstanceAndProfile(created.ID); err == nil {
+		t.Fatal("purge with failing record delete succeeded, want error")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("profile was not restored after record-delete failure: %v", err)
+	}
+	if _, err := svc.GetInstance(created.ID); err != nil {
+		t.Errorf("metadata missing after aborted purge: %v", err)
+	}
+	entries, err := os.ReadDir(cfg.Layout.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".debrowser-quarantine-") {
+			t.Errorf("quarantine leftover after restore: %s", e.Name())
+		}
 	}
 }
 
