@@ -50,10 +50,26 @@ export function DeleteInstance(id: string): $CancellablePromise<void> {
 /**
  * DeleteInstanceAndProfile is the explicit, destructive counterpart
  * of DeleteInstance: it removes the profile directory AND the
- * metadata. Safety rules, all enforced before anything is removed:
- * the target must resolve strictly inside the layout's profiles
- * directory (never the profiles root itself, never an escaping or
- * absolute path), and a persisted "running" instance is refused.
+ * metadata. It is structured so no failure loses data silently:
+ * 
+ *  1. The stored path is proven safe (verifiedProfileTarget: the
+ *     directory itself is not a link, and its fully resolved real
+ *     path lies strictly inside the profiles directory).
+ *  2. The directory is RENAMED into a quarantine slot directly
+ *     under profiles (same volume, atomic). Renaming a directory
+ *     never follows it; from here on the data sits at a path this
+ *     process alone chose, so the check/use gap is closed: whatever
+ *     the anchored wipe later removes can only be what the rename
+ *     actually moved.
+ *  3. The database record is deleted. If that fails, the quarantine
+ *     directory is renamed BACK — the operation aborts with the
+ *     profile and the record both intact.
+ *  4. Only with the record gone is the quarantine tree wiped, by
+ *     internal/safedelete's anchored traversal (never follows links
+ *     out of the tree). A wipe failure leaves the data in the
+ *     quarantine slot — reported in the error, never silently lost.
+ * 
+ * A persisted "running" instance is refused before any of this.
  */
 export function DeleteInstanceAndProfile(id: string): $CancellablePromise<void> {
     return $Call.ByID(1852242710, id);
