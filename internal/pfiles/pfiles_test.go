@@ -56,6 +56,13 @@ func TestMoveRestoreWipeCycle(t *testing.T) {
 	if err := q2.Wipe(); err != nil {
 		t.Fatalf("Wipe: %v", err)
 	}
+	// The root's deletion completes when its verified handle is
+	// closed (RemoveTreeFromHandle's contract); only then is the
+	// path expected to be gone — probing it while the handle is
+	// still open yields Access Denied on the delete-pending object.
+	if err := q2.Close(); err != nil {
+		t.Fatalf("Close after wipe: %v", err)
+	}
 	if _, err := os.Stat(q2.Path()); !os.IsNotExist(err) {
 		t.Errorf("quarantine still exists after wipe (err=%v)", err)
 	}
