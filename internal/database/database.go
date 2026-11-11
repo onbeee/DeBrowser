@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,7 +66,11 @@ func Open(path string) (*DB, error) {
 //   - busy_timeout=5000: brief lock contention (for example a backup
 //     snapshot) waits instead of failing with SQLITE_BUSY.
 func OpenWithOptions(path string, opts Options) (*DB, error) {
-	dsn := "file:" + filepath.ToSlash(path) +
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("database: resolve %q: %w", path, err)
+	}
+	dsn := sqliteFileURI(abs) +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(1)" +
@@ -82,7 +87,33 @@ func OpenWithOptions(path string, opts Options) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("database: ping %q: %w", path, err)
 	}
-	return &DB{sql: sqlDB, path: path, backupDir: opts.BackupDir}, nil
+	return &DB{sql: sqlDB, path: abs, backupDir: opts.BackupDir}, nil
+}
+
+// sqliteFileURI builds a SQLite file URI for path with the path
+// percent-encoded. Concatenating "file:" + path directly would let
+// URI-special characters in a directory name corrupt the target: a
+// '#' would start a fragment and silently open a different (truncated)
+// file, a '?' would start a query, and a '%' would be misread as an
+// escape. A portable application folder can legitimately contain any
+// of these, so the path always goes through net/url encoding. Windows
+// drive paths (C:\...) and UNC paths (\\server\share\...) are handled.
+func sqliteFileURI(path string) string {
+	slash := filepath.ToSlash(path)
+	u := url.URL{Scheme: "file"}
+	switch {
+	case strings.HasPrefix(slash, "//"):
+		// UNC path: //server/share/... — the server is the URI host.
+		host, tail, _ := strings.Cut(strings.TrimPrefix(slash, "//"), "/")
+		u.Host = host
+		u.Path = "/" + tail
+	case strings.HasPrefix(slash, "/"):
+		u.Path = slash
+	default:
+		// Windows drive path (C:/...).
+		u.Path = "/" + slash
+	}
+	return u.String()
 }
 
 // Path returns the database file location (from internal/paths in
@@ -294,7 +325,7 @@ func (db *DB) snapshotTo(ctx context.Context, target string) error {
 		_ = os.Remove(target)
 		return fmt.Errorf("database: snapshot: %w", err)
 	}
-	check, err := sql.Open("sqlite", "file:"+filepath.ToSlash(target)+"?mode=ro")
+	check, err := sql.Open("sqlite", sqliteFileURI(target)+"?mode=ro")
 	if err != nil {
 		_ = os.Remove(target)
 		return fmt.Errorf("database: open backup for verification: %w", err)
