@@ -127,6 +127,26 @@ func (s *Store) SetInstanceStatus(ctx context.Context, id string, status model.I
 	return nil
 }
 
+// ReconcileInstanceStatuses resets every instance persisted as
+// "running" back to "stopped" and returns how many rows changed. It
+// runs once at application startup: with the app-level single
+// instance guarantee, a "running" row found at startup can only be a
+// leftover from a previous process that no longer exists (there is
+// no instance process manager yet — Stage 3's runtime states come
+// from the reconciliation, later stages will own live transitions).
+func (s *Store) ReconcileInstanceStatuses(ctx context.Context) (int64, error) {
+	res, err := s.q.ExecContext(ctx, `UPDATE browser_instances SET
+		status = 'stopped', updated_at = datetime('now') WHERE status = 'running'`)
+	if err != nil {
+		return 0, fmt.Errorf("store: reconcile instance statuses: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: reconcile instance statuses: %w", err)
+	}
+	return n, nil
+}
+
 // DeleteInstance removes an instance. Its bookmarks are deleted with
 // it (schema ON DELETE CASCADE); the profile directory on disk is the
 // caller's concern (Stage 3) and is not touched here.
