@@ -4,7 +4,6 @@ package safedelete
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -75,12 +74,12 @@ func removeEntry(path string, parentFinal string) error {
 		}
 		return nil
 	}
-	entries, err := os.ReadDir(path)
+	names, err := enumerateNames(path)
 	if err != nil {
 		return fmt.Errorf("safedelete: read dir %s: %w", path, err)
 	}
-	for _, entry := range entries {
-		if err := removeEntry(filepath.Join(path, entry.Name()), final); err != nil {
+	for _, name := range names {
+		if err := removeEntry(filepath.Join(path, name), final); err != nil {
 			return err
 		}
 	}
@@ -95,6 +94,37 @@ const (
 	fileFlagOpenReparsePoint = 0x00200000
 	deleteAccess             = 0x00010000
 )
+
+// enumerateNames lists a directory's entry names with
+// FindFirstFile/FindNextFile. os.ReadDir cannot be used here: the
+// directory is already open with DELETE access, and a second open
+// whose share mode lacks FILE_SHARE_DELETE (os.Open's mode) fails
+// with a sharing violation. FindFirstFile's own open shares delete.
+func enumerateNames(dir string) ([]string, error) {
+	pattern, err := syscall.UTF16PtrFromString(filepath.Join(dir, "*"))
+	if err != nil {
+		return nil, err
+	}
+	var data syscall.Win32finddata
+	handle, err := syscall.FindFirstFile(pattern, &data)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = syscall.FindClose(handle) }()
+	var names []string
+	for {
+		name := syscall.UTF16ToString(data.FileName[:])
+		if name != "." && name != ".." {
+			names = append(names, name)
+		}
+		if err := syscall.FindNextFile(handle, &data); err != nil {
+			if err == syscall.ERROR_NO_MORE_FILES {
+				return names, nil
+			}
+			return nil, err
+		}
+	}
+}
 
 // openObject opens path for deletion without following it if it is
 // a reparse point.
