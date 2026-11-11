@@ -54,6 +54,23 @@ import (
 // If identity cannot be established at any step (no file ID, an
 // ID mismatch, an unexpected NTSTATUS), the wipe stops and reports
 // the tree's recorded path; whatever remains is left in place.
+//
+// Scope of the identity guarantee (stated precisely, per the
+// Microsoft documentation for BY_HANDLE_FILE_INFORMATION /
+// FILE_ID_INFO): a file ID plus volume serial uniquely identifies
+// a file on a computer and is the documented way to decide
+// whether two handles name the same file; on NTFS an object keeps
+// its file ID until it is deleted. File IDs are NOT permanent
+// credentials — the documentation states file systems are free to
+// reuse them, so an ID can resurface on a different object after
+// the original is deleted. The check here is therefore a
+// CONTEMPORANEOUS one: it proves the object opened a moment after
+// enumeration is the object enumeration saw. Defeating it would
+// require deleting the enumerated object AND recreating a
+// same-named object that the filesystem assigns the identical
+// 128-bit ID, all inside the enumerate→open window; once the
+// object is open, the share modes above close the window for
+// good. Anything short of that proof fails closed.
 
 // HookAfterEnumerate, when non-nil, runs after a directory's
 // entries have been enumerated from its handle and before any of
@@ -372,7 +389,12 @@ func enumerateFromHandle(dirH syscall.Handle) ([]dirEntry, error) {
 // records were walked. Parsing is strict and overflow-safe: a
 // truncated header, an odd or over-long file name, an empty name,
 // or a NextEntryOffset that is too small, misaligned, or out of
-// the buffer is an error — nothing is silently skipped.
+// the buffer is an error — nothing is silently skipped. A
+// non-terminal record must additionally CONTAIN its own file
+// name: NextEntryOffset >= 88 + FileNameLength, so a name can
+// never run past its record into the next one (overlapping
+// records); the terminal record's name must end inside the
+// buffer, which the overrun check above enforces.
 func parseExtdDirEntries(buf []byte, out *[]dirEntry) (int, error) {
 	walked := 0
 	off := 0
@@ -407,6 +429,13 @@ func parseExtdDirEntries(buf []byte, out *[]dirEntry) (int, error) {
 		}
 		if next == 0 {
 			return walked, nil
+		}
+		if uint64(next) < uint64(extdDirInfoHeader)+uint64(nameLen) {
+			// The record's own file name would run past the start
+			// of the next record: the records overlap, which no
+			// well-formed scan produces. All arithmetic is uint64,
+			// so a near-2^32 FileNameLength cannot wrap this check.
+			return walked, fmt.Errorf("GetFileInformationByHandleEx: NextEntryOffset %d cuts through the record's own file name (header %d + name %d bytes); records would overlap", next, extdDirInfoHeader, nameLen)
 		}
 		if next < extdDirInfoHeader {
 			return walked, fmt.Errorf("GetFileInformationByHandleEx: invalid NextEntryOffset %d", next)
