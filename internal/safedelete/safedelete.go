@@ -14,10 +14,17 @@
 //     pin inodes, so namespace swaps cannot redirect the walk;
 //     symlinks met anywhere are unlinked themselves, never
 //     followed.
-//   - Windows: every directory is verified through its handle's
-//     final path (GetFinalPathNameByHandle) before its children are
-//     touched; an entry that resolves anywhere other than its own
-//     path is a reparse point and is removed as a link object only.
+//   - Windows: the traversal is handle-anchored end to end.
+//     Children are enumerated FROM a directory handle
+//     (NtQueryDirectoryFile, with each child's 64-bit file ID) and
+//     opened RELATIVE to that handle (NtCreateFile RootDirectory),
+//     so no path string is ever re-resolved at any depth; a child
+//     whose opened file index differs from its enumerated file ID
+//     aborts the wipe. Reparse points are deleted as link objects
+//     only. RemoveTreeFromHandle lets a caller (internal/pfiles)
+//     hand over an already-verified root handle, keeping the
+//     object identity chain continuous from verification to
+//     deletion.
 //   - Darwin (development only): the same verified-traversal model
 //     as Windows, with EvalSymlinks as the resolver.
 //
