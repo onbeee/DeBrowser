@@ -13,20 +13,42 @@
 //     file descriptor (openat with O_NOFOLLOW, unlinkat). Open fds
 //     pin inodes, so namespace swaps cannot redirect the walk;
 //     symlinks met anywhere are unlinked themselves, never
-//     followed.
+//     followed. Each entry's (dev, ino) identity is captured
+//     before it is touched and re-verified immediately before it
+//     is unlinked, so a substituted object aborts the wipe.
 //   - Windows: the traversal is handle-anchored end to end.
 //     Children are enumerated FROM a directory handle
-//     (NtQueryDirectoryFile, with each child's 64-bit file ID) and
-//     opened RELATIVE to that handle (NtCreateFile RootDirectory),
-//     so no path string is ever re-resolved at any depth; a child
-//     whose opened file index differs from its enumerated file ID
-//     aborts the wipe. Reparse points are deleted as link objects
-//     only. RemoveTreeFromHandle lets a caller (internal/pfiles)
-//     hand over an already-verified root handle, keeping the
-//     object identity chain continuous from verification to
-//     deletion.
+//     (GetFileInformationByHandleEx with the extended directory
+//     classes, yielding each child's 128-bit file ID) and opened
+//     RELATIVE to that handle (NtCreateFile RootDirectory), so no
+//     path string is ever re-resolved at any depth; a child whose
+//     opened 128-bit identity (volume serial + FileId, via
+//     FileIdInfo) differs from its enumerated identity aborts the
+//     wipe. Child handles are opened without FILE_SHARE_DELETE,
+//     so an opened object cannot be renamed out of the tree by
+//     another process while the wipe holds it. Reparse points are
+//     deleted as link objects only. RemoveTreeFromHandle lets a
+//     caller (internal/pfiles) hand over an already-verified root
+//     handle, keeping the object identity chain continuous from
+//     verification to deletion.
 //   - Darwin (development only): the same verified-traversal model
 //     as Windows, with EvalSymlinks as the resolver.
+//
+// Guarantee boundary (Linux): descriptor-anchored deletion follows
+// VERIFIED OBJECTS (inodes), and identity is re-verified before
+// every unlink — an object that was never verified inside the
+// boundary cannot be deleted, and a substituted name aborts the
+// wipe. Linux has no share-mode equivalent, though: renaming an
+// already-open directory is always permitted, so a same-UID
+// process that can rename entries inside the tree can move a
+// verified object out mid-wipe, and deletion then follows that
+// object (its contents are deleted through its pinned fd wherever
+// it now sits). Likewise unlinkat is name-based — there is no
+// delete-by-fd — so a final single-syscall window remains between
+// the last identity check and the unlink itself. Both residuals
+// require a hostile same-UID process with write access inside the
+// profile tree, which is outside this application's single-user
+// desktop threat model; Windows closes both via share modes.
 //
 // The contract of RemoveTree: target must be strictly inside root
 // (both absolute). It refuses anything it cannot anchor safely.
