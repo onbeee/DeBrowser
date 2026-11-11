@@ -70,7 +70,7 @@ func OpenWithOptions(path string, opts Options) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database: resolve %q: %w", path, err)
 	}
-	dsn := sqliteFileURI(abs) +
+	dsn := FileURI(abs) +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(1)" +
@@ -90,15 +90,17 @@ func OpenWithOptions(path string, opts Options) (*DB, error) {
 	return &DB{sql: sqlDB, path: abs, backupDir: opts.BackupDir}, nil
 }
 
-// sqliteFileURI builds a SQLite file URI for path with the path
-// percent-encoded. Concatenating "file:" + path directly would let
+// FileURI builds a SQLite file URI for path with the path
+// percent-encoded. It is the single URI constructor for every SQLite
+// open in the application (the database package itself and the legacy
+// data migration), so path encoding can never drift between callers. Concatenating "file:" + path directly would let
 // URI-special characters in a directory name corrupt the target: a
 // '#' would start a fragment and silently open a different (truncated)
 // file, a '?' would start a query, and a '%' would be misread as an
 // escape. A portable application folder can legitimately contain any
 // of these, so the path always goes through net/url encoding. Windows
 // drive paths (C:\...) and UNC paths (\\server\share\...) are handled.
-func sqliteFileURI(path string) string {
+func FileURI(path string) string {
 	slash := filepath.ToSlash(path)
 	u := url.URL{Scheme: "file"}
 	switch {
@@ -325,7 +327,7 @@ func (db *DB) snapshotTo(ctx context.Context, target string) error {
 		_ = os.Remove(target)
 		return fmt.Errorf("database: snapshot: %w", err)
 	}
-	check, err := sql.Open("sqlite", sqliteFileURI(target)+"?mode=ro")
+	check, err := sql.Open("sqlite", FileURI(target)+"?mode=ro")
 	if err != nil {
 		_ = os.Remove(target)
 		return fmt.Errorf("database: open backup for verification: %w", err)
