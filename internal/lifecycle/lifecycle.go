@@ -17,7 +17,19 @@ import (
 //
 // fn runs on the loop goroutine; a slow fn simply delays later ticks
 // (time.Ticker semantics). Cancelling ctx while fn is in flight does
-// not interrupt fn, but no further tick is started.
+// not interrupt fn; it runs to completion.
+//
+// The cancellation contract is observation-based, stated exactly:
+// the loop starts fn only when cancellation has not been observed
+// at the moment it decides. A cancellation that lands concurrently
+// with that decision is indistinguishable from one that lands
+// during fn itself — either way, that one callback may run to
+// completion, and no callback starts after the loop has observed
+// the cancellation. No stronger physical-time atomicity is claimed
+// or needed: the load-bearing guarantee for callers is the done
+// channel — once it closes, fn has finished and will never run
+// again, so resources fn touched may be released after observing
+// it (see WaitForever).
 func RunTicker(ctx context.Context, interval time.Duration, fn func()) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
@@ -31,10 +43,13 @@ func RunTicker(ctx context.Context, interval time.Duration, fn func()) <-chan st
 			case <-ticker.C:
 				// A tick and the cancellation can both be ready
 				// when the select wakes; Go then chooses randomly.
-				// Re-check the context so a cancellation that has
-				// already landed never starts a new callback —
-				// only a callback that began before cancellation
-				// may still be running, and it is allowed to finish.
+				// Re-check the context: if cancellation has been
+				// OBSERVED by this point, start no callback. A
+				// cancellation racing this very check is treated
+				// as landing during the callback (which is then
+				// allowed to finish) — callers must rely on the
+				// done channel, never on this check alone, before
+				// releasing the resources fn uses.
 				if ctx.Err() != nil {
 					return
 				}
