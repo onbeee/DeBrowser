@@ -26,9 +26,9 @@ Development follows AGENTS.md section 9: small, testable stages, one Pull Reques
 
 ## Stage 2 — SQLite database and migrations
 
-- Full business schema (instances, proxies, kernels, bookmarks) as versioned migrations
-- Repository/data-access code per module, transactional writes, indexes
-- Settings persistence on top of the Stage 1 `app_settings` table
+- Core schema (proxies, browser instances, bookmarks) as versioned migrations 0002/0003 on top of the Stage 1 foundation; the kernels table lands with kernel management in Stage 5
+- Repository layer (`internal/store`) over shared `internal/model` types, a `WithTx` transaction entry for cross-repository atomic work, and `synchronous=FULL`
+- Verified pre-migration backups (`VACUUM INTO`) that abort the upgrade when they fail
 
 ## Stage 3 — Browser kernel detection and instance lifecycle
 
