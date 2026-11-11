@@ -63,15 +63,13 @@ func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, 
 		return nil, fmt.Errorf("%w: resolve profiles root: %v", ErrUnsafe, err)
 	}
 	cleanRoot = resolvedRoot
-	// A lexical Rel is only a coarse gate: when it succeeds AND
-	// escapes, refuse immediately. When it "fails" merely because
-	// the two paths use different name forms (8.3 vs long), the
-	// authoritative containment proof happens below on resolved
-	// paths (resolvedParent within resolvedRoot, resolvedTarget ==
-	// resolvedParent\name).
-	if rel, rerr := filepath.Rel(profilesDir, cleanTarget); rerr == nil && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
-		return nil, fmt.Errorf("%w: target %s is not inside profiles %s", ErrUnsafe, target, profilesDir)
-	}
+	// NOTE: no lexical Rel gate here. Between mixed name forms
+	// (8.3 short vs long) a lexical Rel reports ".." escapes for
+	// paths that are plainly inside, so it cannot distinguish a
+	// real escape from a form mismatch. The authoritative
+	// containment proof happens below, entirely on resolved paths:
+	// resolvedParent must lie within resolvedRoot, and the
+	// target's final path must equal <resolvedParent>\<name>.
 
 	rootHandle, err := openDirHandle(cleanRoot, 0)
 	if err != nil {
@@ -147,6 +145,19 @@ func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, 
 	if err := renameByHandle(targetHandle, quarantinePath); err != nil {
 		return fail(err)
 	}
+	// Post-move proof: the destination path itself was resolved by
+	// the OS at rename time, so verify through the handle that the
+	// object really landed at the quarantine slot (a component of
+	// the destination swapped mid-rename would show up here). If
+	// not, move it back and refuse.
+	landed, err := finalPathOf(targetHandle)
+	if err != nil {
+		return fail(fmt.Errorf("pfiles: resolve moved object: %w", err))
+	}
+	if !strings.EqualFold(landed, quarantinePath) {
+		_ = renameByHandle(targetHandle, cleanTarget)
+		return fail(fmt.Errorf("%w: moved object landed at %s, expected %s", ErrUnsafe, landed, quarantinePath))
+	}
 
 	q := &Quarantine{ProfilesDir: cleanRoot, Name: quarantineName, OriginalTarget: cleanTarget}
 	q.platform.handle = targetHandle
@@ -165,8 +176,20 @@ func (q *Quarantine) Restore() error {
 	if err != nil {
 		return fmt.Errorf("%w: reopen parent for restore: %v", ErrUnsafe, err)
 	}
+	parentInfo, ierr := fileInfo(parentHandle)
 	resolvedParent, ferr := finalPathOf(parentHandle)
 	_ = syscall.CloseHandle(parentHandle)
+	if ierr != nil {
+		return fmt.Errorf("pfiles: stat parent for restore: %w", ierr)
+	}
+	// The parent was a real directory at move time. If it now
+	// carries the reparse attribute it has been swapped for a link
+	// — GetFinalPathNameByHandle on the link's own handle returns
+	// the link's location and would NOT reveal this, so the
+	// attribute check is the authoritative one. Fail closed.
+	if parentInfo.FileAttributes&fileAttributeReparsePoint != 0 {
+		return fmt.Errorf("%w: original parent is now a reparse point; profile left in quarantine %s", ErrUnsafe, q.Path())
+	}
 	if ferr != nil {
 		return fmt.Errorf("pfiles: resolve parent for restore: %w", ferr)
 	}
@@ -176,7 +199,19 @@ func (q *Quarantine) Restore() error {
 	if HookBeforeRename != nil {
 		HookBeforeRename()
 	}
-	return renameByHandle(q.platform.handle, q.OriginalTarget)
+	if err := renameByHandle(q.platform.handle, q.OriginalTarget); err != nil {
+		return err
+	}
+	// Same post-move proof as MoveToQuarantine.
+	landed, err := finalPathOf(q.platform.handle)
+	if err != nil {
+		return fmt.Errorf("pfiles: resolve restored object: %w", err)
+	}
+	if !strings.EqualFold(landed, q.OriginalTarget) {
+		_ = renameByHandle(q.platform.handle, q.Path())
+		return fmt.Errorf("%w: restored object landed at %s, expected %s; moved back to quarantine %s", ErrUnsafe, landed, q.OriginalTarget, q.Path())
+	}
+	return nil
 }
 
 // Wipe deletes the quarantined tree with safedelete's
