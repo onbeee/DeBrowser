@@ -12,6 +12,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/model"
+	"github.com/onbeee/DeBrowser/internal/pfiles"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
 
@@ -331,6 +332,53 @@ func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".debrowser-quarantine-") {
 			t.Errorf("quarantine leftover after restore: %s", e.Name())
 		}
+	}
+}
+
+func TestPurgeWipeFailureReportsQuarantine(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	created, err := svc.CreateInstance(CreateInstanceInput{Name: "清理失败"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	profileDir := filepath.Join(cfg.Layout.Data, filepath.FromSlash(created.UserDataDir))
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "Preferences"), []byte("user-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The record deletion succeeds but the wipe fails: the error
+	// must name the residual quarantine path, and the data must
+	// still be there — never silently lost.
+	svc.wipeQuarantine = func(q *pfiles.Quarantine) error {
+		return errors.New("injected wipe failure")
+	}
+	err = svc.DeleteInstanceAndProfile(created.ID)
+	if err == nil {
+		t.Fatal("purge with failing wipe succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), ".debrowser-quarantine-") {
+		t.Errorf("error does not name the quarantine path: %v", err)
+	}
+	if _, err := svc.GetInstance(created.ID); err == nil {
+		t.Error("record should be gone after a successful record deletion")
+	}
+	entries, err := os.ReadDir(cfg.Layout.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".debrowser-quarantine-") {
+			found = true
+			if _, err := os.Stat(filepath.Join(cfg.Layout.Profiles, e.Name(), "Preferences")); err != nil {
+				t.Errorf("profile data missing from the reported quarantine slot: %v", err)
+			}
+		}
+	}
+	if !found {
+		t.Error("no quarantine slot left behind after the failed wipe")
 	}
 }
 
