@@ -73,7 +73,20 @@ const (
 	fileOpenReparsePoint  = 0x00200000
 	objCaseInsensitive    = 0x00000040
 
-	fileIdBothDirectoryInformation = 10
+	// NtQueryDirectoryFile takes the NT FILE_INFORMATION_CLASS
+	// enum (MS-FSCC "File Information Classes"): the directory
+	// query classes are FileDirectoryInformation=1,
+	// FileFullDirectoryInformation=2, FileBothDirectoryInformation=3,
+	// FileNamesInformation=12, FileIdBothDirectoryInformation=37,
+	// FileIdFullDirectoryInformation=38. Do NOT confuse this enum
+	// with the Win32 FILE_INFO_BY_HANDLE_CLASS used by
+	// GetFileInformationByHandleEx / SetFileInformationByHandle
+	// (where FileIdBothDirectoryInfo is 10, FileRenameInfo is 3
+	// and FileDispositionInfo is 4): in the NT enum the value 10
+	// is FileRenameInformation, a SET class — passing it to this
+	// QUERY returns STATUS_INVALID_INFO_CLASS (0xC0000003), as
+	// observed on the Windows runner.
+	fileIdBothDirectoryInformation = 37
 
 	statusSuccess        = 0x00000000
 	statusNoMoreFiles    = 0x80000006
