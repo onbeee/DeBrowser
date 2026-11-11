@@ -32,7 +32,7 @@ func testService(t *testing.T) *AppService {
 	if err != nil {
 		t.Fatalf("service: %v", err)
 	}
-	t.Cleanup(func() { _ = svc.ServiceShutdown() })
+	t.Cleanup(func() { _ = db.Close() })
 	return svc
 }
 
