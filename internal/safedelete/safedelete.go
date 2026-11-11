@@ -34,6 +34,16 @@
 //   - Darwin (development only): the same verified-traversal model
 //     as Windows, with EvalSymlinks as the resolver.
 //
+// Guarantee boundary (Windows identity): the 128-bit file ID
+// check is contemporaneous — it proves the object opened just
+// after enumeration is the object enumeration saw (on NTFS an
+// object keeps its file ID until deleted). Microsoft documents
+// that file systems may reuse file IDs after deletion, so the ID
+// is not a permanent, cross-deletion object credential and is
+// never used as one here; the enumerate→open window is the whole
+// exposure, and the no-FILE_SHARE_DELETE opens close it once the
+// object is held.
+//
 // Guarantee boundary (Linux): descriptor-anchored deletion follows
 // VERIFIED OBJECTS (inodes), and identity is re-verified before
 // every unlink — an object that was never verified inside the
