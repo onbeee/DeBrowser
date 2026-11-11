@@ -3,7 +3,7 @@ import { NAV_ITEMS } from "../components/layout/navItems";
 import type { PageKey } from "../stores/useAppStore";
 
 interface PlannedPageProps {
-  page: Exclude<PageKey, "overview" | "settings">;
+  page: Exclude<PageKey, "overview" | "settings" | "instances">;
 }
 
 /**
