@@ -202,14 +202,18 @@ func (q *Quarantine) Restore() error {
 	if err := renameByHandle(q.platform.handle, q.OriginalTarget); err != nil {
 		return err
 	}
-	// Same post-move proof as MoveToQuarantine.
+	// Same post-move proof as MoveToQuarantine — compared in
+	// RESOLVED form on both sides (the stored OriginalTarget may
+	// use the 8.3 short form while the resolver returns long form;
+	// the resolved parent captured at move time is the anchor).
 	landed, err := finalPathOf(q.platform.handle)
 	if err != nil {
 		return fmt.Errorf("pfiles: resolve restored object: %w", err)
 	}
-	if !strings.EqualFold(landed, q.OriginalTarget) {
+	expected := filepath.Join(q.platform.resolvedParent, filepath.Base(q.OriginalTarget))
+	if !strings.EqualFold(landed, expected) {
 		_ = renameByHandle(q.platform.handle, q.Path())
-		return fmt.Errorf("%w: restored object landed at %s, expected %s; moved back to quarantine %s", ErrUnsafe, landed, q.OriginalTarget, q.Path())
+		return fmt.Errorf("%w: restored object landed at %s, expected %s; moved back to quarantine %s", ErrUnsafe, landed, expected, q.Path())
 	}
 	return nil
 }
