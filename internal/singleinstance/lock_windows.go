@@ -44,10 +44,19 @@ type overlapped struct {
 	HEvent       uintptr
 }
 
-// tryLock attempts a non-blocking exclusive lock of the first byte
-// of f. It returns errLocked when another process already holds it.
+// lockOffset is where the arbitration byte lives: far past the
+// informational PID content at the start of the file. Windows byte
+// range locks are MANDATORY — a lock covering byte 0 would also
+// block other processes from READING the PID recorded there.
+const lockOffset = 4096
+
+// tryLock attempts a non-blocking exclusive lock of one byte at
+// lockOffset in f. It returns errLocked when another process
+// already holds it. Locking beyond end-of-file is explicitly
+// allowed by LockFileEx.
 func tryLock(f *os.File) error {
 	var ol overlapped
+	ol.Offset = lockOffset
 	r1, _, callErr := procLockFileEx.Call(
 		f.Fd(),
 		uintptr(lockfileExclusiveLock|lockfileFailImmediately),
@@ -74,6 +83,7 @@ func tryLock(f *os.File) error {
 // process still holds the old one.
 func unlock(f *os.File) error {
 	var ol overlapped
+	ol.Offset = lockOffset
 	r1, _, callErr := procUnlockFile.Call(
 		f.Fd(),
 		0, // reserved
