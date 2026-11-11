@@ -155,6 +155,14 @@ func TestWaitAll(t *testing.T) {
 // being ready meant Go could pick the tick branch (~50% per
 // trial); the context re-check makes the outcome exact. Forty
 // trials make the old behaviour's survival probability ~2^-40.
+//
+// The scenario is fully synchronized — cancellation is delivered
+// while the callback is blocked, and the callback is released
+// only afterwards — so the loop's next decision necessarily
+// OBSERVES the cancellation. The test therefore pins the
+// observed-cancellation contract documented on RunTicker, not a
+// physical-time atomicity claim: a cancellation racing the
+// re-check itself is defined as landing during the callback.
 func TestRunTickerNoCallbackStartsAfterCancel(t *testing.T) {
 	for trial := 0; trial < 40; trial++ {
 		ctx, cancel := context.WithCancel(context.Background())
