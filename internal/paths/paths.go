@@ -35,6 +35,14 @@ type Layout struct {
 	WebView2     string // <root>/webview2-data
 	Config       string // <root>/config
 	SettingsFile string // <root>/config/settings.json
+	// InstanceLock is the single-instance lock file for THIS portable
+	// installation. Because it lives inside the portable directory,
+	// separate installations in different folders never see each
+	// other's lock and run independently.
+	InstanceLock string // <root>/data/app.lock
+	// ActivationFile is how a second launch asks the running instance
+	// to focus its window (see internal/singleinstance).
+	ActivationFile string // <root>/data/activate.request
 }
 
 // Resolve builds the portable layout for an application root directory.
@@ -52,17 +60,19 @@ func Resolve(root string) (Layout, error) {
 	data := filepath.Join(abs, "data")
 	cfg := filepath.Join(abs, "config")
 	return Layout{
-		Root:         abs,
-		Data:         data,
-		DatabaseFile: filepath.Join(data, "debrowser.db"),
-		Backups:      filepath.Join(data, "backups"),
-		Logs:         filepath.Join(data, "logs"),
-		LogFile:      filepath.Join(data, "logs", "debrowser.log"),
-		Profiles:     filepath.Join(data, "profiles"),
-		Mihomo:       filepath.Join(data, "mihomo"),
-		WebView2:     filepath.Join(abs, "webview2-data"),
-		Config:       cfg,
-		SettingsFile: filepath.Join(cfg, "settings.json"),
+		Root:           abs,
+		Data:           data,
+		DatabaseFile:   filepath.Join(data, "debrowser.db"),
+		Backups:        filepath.Join(data, "backups"),
+		Logs:           filepath.Join(data, "logs"),
+		LogFile:        filepath.Join(data, "logs", "debrowser.log"),
+		Profiles:       filepath.Join(data, "profiles"),
+		Mihomo:         filepath.Join(data, "mihomo"),
+		WebView2:       filepath.Join(abs, "webview2-data"),
+		Config:         cfg,
+		SettingsFile:   filepath.Join(cfg, "settings.json"),
+		InstanceLock:   filepath.Join(data, "app.lock"),
+		ActivationFile: filepath.Join(data, "activate.request"),
 	}, nil
 }
 
