@@ -377,7 +377,8 @@ func (s *InstanceService) validateProfileDir(dir string) (string, error) {
 	// ':' would address an NTFS alternate data stream, a trailing
 	// dot or space is silently stripped by Windows (aliasing two
 	// spellings to one directory), the reserved device names (CON,
-	// PRN, AUX, NUL, COM1-9, LPT1-9, with or without extension)
+	// PRN, AUX, NUL, CONIN$, CONOUT$, COM1-9, LPT1-9 and the
+	// superscript forms COM¹-³/LPT¹-³, with or without extension)
 	// name devices instead of directories, and a backslash inside
 	// a component is a smuggled separator on Windows even where
 	// the host OS treats it as a regular character. The check runs
@@ -429,9 +430,13 @@ func validateProfileComponent(comp string) error {
 		base = base[:i]
 	}
 	switch strings.ToUpper(base) {
-	case "CON", "PRN", "AUX", "NUL",
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
 		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+		// Microsoft's naming rules also reserve the superscript
+		// forms: Windows treats the ISO/IEC 8859-1 superscript
+		// digits ¹ ² ³ as digits in COM#/LPT# device names.
+		"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³":
 		return fmt.Errorf("数据目录组件 %q 是 Windows 保留设备名", comp)
 	}
 	return nil
