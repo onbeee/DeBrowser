@@ -117,9 +117,12 @@ func (s *AppService) SaveTheme(theme string) (settings.Settings, error) {
 	return next, nil
 }
 
-// ServiceShutdown is called by Wails during application shutdown; it
-// releases the database handle owned by this service.
+// ServiceShutdown is called by Wails during application shutdown. It
+// deliberately does NOT close the database: the handle is owned by
+// main (see main.run), which closes it only after the application and
+// all background loops have fully stopped — closing it here could cut
+// off a status emission still in flight.
 func (s *AppService) ServiceShutdown() error {
 	s.log.Info("app service shutting down")
-	return s.db.Close()
+	return nil
 }
