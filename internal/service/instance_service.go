@@ -235,12 +235,17 @@ func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
 	if in.Status == model.StatusRunning {
 		return fmt.Errorf("实例正在运行，不能删除其 Profile 数据")
 	}
-	target, err := s.profileTarget(in.UserDataDir)
+	target, err := s.verifiedProfileTarget(in.UserDataDir)
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(target); err != nil {
-		return fmt.Errorf("删除 Profile 目录失败：%w", err)
+	// target is the RESOLVED real path ("" when nothing exists on
+	// disk): deletion acts on the verified location itself, never on
+	// a path whose components might redirect it elsewhere.
+	if target != "" {
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf("删除 Profile 目录失败：%w", err)
+		}
 	}
 	if err := s.store.DeleteInstance(c, id); err != nil {
 		return err
@@ -264,24 +269,63 @@ func (s *InstanceService) validateProfileDir(dir string) (string, error) {
 	if strings.Contains(slash, "../") || slash == ".." {
 		return "", fmt.Errorf("数据目录不能超出 profiles 目录")
 	}
-	// Final containment proof on the resolved absolute target.
-	if _, err := s.profileTarget(slash); err != nil {
-		return "", err
+	// If the directory (or a path to it) already exists, it must also
+	// pass the same real-path verification used for deletion: a
+	// pre-planted symlink inside profiles must not legitimise an
+	// outside location as a profile directory.
+	full := filepath.Join(s.layout.Data, clean)
+	if _, err := os.Lstat(full); err == nil {
+		if _, err := s.verifiedProfileTarget(slash); err != nil {
+			return "", err
+		}
 	}
 	return slash, nil
 }
 
-// profileTarget resolves a stored (relative to data/) profile path
-// to an absolute target and proves it is strictly inside the
-// layout's profiles directory.
-func (s *InstanceService) profileTarget(stored string) (string, error) {
+// verifiedProfileTarget proves that the stored profile path is safe
+// to delete and returns the RESOLVED absolute path to remove (""
+// when nothing exists on disk). String containment is only the first
+// gate; the real proof is filesystem-based:
+//
+//  1. The lexical target must be strictly inside the profiles dir.
+//  2. The target itself must not be a symbolic link / reparse point
+//     (deleting "through" it is refused outright, wherever it aims).
+//  3. filepath.EvalSymlinks resolves EVERY component — intermediate
+//     symlinks and Windows junctions included — and the resolved
+//     target must still be strictly inside the resolved profiles
+//     directory. Anything that cannot be proven inside is refused.
+//
+// Deleting the resolved path (rather than the lexical one) keeps the
+// verified location and the deleted location identical.
+func (s *InstanceService) verifiedProfileTarget(stored string) (string, error) {
 	target := filepath.Join(s.layout.Data, filepath.FromSlash(stored))
 	cleanTarget := filepath.Clean(target)
 	cleanProfiles := filepath.Clean(s.layout.Profiles)
 	if cleanTarget == cleanProfiles || !strings.HasPrefix(cleanTarget, cleanProfiles+string(os.PathSeparator)) {
 		return "", fmt.Errorf("拒绝删除：目标路径不在 profiles 目录之内")
 	}
-	return cleanTarget, nil
+	info, err := os.Lstat(cleanTarget)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil // nothing on disk: nothing to protect
+		}
+		return "", fmt.Errorf("拒绝删除：无法检查目标路径：%w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("拒绝删除：Profile 目录本身是符号链接")
+	}
+	resolvedProfiles, err := filepath.EvalSymlinks(cleanProfiles)
+	if err != nil {
+		return "", fmt.Errorf("拒绝删除：无法解析 profiles 目录：%w", err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(cleanTarget)
+	if err != nil {
+		return "", fmt.Errorf("拒绝删除：无法解析目标真实路径：%w", err)
+	}
+	if resolvedTarget == resolvedProfiles || !strings.HasPrefix(resolvedTarget, resolvedProfiles+string(os.PathSeparator)) {
+		return "", fmt.Errorf("拒绝删除：目标真实路径不在 profiles 目录之内")
+	}
+	return resolvedTarget, nil
 }
 
 // mapConstraintError turns SQLite constraint failures into messages
