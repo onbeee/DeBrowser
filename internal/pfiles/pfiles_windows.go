@@ -63,8 +63,13 @@ func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, 
 		return nil, fmt.Errorf("%w: resolve profiles root: %v", ErrUnsafe, err)
 	}
 	cleanRoot = resolvedRoot
-	rel, err := filepath.Rel(cleanRoot, cleanTarget)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	// A lexical Rel is only a coarse gate: when it succeeds AND
+	// escapes, refuse immediately. When it "fails" merely because
+	// the two paths use different name forms (8.3 vs long), the
+	// authoritative containment proof happens below on resolved
+	// paths (resolvedParent within resolvedRoot, resolvedTarget ==
+	// resolvedParent\name).
+	if rel, rerr := filepath.Rel(profilesDir, cleanTarget); rerr == nil && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
 		return nil, fmt.Errorf("%w: target %s is not inside profiles %s", ErrUnsafe, target, profilesDir)
 	}
 
@@ -100,6 +105,15 @@ func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, 
 		// wherever it points, which the caller should have resolved
 		// beforehand. Refuse rather than guess.
 		return nil, fmt.Errorf("%w: parent directory is a reparse point", ErrUnsafe)
+	}
+	// Authoritative containment: the target's RESOLVED parent must
+	// be the resolved profiles root or inside it (segment-boundary
+	// prefix, case-insensitive). Together with the check below that
+	// the target's final path is exactly <resolved parent>\<name>,
+	// this proves the object being opened lives inside profiles.
+	if !strings.EqualFold(resolvedParent, cleanRoot) &&
+		!strings.HasPrefix(strings.ToLower(resolvedParent), strings.ToLower(cleanRoot)+`\`) {
+		return nil, fmt.Errorf("%w: target's resolved parent %s is not inside profiles %s", ErrUnsafe, resolvedParent, cleanRoot)
 	}
 
 	targetHandle, err := openDirHandle(cleanTarget, deleteAccess)
