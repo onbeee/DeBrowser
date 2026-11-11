@@ -145,8 +145,12 @@ func (s *InstanceService) CreateInstance(input CreateInstanceInput) (model.Insta
 	if err != nil {
 		return model.Instance{}, err
 	}
-	dir := strings.TrimSpace(input.UserDataDir)
-	if dir == "" {
+	// The raw (untrimmed) spelling goes to validation: trimming
+	// first would erase exactly the evidence the Windows
+	// reinterpretation rules look for (a trailing space or dot on
+	// the final component).
+	dir := input.UserDataDir
+	if strings.TrimSpace(dir) == "" {
 		dir = "profiles/" + id
 	} else {
 		cleaned, err := s.validateProfileDir(dir)
@@ -351,13 +355,35 @@ func (s *InstanceService) validateProfileDir(dir string) (string, error) {
 	if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "\\") {
 		return "", fmt.Errorf("数据目录必须是相对路径")
 	}
-	clean := filepath.Clean(dir)
+	clean := filepath.Clean(strings.TrimSpace(dir))
 	slash := filepath.ToSlash(clean)
 	if slash == "profiles" || !strings.HasPrefix(slash, "profiles/") {
 		return "", fmt.Errorf("数据目录必须位于 profiles 目录之下")
 	}
 	if strings.Contains(slash, "../") || slash == ".." {
 		return "", fmt.Errorf("数据目录不能超出 profiles 目录")
+	}
+	// Every component under profiles/ must be a plain, portable
+	// directory name. Windows reinterprets several spellings, so
+	// they are rejected up front rather than discovered later:
+	// ':' would address an NTFS alternate data stream, a trailing
+	// dot or space is silently stripped by Windows (aliasing two
+	// spellings to one directory), the reserved device names (CON,
+	// PRN, AUX, NUL, COM1-9, LPT1-9, with or without extension)
+	// name devices instead of directories, and a backslash inside
+	// a component is a smuggled separator on Windows even where
+	// the host OS treats it as a regular character. The check runs
+	// on the RAW spelling's segments (only "" and traversal
+	// segments are skipped — those are judged by the containment
+	// checks above), because Clean/TrimSpace would erase trailing
+	// dots and spaces before they could be seen.
+	for _, comp := range strings.Split(filepath.ToSlash(dir), "/") {
+		if comp == "" || comp == "." || comp == ".." || comp == "profiles" {
+			continue
+		}
+		if err := validateProfileComponent(comp); err != nil {
+			return "", err
+		}
 	}
 	// If the directory (or a path to it) already exists, it must also
 	// pass the same real-path verification used for deletion: a
@@ -370,6 +396,37 @@ func (s *InstanceService) validateProfileDir(dir string) (string, error) {
 		}
 	}
 	return slash, nil
+}
+
+// validateProfileComponent checks one profile directory name
+// component against the Windows reinterpretation rules described
+// in validateProfileDir.
+func validateProfileComponent(comp string) error {
+	if comp == "" || comp == "." || comp == ".." {
+		return fmt.Errorf("数据目录包含无效的路径组件")
+	}
+	if strings.ContainsAny(comp, "<>:\"|?*\\") {
+		return fmt.Errorf("数据目录组件 %q 包含不允许的字符", comp)
+	}
+	for _, r := range comp {
+		if r < 0x20 {
+			return fmt.Errorf("数据目录组件 %q 包含控制字符", comp)
+		}
+	}
+	if strings.HasSuffix(comp, ".") || strings.HasSuffix(comp, " ") {
+		return fmt.Errorf("数据目录组件 %q 不能以点或空格结尾", comp)
+	}
+	base := comp
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	switch strings.ToUpper(base) {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return fmt.Errorf("数据目录组件 %q 是 Windows 保留设备名", comp)
+	}
+	return nil
 }
 
 // verifiedProfileTarget proves that the stored profile path is safe
