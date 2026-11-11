@@ -25,7 +25,9 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 - `internal/database` — opening, pragmas, migrations, backups, `WithTx` transaction entry, health.
 - `internal/store` — the repository layer. All SQL for the core models lives here; each repository works against a small `querier` interface so the same code runs on the pool or inside a transaction. `Store.WithTx` runs several repository calls atomically (nested transactions are rejected). No ORM.
 
-## Schema (Stage 2)
+## Schema (current state)
+
+Current state, as landed by Stage 2 (migrations 0001-0003, all applied at startup): the tables `app_settings`, `proxies`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 5 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 
