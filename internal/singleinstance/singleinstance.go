@@ -1,20 +1,27 @@
 // Package singleinstance implements DeBrowser's application-level
 // single-instance protection, scoped to one portable installation.
 //
-// The lock is a file inside the portable data directory (see
-// internal/paths): the first process creates it exclusively and
-// records its PID; it holds the file open for its whole lifetime and
-// removes it on clean exit. A second process that finds the file
-// checks whether the recorded PID is still alive:
+// The mechanism is an operating-system file lock, not a PID file:
 //
-//   - alive   -> ErrAlreadyRunning; the second process signals the
-//     running instance to focus its window (SignalActivation) and
-//     exits without touching the database.
-//   - dead    -> the lock is stale (crash, kill, power loss); it is
-//     removed and acquisition is retried, so a crashed instance never
-//     blocks the next start.
-//   - corrupt -> treated as stale for the same reason.
+//   - Every process opens (creating if needed) the lock file inside
+//     the portable data directory (see internal/paths) and attempts
+//     a non-blocking EXCLUSIVE lock on it — syscall.Flock on Unix,
+//     LockFileEx on Windows.
+//   - Exactly one process can hold that lock; the OS itself is the
+//     arbiter, so there is no check-then-delete race: contenders
+//     never remove or replace each other's lock file. The file is
+//     never deleted on release for the same reason (an unlink would
+//     let a newcomer lock a fresh inode while an older handle still
+//     holds the unlinked one).
+//   - When the holder exits — cleanly, by crash, by force kill, or
+//     by power loss — the OS releases the lock automatically, so the
+//     next start acquires it immediately. Stale locks cannot exist.
+//   - The holder writes its PID into the file purely as information,
+//     so a second launch can report WHO is running; the PID is never
+//     used to decide ownership.
 //
+// A second launch signals the running instance to focus its window
+// (SignalActivation) and exits without touching the database.
 // Installations in different portable folders use different lock
 // files and never interfere. Nothing here touches AppData.
 package singleinstance
@@ -33,7 +40,11 @@ import (
 // when a live DeBrowser instance already holds the lock.
 var ErrAlreadyRunning = errors.New("singleinstance: already running")
 
-// AlreadyRunningError reports the PID of the running instance.
+// errLocked is the platform lock primitive's "held by someone else".
+var errLocked = errors.New("singleinstance: lock held")
+
+// AlreadyRunningError reports the PID of the running instance as
+// recorded in the lock file (0 when it could not be read).
 type AlreadyRunningError struct {
 	PID      int
 	LockFile string
@@ -45,27 +56,9 @@ func (e *AlreadyRunningError) Error() string {
 
 func (e *AlreadyRunningError) Unwrap() error { return ErrAlreadyRunning }
 
-// Options overrides behaviour for tests. The zero value is production
-// behaviour.
-type Options struct {
-	// PID is the identity written into the lock file.
-	PID int
-	// Alive reports whether a PID currently belongs to a live
-	// process. Defaults to the platform implementation.
-	Alive func(pid int) bool
-}
-
-func (o Options) withDefaults() Options {
-	if o.PID == 0 {
-		o.PID = os.Getpid()
-	}
-	if o.Alive == nil {
-		o.Alive = processAlive
-	}
-	return o
-}
-
-// Lock is a held single-instance lock. Release is idempotent.
+// Lock is a held single-instance OS file lock. Release is idempotent
+// and only ever releases THIS process's lock — it cannot disturb a
+// later owner, because it never touches the file by path.
 type Lock struct {
 	path string
 	pid  int
@@ -77,80 +70,60 @@ type Lock struct {
 // Path returns the lock file location.
 func (l *Lock) Path() string { return l.path }
 
-// PID returns the PID recorded in the lock.
+// PID returns this process's PID as recorded in the lock.
 func (l *Lock) PID() int { return l.pid }
 
-// Acquire takes the single-instance lock at lockFile.
+// Acquire takes the single-instance lock at lockFile, or returns an
+// *AlreadyRunningError naming the current holder.
 func Acquire(lockFile string) (*Lock, error) {
-	return AcquireWithOptions(lockFile, Options{})
-}
-
-// AcquireWithOptions is Acquire with explicit options.
-func AcquireWithOptions(lockFile string, opts Options) (*Lock, error) {
-	opts = opts.withDefaults()
-	const maxAttempts = 8
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-		if err == nil {
-			content := fmt.Sprintf("%d\n%d\n", opts.PID, time.Now().UnixNano())
-			if _, werr := f.WriteString(content); werr != nil {
-				_ = f.Close()
-				_ = os.Remove(lockFile)
-				return nil, fmt.Errorf("singleinstance: write lock file: %w", werr)
-			}
-			if serr := f.Sync(); serr != nil {
-				_ = f.Close()
-				_ = os.Remove(lockFile)
-				return nil, fmt.Errorf("singleinstance: sync lock file: %w", serr)
-			}
-			return &Lock{path: lockFile, pid: opts.PID, file: f}, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("singleinstance: create lock file: %w", err)
-		}
-		// The lock file exists: decide whether its owner is alive.
-		owner, rerr := readOwnerPID(lockFile)
-		if rerr == nil && opts.Alive(owner) {
+	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("singleinstance: open lock file: %w", err)
+	}
+	if err := tryLock(f); err != nil {
+		owner := readOwnerPID(lockFile)
+		_ = f.Close()
+		if errors.Is(err, errLocked) {
 			return nil, &AlreadyRunningError{PID: owner, LockFile: lockFile}
 		}
-		// Stale (dead owner) or unreadable/corrupt: remove and retry.
-		// If another starter wins the recreate race, the next loop
-		// iteration sees its live PID and reports AlreadyRunning.
-		if rerr := os.Remove(lockFile); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			return nil, fmt.Errorf("singleinstance: remove stale lock file: %w", rerr)
-		}
+		return nil, fmt.Errorf("singleinstance: lock file: %w", err)
 	}
-	return nil, fmt.Errorf("singleinstance: could not acquire lock %s after %d attempts", lockFile, maxAttempts)
+	pid := os.Getpid()
+	// Record our PID for diagnostics (best effort: ownership is the
+	// OS lock, never this content).
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt([]byte(fmt.Sprintf("%d\n%d\n", pid, time.Now().UnixNano())), 0)
+	_ = f.Sync()
+	return &Lock{path: lockFile, pid: pid, file: f}, nil
 }
 
-// Release closes the lock file and removes it — but only if it still
-// belongs to this process (a new owner may have taken over after an
-// external removal; deleting its lock would break the protection).
+// Release unlocks and closes the lock file. The file itself is left
+// in place (see the package comment). Safe to call more than once.
 func (l *Lock) Release() error {
 	l.once.Do(func() {
-		if cerr := l.file.Close(); cerr != nil {
-			l.err = fmt.Errorf("singleinstance: close lock file: %w", cerr)
+		if uerr := unlock(l.file); uerr != nil {
+			l.err = fmt.Errorf("singleinstance: unlock: %w", uerr)
 		}
-		if owner, err := readOwnerPID(l.path); err == nil && owner == l.pid {
-			if rerr := os.Remove(l.path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-				l.err = fmt.Errorf("singleinstance: remove lock file: %w", rerr)
-			}
+		if cerr := l.file.Close(); cerr != nil && l.err == nil {
+			l.err = fmt.Errorf("singleinstance: close lock file: %w", cerr)
 		}
 	})
 	return l.err
 }
 
-func readOwnerPID(lockFile string) (int, error) {
+// readOwnerPID best-effort reads the PID recorded in the lock file
+// (0 when unreadable or corrupt). Informational only.
+func readOwnerPID(lockFile string) int {
 	data, err := os.ReadFile(lockFile)
 	if err != nil {
-		return 0, err
+		return 0
 	}
 	line, _, _ := strings.Cut(string(data), "\n")
 	pid, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("singleinstance: corrupt lock file %s", lockFile)
+		return 0
 	}
-	return pid, nil
+	return pid
 }
 
 // SignalActivation asks the running instance (the lock holder of the
