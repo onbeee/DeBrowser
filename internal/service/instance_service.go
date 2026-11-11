@@ -290,10 +290,13 @@ func (s *InstanceService) validateProfileDir(dir string) (string, error) {
 //  1. The lexical target must be strictly inside the profiles dir.
 //  2. The target itself must not be a symbolic link / reparse point
 //     (deleting "through" it is refused outright, wherever it aims).
-//  3. filepath.EvalSymlinks resolves EVERY component — intermediate
-//     symlinks and Windows junctions included — and the resolved
-//     target must still be strictly inside the resolved profiles
-//     directory. Anything that cannot be proven inside is refused.
+//  3. resolveFinalPath resolves EVERY component — intermediate
+//     symlinks and Windows junctions/reparse points included
+//     (EvalSymlinks on Unix, GetFinalPathNameByHandle on Windows,
+//     where EvalSymlinks alone misses a junction that is the final
+//     component) — and the resolved target must still be strictly
+//     inside the resolved profiles directory. Anything that cannot
+//     be proven inside is refused.
 //
 // Deleting the resolved path (rather than the lexical one) keeps the
 // verified location and the deleted location identical.
@@ -314,11 +317,11 @@ func (s *InstanceService) verifiedProfileTarget(stored string) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("拒绝删除：Profile 目录本身是符号链接")
 	}
-	resolvedProfiles, err := filepath.EvalSymlinks(cleanProfiles)
+	resolvedProfiles, err := resolveFinalPath(cleanProfiles)
 	if err != nil {
 		return "", fmt.Errorf("拒绝删除：无法解析 profiles 目录：%w", err)
 	}
-	resolvedTarget, err := filepath.EvalSymlinks(cleanTarget)
+	resolvedTarget, err := resolveFinalPath(cleanTarget)
 	if err != nil {
 		return "", fmt.Errorf("拒绝删除：无法解析目标真实路径：%w", err)
 	}
