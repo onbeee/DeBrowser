@@ -18,6 +18,24 @@ func RemoveAt(rootFd int, name string) error {
 	return removeEntryAt(rootFd, name)
 }
 
+// RemoveVerifiedAt is RemoveAt with an identity precondition: the
+// object currently bound to name inside rootFd must be exactly the
+// (dev, ino) the caller verified earlier (for pfiles: the object
+// MoveToQuarantine proved it placed in the quarantine slot). If
+// the slot's occupant is not that object, nothing is deleted and
+// an error is returned — a swapped-in substitute is never wiped
+// under the verified object's authority.
+func RemoveVerifiedAt(rootFd int, name string, dev, ino uint64) error {
+	id, err := fstatatNoFollow(rootFd, name)
+	if err != nil {
+		return fmt.Errorf("safedelete: stat verified entry %q: %w", name, err)
+	}
+	if id.dev != dev || id.ino != ino {
+		return fmt.Errorf("safedelete: entry %q identity mismatch (want dev=%d ino=%d, found dev=%d ino=%d); refusing to delete", name, dev, ino, id.dev, id.ino)
+	}
+	return removeEntryAt(rootFd, name)
+}
+
 // removeTree implements RemoveTree with descriptor-anchored
 // traversal: openat(O_NOFOLLOW) for every descent and unlinkat for
 // every removal. Once a directory fd is open, renaming or replacing
@@ -59,23 +77,90 @@ func removeTree(root, target string) error {
 	return removeEntryAt(parentFd, parts[len(parts)-1])
 }
 
+// entryIdentity is the (dev, ino) pair that names one filesystem
+// object on Linux.
+type entryIdentity struct{ dev, ino uint64 }
+
+// fstatatNoFollow stats name inside dirFd without following a
+// final symlink (AT_SYMLINK_NOFOLLOW), via the raw newfstatat
+// syscall (the stdlib does not export Fstatat). It reports the
+// identity of the object the NAME currently binds — the probe the
+// unlink guards below compare against.
+func fstatatNoFollow(dirFd int, name string) (entryIdentity, error) {
+	p, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return entryIdentity{}, err
+	}
+	var st syscall.Stat_t
+	const atSymlinkNoFollow = 0x100
+	_, _, errno := syscall.Syscall6(
+		sysNewfstatat,
+		uintptr(dirFd),
+		uintptr(unsafe.Pointer(p)),
+		uintptr(unsafe.Pointer(&st)),
+		uintptr(atSymlinkNoFollow),
+		0, 0,
+	)
+	if errno != 0 {
+		return entryIdentity{}, errno
+	}
+	return entryIdentity{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil
+}
+
+// verifyEntryIdentity re-stats name inside dirFd and fails unless
+// it still binds the identity captured earlier. It is checked
+// immediately before every unlinkat/rmdir: a name that was swapped
+// for a different object during the traversal aborts the wipe
+// instead of deleting the substitute. (A swap in the single-
+// syscall gap after the check cannot be excluded on Linux —
+// unlinkat is name-based and there is no delete-by-fd; see the
+// package documentation for the exact guarantee boundary.)
+func verifyEntryIdentity(dirFd int, name string, want entryIdentity) error {
+	got, err := fstatatNoFollow(dirFd, name)
+	if err != nil {
+		return fmt.Errorf("safedelete: re-verify %q before delete: %w", name, err)
+	}
+	if got != want {
+		return fmt.Errorf("safedelete: entry %q was replaced during wipe (identity changed); refusing to delete the substitute", name)
+	}
+	return nil
+}
+
 // removeEntryAt deletes name inside the directory referenced by
-// dirFd, recursing into real subdirectories only. The probe is a
-// single openat with O_DIRECTORY|O_NOFOLLOW — there is no separate
-// stat step an attacker could race:
+// dirFd, recursing into real subdirectories only. The entry's
+// identity is captured first (fstatat, no-follow), the descent is
+// a single openat with O_DIRECTORY|O_NOFOLLOW, and the identity is
+// re-verified immediately before the entry itself is unlinked:
 //   - open succeeds   -> a real directory: recurse through its fd.
 //   - ENOTDIR / ELOOP -> a file or a symlink: unlink the entry
 //     itself (for a symlink, the link — never its target).
 func removeEntryAt(dirFd int, name string) error {
+	id, err := fstatatNoFollow(dirFd, name)
+	if err != nil {
+		return fmt.Errorf("safedelete: stat entry %q: %w", name, err)
+	}
 	childFd, err := syscall.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if err == syscall.ENOTDIR || err == syscall.ELOOP {
+			if verr := verifyEntryIdentity(dirFd, name, id); verr != nil {
+				return verr
+			}
 			if uerr := unlinkat(dirFd, name, 0); uerr != nil {
 				return fmt.Errorf("safedelete: unlink %q: %w", name, uerr)
 			}
 			return nil
 		}
 		return fmt.Errorf("safedelete: open entry %q: %w", name, err)
+	}
+	// The opened directory must be the statted object.
+	var cst syscall.Stat_t
+	if err := syscall.Fstat(childFd, &cst); err != nil {
+		_ = syscall.Close(childFd)
+		return fmt.Errorf("safedelete: fstat entry %q: %w", name, err)
+	}
+	if uint64(cst.Dev) != id.dev || uint64(cst.Ino) != id.ino {
+		_ = syscall.Close(childFd)
+		return fmt.Errorf("safedelete: entry %q was replaced during wipe (identity changed); refusing to delete the substitute", name)
 	}
 	// Enumerate all names first (ReadDirent advances the fd's
 	// offset), then delete each child through this same anchored fd.
@@ -94,6 +179,9 @@ func removeEntryAt(dirFd int, name string) error {
 		}
 	}
 	_ = syscall.Close(childFd)
+	if verr := verifyEntryIdentity(dirFd, name, id); verr != nil {
+		return verr
+	}
 	if err := unlinkat(dirFd, name, atRemoveDir); err != nil {
 		return fmt.Errorf("safedelete: rmdir %q: %w", name, err)
 	}
