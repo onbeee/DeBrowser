@@ -13,7 +13,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/paths"
-	"github.com/onbeee/DeBrowser/internal/safedelete"
+	"github.com/onbeee/DeBrowser/internal/pfiles"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
 
@@ -36,6 +36,15 @@ type InstanceService struct {
 	// can inject a failure into the middle of
 	// DeleteInstanceAndProfile and verify the profile restore.
 	deleteRecord func(ctx context.Context, id string) error
+	// Test seams for deterministic race injection in
+	// DeleteInstanceAndProfile (nil in production): afterVerifyHook
+	// runs between path verification and the object-anchored
+	// quarantine move; beforeRestoreHook runs between a failed
+	// record deletion and the anchored restore;
+	// wipeQuarantine overrides the anchored wipe.
+	afterVerifyHook   func()
+	beforeRestoreHook func()
+	wipeQuarantine    func(q *pfiles.Quarantine) error
 }
 
 // NewInstanceService builds the service and reconciles persisted
@@ -229,19 +238,22 @@ func (s *InstanceService) DeleteInstance(id string) error {
 //  1. The stored path is proven safe (verifiedProfileTarget: the
 //     directory itself is not a link, and its fully resolved real
 //     path lies strictly inside the profiles directory).
-//  2. The directory is RENAMED into a quarantine slot directly
-//     under profiles (same volume, atomic). Renaming a directory
-//     never follows it; from here on the data sits at a path this
-//     process alone chose, so the check/use gap is closed: whatever
-//     the anchored wipe later removes can only be what the rename
-//     actually moved.
-//  3. The database record is deleted. If that fails, the quarantine
-//     directory is renamed BACK — the operation aborts with the
-//     profile and the record both intact.
-//  4. Only with the record gone is the quarantine tree wiped, by
-//     internal/safedelete's anchored traversal (never follows links
-//     out of the tree). A wipe failure leaves the data in the
-//     quarantine slot — reported in the error, never silently lost.
+//  2. internal/pfiles moves the VERIFIED OBJECT — not the path
+//     string — into a quarantine slot under profiles: Linux anchors
+//     the move to directory fds (openat O_NOFOLLOW descent +
+//     renameat2 NOREPLACE between pinned fds, with a post-move
+//     identity check), Windows renames through the target's own
+//     directory handle after verifying the handle's identity.
+//     Swapping any path component after step 1 therefore cannot
+//     redirect the move to an outside directory; anything that
+//     cannot be anchored is refused with data and record intact.
+//  3. The database record is deleted. If that fails, the object is
+//     moved back through the same anchor — the operation aborts
+//     with the profile and the record both intact.
+//  4. Only with the record gone is the quarantine tree wiped by
+//     anchored deletion (internal/safedelete). A wipe failure
+//     leaves the data in the quarantine slot — reported in the
+//     error, never silently lost.
 //
 // A persisted "running" instance is refused before any of this.
 func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
@@ -272,46 +284,64 @@ func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
 		s.log.Info("instance deleted (no profile directory on disk)", "id", id)
 		return nil
 	}
+	if s.afterVerifyHook != nil {
+		s.afterVerifyHook()
+	}
 
-	quarantine, err := s.quarantinePath()
+	q, err := s.moveToQuarantine(target)
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(target, quarantine); err != nil {
-		return fmt.Errorf("隔离 Profile 目录失败：%w", err)
-	}
+	defer func() { _ = q.Close() }()
+
 	if err := s.deleteRecord(c, id); err != nil {
-		// Restore the directory to its original location; the
-		// operation must leave the world exactly as it found it.
-		if rerr := os.Rename(quarantine, target); rerr != nil {
-			return fmt.Errorf("删除实例记录失败，且 Profile 目录恢复失败（数据保留在隔离目录 %s）：%w", quarantine, err)
+		// Restore the object to its original location through the
+		// same anchor; the operation must leave the world exactly
+		// as it found it.
+		if s.beforeRestoreHook != nil {
+			s.beforeRestoreHook()
+		}
+		if rerr := q.Restore(); rerr != nil {
+			return fmt.Errorf("删除实例记录失败，且 Profile 目录恢复失败（数据保留在隔离目录 %s）：%w", q.Path(), err)
 		}
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("实例不存在")
 		}
 		return err
 	}
-	if err := safedelete.RemoveTree(s.layout.Profiles, quarantine); err != nil {
-		return fmt.Errorf("实例记录已删除，但 Profile 数据清理不完全（残留在隔离目录 %s）：%w", quarantine, err)
+	wipe := s.wipeQuarantine
+	if wipe == nil {
+		wipe = func(q *pfiles.Quarantine) error { return q.Wipe() }
+	}
+	if err := wipe(q); err != nil {
+		return fmt.Errorf("实例记录已删除，但 Profile 数据清理不完全（残留在隔离目录 %s）：%w", q.Path(), err)
 	}
 	s.log.Info("instance and profile deleted", "id", id, "dir", in.UserDataDir)
 	return nil
 }
 
-// quarantinePath picks a fresh, unused quarantine slot directly
-// under the profiles directory.
-func (s *InstanceService) quarantinePath() (string, error) {
+// moveToQuarantine moves target into a fresh quarantine slot,
+// retrying with another slot name when a name turns out to be
+// occupied (the platform move never overwrites an occupant).
+func (s *InstanceService) moveToQuarantine(target string) (*pfiles.Quarantine, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		id, err := store.NewID()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		candidate := filepath.Join(s.layout.Profiles, ".debrowser-quarantine-"+id)
-		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
-			return candidate, nil
+		q, err := pfiles.MoveToQuarantine(s.layout.Profiles, target, ".debrowser-quarantine-"+id)
+		if err == nil {
+			return q, nil
 		}
+		if errors.Is(err, pfiles.ErrOccupied) {
+			continue
+		}
+		if errors.Is(err, pfiles.ErrUnsafe) {
+			return nil, fmt.Errorf("无法证明 Profile 目录可被安全隔离，已拒绝删除：%w", err)
+		}
+		return nil, fmt.Errorf("隔离 Profile 目录失败：%w", err)
 	}
-	return "", fmt.Errorf("无法分配隔离目录")
+	return nil, fmt.Errorf("无法分配隔离目录")
 }
 
 // validateProfileDir checks a user-supplied profile directory: it
