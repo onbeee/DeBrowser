@@ -195,6 +195,105 @@ func TestDeleteProfileRefusesRunningAndEscapes(t *testing.T) {
 	}
 }
 
+func seedInstance(t *testing.T, cfg config.Config, name, dir string) model.Instance {
+	t.Helper()
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	in, err := store.New(db).CreateInstance(t.Context(), model.Instance{Name: name, UserDataDir: dir})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return in
+}
+
+func TestPurgeRefusesSymlinkProfileDir(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	// An outside directory with data that must survive.
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(sentinel, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := seedInstance(t, cfg, "链接目标", "profiles/linked")
+	link := filepath.Join(cfg.Layout.Profiles, "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	err := svc.DeleteInstanceAndProfile(in.ID)
+	if err == nil || !strings.Contains(err.Error(), "符号链接") {
+		t.Fatalf("purge of symlink profile dir error = %v, want 符号链接 refusal", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("outside sentinel was touched: %v", err)
+	}
+	if _, err := svc.GetInstance(in.ID); err != nil {
+		t.Errorf("metadata removed despite refusal: %v", err)
+	}
+}
+
+func TestPurgeRefusesIntermediateSymlinkEscape(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	outside := t.TempDir()
+	inner := filepath.Join(outside, "inner")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(inner, "keep.txt")
+	if err := os.WriteFile(sentinel, []byte("precious"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// profiles/mid is a symlink to the outside directory; the stored
+	// profile path passes through it.
+	if err := os.Symlink(outside, filepath.Join(cfg.Layout.Profiles, "mid")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	in := seedInstance(t, cfg, "中间链接", "profiles/mid/inner")
+	err := svc.DeleteInstanceAndProfile(in.ID)
+	if err == nil || !strings.Contains(err.Error(), "不在 profiles 目录之内") {
+		t.Fatalf("purge through intermediate symlink error = %v, want containment refusal", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("outside sentinel was touched: %v", err)
+	}
+	if _, err := svc.GetInstance(in.ID); err != nil {
+		t.Errorf("metadata removed despite refusal: %v", err)
+	}
+	// The metadata-only delete still works for the same instance.
+	if err := svc.DeleteInstance(in.ID); err != nil {
+		t.Errorf("metadata-only delete after refusal: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("outside sentinel touched by metadata delete: %v", err)
+	}
+}
+
+func TestPurgeAllowsIntermediateSymlinkStayingInside(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	// profiles/alias -> profiles/real (both inside): the resolved
+	// target stays inside profiles, so the purge is legitimate.
+	real := filepath.Join(cfg.Layout.Profiles, "real")
+	instDir := filepath.Join(real, "inst")
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(instDir, "data.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(cfg.Layout.Profiles, "alias")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	in := seedInstance(t, cfg, "内部链接", "profiles/alias/inst")
+	if err := svc.DeleteInstanceAndProfile(in.ID); err != nil {
+		t.Fatalf("purge resolving inside profiles refused: %v", err)
+	}
+	if _, err := os.Stat(instDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("resolved inside dir still exists (err=%v)", err)
+	}
+}
+
 func TestStartupReconcilesRunningToStopped(t *testing.T) {
 	svc, cfg := testInstanceService(t)
 	db, err := database.Open(cfg.Layout.DatabaseFile)
