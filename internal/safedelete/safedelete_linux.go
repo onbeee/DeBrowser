@@ -10,6 +10,14 @@ import (
 	"unsafe"
 )
 
+// RemoveAt deletes the entry name inside the already-open,
+// trusted directory fd (for example a profiles root fd held by the
+// caller), with the same anchored traversal as RemoveTree. The
+// caller keeps ownership of rootFd.
+func RemoveAt(rootFd int, name string) error {
+	return removeEntryAt(rootFd, name)
+}
+
 // removeTree implements RemoveTree with descriptor-anchored
 // traversal: openat(O_NOFOLLOW) for every descent and unlinkat for
 // every removal. Once a directory fd is open, renaming or replacing
