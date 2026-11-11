@@ -164,6 +164,11 @@ func TestWipeAfterProfilesRootSwapAttempt(t *testing.T) {
 	if err := q.Wipe(); err != nil {
 		t.Fatalf("Wipe after root swap attempt: %v", err)
 	}
+	// The root's deletion completes when its verified handle is
+	// closed; release it before probing the namespace.
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close after wipe: %v", err)
+	}
 	// The ORIGINAL object must be gone, wherever it lives now.
 	origSlot := filepath.Join(profiles, slot)
 	if swapStaged {
@@ -220,6 +225,10 @@ func TestWipeFailureReportsQuarantinePath(t *testing.T) {
 	}
 	if err := q.Wipe(); err != nil {
 		t.Fatalf("retry after unlock: %v", err)
+	}
+	// Deletion of the root completes when its handle closes.
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close after retry wipe: %v", err)
 	}
 	if _, err := os.Stat(q.Path()); !os.IsNotExist(err) {
 		t.Errorf("quarantine still exists after successful retry (err=%v)", err)
