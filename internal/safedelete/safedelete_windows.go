@@ -29,7 +29,17 @@ func removeDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("safedelete: resolve %s: %w", dir, err)
 	}
-	if !pathsEqual(resolved, dir) {
+	// A directory counts as a reparse point when resolving it lands
+	// somewhere other than <resolved parent>\<its own name>. The
+	// comparison must NOT be against the lexical path: the resolver
+	// returns long-form names while callers may hold 8.3 short forms
+	// (e.g. C:\Users\RUNNER~1\... from %TEMP%), which made plain
+	// directories look like reparse points in CI.
+	resolvedParent, err := finalPath(filepath.Dir(dir))
+	if err != nil {
+		return fmt.Errorf("safedelete: resolve parent of %s: %w", dir, err)
+	}
+	if !pathsEqual(resolved, filepath.Join(resolvedParent, filepath.Base(dir))) {
 		// This directory itself is a reparse point: remove the
 		// point only. Its target's contents are not touched.
 		if err := os.Remove(dir); err != nil {
