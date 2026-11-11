@@ -147,3 +147,74 @@ func TestWaitAll(t *testing.T) {
 		t.Error("WaitAll returned false after all loops exited")
 	}
 }
+
+// Regression test for the cancellation race in RunTicker: when a
+// callback is in flight while cancellation lands AND a tick is
+// pending, the loop must not start another callback afterwards.
+// With the previous select-only implementation, both channels
+// being ready meant Go could pick the tick branch (~50% per
+// trial); the context re-check makes the outcome exact. Forty
+// trials make the old behaviour's survival probability ~2^-40.
+func TestRunTickerNoCallbackStartsAfterCancel(t *testing.T) {
+	for trial := 0; trial < 40; trial++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		entered := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var calls atomic.Int64
+		done := RunTicker(ctx, time.Millisecond, func() {
+			calls.Add(1)
+			entered <- struct{}{}
+			<-release // in-flight while cancellation lands
+		})
+		<-entered
+		// Let several ticks elapse (the ticker buffers one) so a
+		// tick is pending alongside the closed Done channel.
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("trial %d: loop did not exit after cancellation", trial)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("trial %d: callback ran %d times, want exactly 1 (no new callback may start after cancellation)", trial, got)
+		}
+	}
+}
+
+// Several loops sharing one context all drain after cancellation,
+// and WaitForever only returns once every one of them has exited.
+func TestWaitForeverDrainsMultipleLoops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var ticks atomic.Int64
+	dones := make([]<-chan struct{}, 0, 4)
+	for i := 0; i < 4; i++ {
+		dones = append(dones, RunTicker(ctx, 2*time.Millisecond, func() { ticks.Add(1) }))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for ticks.Load() < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("loops did not tick (got %d)", ticks.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	drained := make(chan struct{})
+	go func() {
+		WaitForever(10*time.Millisecond, nil, dones...)
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForever did not return after all loops exited")
+	}
+	for _, d := range dones {
+		select {
+		case <-d:
+		default:
+			t.Fatal("a loop's done channel was not closed when WaitForever returned")
+		}
+	}
+}
