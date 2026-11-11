@@ -82,6 +82,13 @@ func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
 		"profiles/COM1", "profiles/lpt9.dat", "profiles/NUL",
 		"profiles/name.", "profiles/name ", "profiles/a<b", "profiles/a|b",
 		`profiles/a\b`,
+		// Reserved-name variants pinned by Microsoft's naming
+		// rules: superscript device digits (¹ ² ³ count as digits
+		// in COM#/LPT# names), the console device aliases, and
+		// reserved stems followed by multiple extensions.
+		"profiles/com¹", "profiles/LPT²", "profiles/lpt³.dat",
+		"profiles/conin$", "profiles/CONOUT$", "profiles/conout$.txt",
+		"profiles/nul.tar.gz",
 	} {
 		if _, err := svc.CreateInstance(CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
 			t.Errorf("windows-unsafe dir %q accepted, want error", bad)
