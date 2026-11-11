@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -19,13 +18,17 @@ func makeJunction(t *testing.T, link, target string) {
 	}
 }
 
-// Deterministic race, Windows edition: at the exact moment of the
-// rename, the target's parent is swapped for a junction to an
-// outside directory. The handle-based rename must still move the
-// VERIFIED object; the outside tree stays untouched. The restore
-// afterwards must FAIL CLOSED: the parent path now resolves
-// outside, so the object stays in quarantine rather than being
-// renamed through the junction.
+// Windows handle semantics, verified empirically on the CI runner:
+// while the target directory's handle is open (which is exactly
+// the window between pfiles' verification and its handle-based
+// rename), renaming an ANCESTOR of the target fails with Access
+// Denied — the namespace above the verified object is frozen by
+// the open handle, for us and for any other process alike. This
+// test pins that platform guarantee as a canary: phase 1 asserts
+// the ancestor swap CANNOT be staged mid-move and that the move
+// completes on the verified object; phase 2 then stages the swap
+// legitimately (between move and restore, when the original parent
+// holds no open handles) and asserts the restore fails closed.
 func TestHookSwapParentToJunctionDuringRename(t *testing.T) {
 	profiles := t.TempDir()
 	outside := t.TempDir()
@@ -34,44 +37,32 @@ func TestHookSwapParentToJunctionDuringRename(t *testing.T) {
 	writeFile(t, filepath.Join(target, "Preferences"), "user-data")
 
 	parked := filepath.Join(profiles, "p-parked")
-	var stageErrs []string
+	var renameErr error
 	HookBeforeRename = func() {
-		if err := os.Rename(filepath.Join(profiles, "p"), parked); err != nil {
-			stageErrs = append(stageErrs, "rename parent: "+err.Error())
-		}
-		cmd := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(profiles, "p"), outside)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			stageErrs = append(stageErrs, "mklink: "+err.Error()+" "+string(out))
-		}
-		// Prove the staging really took effect.
-		resolved, err := finalPathOfPath(filepath.Join(profiles, "p"))
-		if err != nil {
-			stageErrs = append(stageErrs, "resolve swapped parent: "+err.Error())
-		} else if !strings.EqualFold(resolved, outside) {
-			stageErrs = append(stageErrs, "swapped parent resolves to "+resolved+", want "+outside)
-		}
+		renameErr = os.Rename(filepath.Join(profiles, "p"), parked)
 	}
 	defer func() { HookBeforeRename = nil }()
 
 	q, err := MoveToQuarantine(profiles, target, ".q-swap")
 	if err != nil {
-		t.Fatalf("MoveToQuarantine under junction swap: %v", err)
+		t.Fatalf("MoveToQuarantine: %v", err)
 	}
 	defer func() { _ = q.Close() }()
 	HookBeforeRename = nil
-	if len(stageErrs) > 0 {
-		t.Fatalf("attack staging failed (the swap did not take effect): %v", stageErrs)
+	if renameErr == nil {
+		t.Fatal("ancestor rename unexpectedly succeeded while the target handle was open; " +
+			"the Windows namespace-freeze guarantee this design relies on has changed — re-audit required")
 	}
-
 	if _, err := os.Stat(filepath.Join(q.Path(), "Preferences")); err != nil {
 		t.Errorf("the verified object was not the one moved: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, "keep.txt")); err != nil {
-		t.Errorf("outside sentinel was touched: %v", err)
+
+	// Phase 2: the profile now sits in quarantine and the original
+	// parent holds no open handles, so the swap CAN be staged.
+	if err := os.Rename(filepath.Join(profiles, "p"), parked); err != nil {
+		t.Fatalf("stage phase-2 swap (rename parent): %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, "prof")); !os.IsNotExist(err) {
-		t.Errorf("an outside directory was moved into quarantine (err=%v)", err)
-	}
+	makeJunction(t, filepath.Join(profiles, "p"), outside)
 
 	err = q.Restore()
 	if !errors.Is(err, ErrUnsafe) {
@@ -79,6 +70,12 @@ func TestHookSwapParentToJunctionDuringRename(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(q.Path(), "Preferences")); err != nil {
 		t.Errorf("profile should still be safe in quarantine after refused restore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep.txt")); err != nil {
+		t.Errorf("outside sentinel was touched: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "prof")); !os.IsNotExist(err) {
+		t.Errorf("profile was restored through the junction (err=%v)", err)
 	}
 	// Cleanup: drop the junction (removes the link only), restore
 	// the parked parent.
