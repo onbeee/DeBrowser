@@ -13,7 +13,7 @@ import (
 // The file URI must percent-encode URI-special characters so a folder
 // named e.g. "DeBrowser #2" cannot redirect the database to a
 // truncated or different path.
-func TestSQLiteFileURIEncodesSpecialCharacters(t *testing.T) {
+func TestFileURIEncodesSpecialCharacters(t *testing.T) {
 	cases := []struct {
 		name string
 		path string
@@ -26,7 +26,7 @@ func TestSQLiteFileURIEncodesSpecialCharacters(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			uri := sqliteFileURI(tc.path)
+			uri := FileURI(tc.path)
 			parsed, err := url.Parse(uri)
 			if err != nil {
 				t.Fatalf("url.Parse(%q): %v", uri, err)
@@ -116,5 +116,30 @@ func TestOpenDatabaseUnderSpecialCharDirectories(t *testing.T) {
 				t.Errorf("value after reopen = %q, want special", v)
 			}
 		})
+	}
+}
+
+// UNC paths: \\server\share\... must become file://server/share/...
+// with the server as the URI host. On Windows, filepath.ToSlash turns
+// the backslash form into the //server/share form first, so the test
+// exercises that canonical form on every platform (plus the raw
+// backslash form on Windows itself).
+func TestFileURIUNC(t *testing.T) {
+	uri := FileURI("//server/share/DeBrowser/data/debrowser.db")
+	if uri != "file://server/share/DeBrowser/data/debrowser.db" {
+		t.Errorf("FileURI(UNC) = %q, want file://server/share/DeBrowser/data/debrowser.db", uri)
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", uri, err)
+	}
+	if parsed.Host != "server" || parsed.Path != "/share/DeBrowser/data/debrowser.db" {
+		t.Errorf("parsed UNC = host %q path %q, want server + /share/DeBrowser/data/debrowser.db",
+			parsed.Host, parsed.Path)
+	}
+	if runtime.GOOS == "windows" {
+		if got := FileURI(`\\server\share\DeBrowser\data\debrowser.db`); got != uri {
+			t.Errorf("FileURI(backslash UNC) = %q, want %q", got, uri)
+		}
 	}
 }
