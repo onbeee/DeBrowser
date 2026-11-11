@@ -111,15 +111,21 @@ func (a *App) focusWindow() {
 }
 
 // Run runs the application until it exits, then drains every
-// background loop before returning. Only after Run returns may the
-// caller close the database and other shared resources.
+// background loop before returning. The drain is UNBOUNDED by
+// design: cancelling the context cannot interrupt a loop callback
+// that is already running (for example a status snapshot reading
+// the database), so returning on a timeout would let main close the
+// database underneath a live reader. Instead, Run logs a warning
+// every 5 seconds while draining and returns only when every loop
+// has provably exited. Both loop callbacks are short, bounded local
+// operations (a status read, a file stat), so in practice the drain
+// completes in milliseconds. Only after Run returns may the caller
+// close the database and other shared resources.
 func (a *App) Run() error {
 	err := a.wails.Run()
 	a.cancel()
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer waitCancel()
-	if !lifecycle.WaitAll(waitCtx, a.loops...) {
-		a.log.Warn("background loops did not stop within 5s of shutdown")
-	}
+	lifecycle.WaitForever(5*time.Second, func() {
+		a.log.Warn("background loops still draining after 5s; waiting for them to finish before shutdown continues")
+	}, a.loops...)
 	return err
 }
