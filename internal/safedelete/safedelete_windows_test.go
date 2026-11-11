@@ -315,6 +315,53 @@ func TestHandleWipeFileSwappedAfterEnumerate(t *testing.T) {
 	}
 }
 
+// The strongest substitution form: after enumeration the child
+// is DELETED outright and a brand-new object is created under the
+// same name. Microsoft documents that file systems are free to
+// reuse file IDs after deletion, so the identity guarantee would
+// be void if the recreated object actually inherited the
+// enumerated 128-bit ID — on NTFS it does not (a replacement gets
+// a different file reference), and this test pins that behavior:
+// the wipe must fail closed and the recreated file must survive
+// byte-for-byte. (TestHandleWipeFileSwappedAfterEnumerate covers
+// the same window via a remove+write in one step; this test
+// isolates the delete-then-recreate sequence by name.)
+func TestHandleWipeFileRecreatedAfterEnumerate(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "prof")
+	writeFile(t, filepath.Join(target, "victim.txt"), "original")
+	victim := filepath.Join(target, "victim.txt")
+	fired := false
+	HookAfterEnumerate = func(dirDisplay string) {
+		if dirDisplay != target || fired {
+			return
+		}
+		fired = true
+		if err := os.Remove(victim); err != nil {
+			t.Errorf("hook remove: %v", err)
+			return
+		}
+		if err := os.WriteFile(victim, []byte("recreated"), 0o644); err != nil {
+			t.Errorf("hook recreate: %v", err)
+		}
+	}
+	defer func() { HookAfterEnumerate = nil }()
+
+	h := openRootHandle(t, target)
+	err := RemoveTreeFromHandle(h, target)
+	_ = syscall.CloseHandle(h)
+	if err == nil {
+		t.Fatal("wipe succeeded after the enumerated file was deleted and recreated; want an identity failure")
+	}
+	if !strings.Contains(err.Error(), "object identity changed during wipe") {
+		t.Fatalf("wipe failed for an unexpected reason: %v", err)
+	}
+	data, rerr := os.ReadFile(victim)
+	if rerr != nil || string(data) != "recreated" {
+		t.Errorf("recreated file was harmed: data=%q err=%v", data, rerr)
+	}
+}
+
 // An empty directory wipes cleanly (the enumeration ends with
 // ERROR_NO_MORE_FILES on the first, restart, call).
 func TestHandleWipeEmptyDirectory(t *testing.T) {
@@ -477,6 +524,52 @@ func TestParseExtdDirEntries(t *testing.T) {
 	binary.LittleEndian.PutUint32(bad3[60:], 3) // odd name length
 	if _, err := parseExtdDirEntries(bad3, &[]dirEntry{}); err == nil {
 		t.Error("odd file name length was accepted")
+	}
+	// NextEntryOffset that cuts through the record's own file
+	// name: "abcdefgh" occupies 88+16=104 bytes of record, but the
+	// next record is placed at 96, INSIDE that name. The second
+	// record is itself well-formed, so only the record-extent
+	// check (NextEntryOffset >= header + FileNameLength) can
+	// reject this buffer — without it the walk would happily read
+	// overlapping records.
+	bad4 := make([]byte, 512)
+	mkEntry(bad4, 0, 96, 0x10, 0xA0, "abcdefgh")
+	mkEntry(bad4, 96, 0, 0x10, 0xB0, "zz")
+	if _, err := parseExtdDirEntries(bad4, &[]dirEntry{}); err == nil {
+		t.Error("NextEntryOffset smaller than header+file name was accepted (records overlap)")
+	}
+	// A file name length at the uint32 boundary: 88 + 0xFFFFFFFE
+	// must not wrap to a small number in the bounds arithmetic.
+	bad5 := make([]byte, 512)
+	mkEntry(bad5, 0, 0, 0x10, 0xA0, "ab")
+	binary.LittleEndian.PutUint32(bad5[60:], 0xFFFFFFFE)
+	if _, err := parseExtdDirEntries(bad5, &[]dirEntry{}); err == nil {
+		t.Error("file name length 0xFFFFFFFE was accepted (bounds arithmetic overflow)")
+	}
+	// Misaligned NextEntryOffset.
+	bad6 := make([]byte, 512)
+	mkEntry(bad6, 0, 97, 0x10, 0xA0, "ab")
+	if _, err := parseExtdDirEntries(bad6, &[]dirEntry{}); err == nil {
+		t.Error("misaligned NextEntryOffset was accepted")
+	}
+	// A well-formed first record followed by a malformed second
+	// record must fail the buffer as a whole. The caller
+	// (enumerateFromHandle) discards partial results on error, so
+	// no entry from a malformed buffer is ever acted on — a parse
+	// error can therefore never lead to a deletion.
+	bad7 := make([]byte, 512)
+	mkEntry(bad7, 0, 96, 0x10, 0xA0, "ab")
+	mkEntry(bad7, 96, 40, 0x10, 0xB0, "cd")
+	if _, err := parseExtdDirEntries(bad7, &[]dirEntry{}); err == nil {
+		t.Error("malformed second record was accepted")
+	}
+	// Valid single terminal record.
+	one := make([]byte, 512)
+	mkEntry(one, 0, 0, 0x20, 0xC0, "solo")
+	var oneOut []dirEntry
+	walkedOne, err := parseExtdDirEntries(one, &oneOut)
+	if err != nil || walkedOne != 1 || len(oneOut) != 1 || oneOut[0].name != "solo" {
+		t.Errorf("valid single record: walked=%d entries=%v err=%v", walkedOne, oneOut, err)
 	}
 }
 
