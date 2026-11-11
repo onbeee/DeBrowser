@@ -74,6 +74,19 @@ func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
 			t.Errorf("unsafe dir %q accepted, want error", bad)
 		}
 	}
+	// Windows reinterpretation spellings are refused: NTFS ADS
+	// (':'), reserved device names, trailing dot/space aliasing,
+	// illegal characters, and smuggled backslash separators.
+	for _, bad := range []string{
+		"profiles/x:stream", "profiles/CON", "profiles/con.txt", "profiles/AUX",
+		"profiles/COM1", "profiles/lpt9.dat", "profiles/NUL",
+		"profiles/name.", "profiles/name ", "profiles/a<b", "profiles/a|b",
+		`profiles/a\b`,
+	} {
+		if _, err := svc.CreateInstance(CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
+			t.Errorf("windows-unsafe dir %q accepted, want error", bad)
+		}
+	}
 	// Missing proxy is refused before insert.
 	ghost := "no-such-proxy"
 	if _, err := svc.CreateInstance(CreateInstanceInput{Name: "ghost", ProxyID: &ghost}); err == nil ||
