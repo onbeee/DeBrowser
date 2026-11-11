@@ -11,85 +11,133 @@ import (
 	"unsafe"
 )
 
-// removeTree implements RemoveTree on Windows. Windows has no
-// unlinkat-style handle-relative deletion in the standard library,
-// so the anchoring is done by VERIFICATION PER DIRECTORY: before a
-// directory's children are touched, the directory's own final path
-// (GetFinalPathNameByHandle — resolves every reparse point) must
-// equal its lexical path. Any entry that resolves elsewhere is a
-// reparse point (symlink, junction, mount point) and is removed as
-// a link object only: RemoveDirectory/DeleteFile on a reparse point
-// removes the point itself, never its target's contents.
+// removeTree implements RemoveTree on Windows with HANDLE-based
+// deletion. The standard library has no unlinkat equivalent, so
+// every object is handled like this:
+//
+//  1. Open it with FILE_FLAG_OPEN_REPARSE_POINT and DELETE access:
+//     the handle names the object itself — for a link, the link.
+//  2. Verify identity through the handle: the object must not be
+//     somewhere unexpected (its GetFinalPathNameByHandle must equal
+//     <verified parent final path>\<name>); a mismatch fails
+//     closed and nothing is deleted.
+//  3. A reparse point (symlink, junction, mount point) is deleted
+//     as the link object alone, via SetFileInformationByHandle
+//     (FileDispositionInfo) on its own handle — its target's
+//     contents are never enumerated or touched.
+//  4. A real directory's children are processed one by one under
+//     the same rules (names come from a listing, but every child is
+//     handle-verified before anything happens to it), and the
+//     emptied directory is then disposition-deleted through its
+//     handle.
 func removeTree(root, target string) error {
-	return removeDir(target)
+	parentFinal, err := finalPathOfPath(filepath.Dir(target))
+	if err != nil {
+		return fmt.Errorf("safedelete: resolve parent of %s: %w", target, err)
+	}
+	return removeEntry(target, parentFinal)
 }
 
-func removeDir(dir string) error {
-	resolved, err := finalPath(dir)
+func removeEntry(path string, parentFinal string) error {
+	h, err := openObject(path)
 	if err != nil {
-		return fmt.Errorf("safedelete: resolve %s: %w", dir, err)
+		return fmt.Errorf("safedelete: open %s: %w", path, err)
 	}
-	// A directory counts as a reparse point when resolving it lands
-	// somewhere other than <resolved parent>\<its own name>. The
-	// comparison must NOT be against the lexical path: the resolver
-	// returns long-form names while callers may hold 8.3 short forms
-	// (e.g. C:\Users\RUNNER~1\... from %TEMP%), which made plain
-	// directories look like reparse points in CI.
-	resolvedParent, err := finalPath(filepath.Dir(dir))
+	defer func() { _ = syscall.CloseHandle(h) }()
+
+	var info syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(h, &info); err != nil {
+		return fmt.Errorf("safedelete: stat %s: %w", path, err)
+	}
+	final, err := finalPathOfHandle(h)
 	if err != nil {
-		return fmt.Errorf("safedelete: resolve parent of %s: %w", dir, err)
+		return fmt.Errorf("safedelete: resolve %s: %w", path, err)
 	}
-	if !pathsEqual(resolved, filepath.Join(resolvedParent, filepath.Base(dir))) {
-		// This directory itself is a reparse point: remove the
-		// point only. Its target's contents are not touched.
-		if err := os.Remove(dir); err != nil {
-			return fmt.Errorf("safedelete: remove reparse point %s: %w", dir, err)
+	expected := filepath.Join(parentFinal, filepath.Base(path))
+	if !strings.EqualFold(final, expected) {
+		// The object at this path is not where it claims to be (an
+		// ancestor or the entry itself redirected). Fail closed.
+		return fmt.Errorf("safedelete: %s resolves to %s, expected %s; refusing to delete", path, final, expected)
+	}
+
+	const fileAttributeReparsePoint = 0x00000400
+	const fileAttributeDirectory = 0x00000010
+	if info.FileAttributes&fileAttributeReparsePoint != 0 {
+		// Link object: delete IT, never its target.
+		if err := dispositionDelete(h); err != nil {
+			return fmt.Errorf("safedelete: delete reparse point %s: %w", path, err)
 		}
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
+	if info.FileAttributes&fileAttributeDirectory == 0 {
+		if err := dispositionDelete(h); err != nil {
+			return fmt.Errorf("safedelete: delete %s: %w", path, err)
+		}
+		return nil
+	}
+	entries, err := os.ReadDir(path)
 	if err != nil {
-		return fmt.Errorf("safedelete: read dir %s: %w", dir, err)
+		return fmt.Errorf("safedelete: read dir %s: %w", path, err)
 	}
 	for _, entry := range entries {
-		child := filepath.Join(dir, entry.Name())
-		if entry.IsDir() {
-			// IsDir follows the entry info from ReadDir; a junction
-			// also reports as a directory, so removeDir's own
-			// final-path verification decides: reparse points are
-			// unlinked, real directories are emptied recursively.
-			if err := removeDir(child); err != nil {
-				return err
-			}
-			continue
-		}
-		// Files and non-directory links: os.Remove deletes the
-		// entry itself (for a symlink, the link), never the target.
-		if err := os.Remove(child); err != nil {
-			return fmt.Errorf("safedelete: remove %s: %w", child, err)
+		if err := removeEntry(filepath.Join(path, entry.Name()), final); err != nil {
+			return err
 		}
 	}
-	if err := os.Remove(dir); err != nil {
-		return fmt.Errorf("safedelete: rmdir %s: %w", dir, err)
+	if err := dispositionDelete(h); err != nil {
+		return fmt.Errorf("safedelete: rmdir %s: %w", path, err)
 	}
 	return nil
 }
 
-// pathsEqual compares two Windows paths case-insensitively (the
-// filesystem is case-insensitive) after cleaning.
-func pathsEqual(a, b string) bool {
-	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+const (
+	fileFlagBackupSemantics  = 0x02000000
+	fileFlagOpenReparsePoint = 0x00200000
+	deleteAccess             = 0x00010000
+)
+
+// openObject opens path for deletion without following it if it is
+// a reparse point.
+func openObject(path string) (syscall.Handle, error) {
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, err
+	}
+	return syscall.CreateFile(
+		pathPtr,
+		deleteAccess,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil,
+		syscall.OPEN_EXISTING,
+		fileFlagBackupSemantics|fileFlagOpenReparsePoint,
+		0,
+	)
 }
 
-// finalPath resolves every reparse point in p via
-// GetFinalPathNameByHandle (see the service package for why
-// filepath.EvalSymlinks alone is not reliable for junctions).
-func finalPath(p string) (string, error) {
+// dispositionDelete marks the object behind h for deletion; the
+// deletion takes effect when the last handle closes.
+func dispositionDelete(h syscall.Handle) error {
+	const fileDispositionInfo = 4
+	// FILE_DISPOSITION_INFO is a single BOOLEAN.
+	var flag byte = 1
+	proc := syscall.NewLazyDLL("kernel32.dll").NewProc("SetFileInformationByHandle")
+	r1, _, callErr := proc.Call(
+		uintptr(h),
+		uintptr(fileDispositionInfo),
+		uintptr(unsafe.Pointer(&flag)),
+		uintptr(1),
+	)
+	if r1 == 0 {
+		return fmt.Errorf("SetFileInformationByHandle(FileDispositionInfo): %w", callErr)
+	}
+	return nil
+}
+
+func finalPathOfPath(p string) (string, error) {
 	pathPtr, err := syscall.UTF16PtrFromString(p)
 	if err != nil {
 		return "", err
 	}
-	const fileFlagBackupSemantics = 0x02000000
 	h, err := syscall.CreateFile(
 		pathPtr,
 		0,
@@ -103,6 +151,10 @@ func finalPath(p string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = syscall.CloseHandle(h) }()
+	return finalPathOfHandle(h)
+}
+
+func finalPathOfHandle(h syscall.Handle) (string, error) {
 	getFinalPath := syscall.NewLazyDLL("kernel32.dll").NewProc("GetFinalPathNameByHandleW")
 	buf := make([]uint16, syscall.MAX_PATH)
 	for {
