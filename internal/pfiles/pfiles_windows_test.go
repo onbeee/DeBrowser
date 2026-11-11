@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,10 +34,22 @@ func TestHookSwapParentToJunctionDuringRename(t *testing.T) {
 	writeFile(t, filepath.Join(target, "Preferences"), "user-data")
 
 	parked := filepath.Join(profiles, "p-parked")
+	var stageErrs []string
 	HookBeforeRename = func() {
-		_ = os.Rename(filepath.Join(profiles, "p"), parked)
+		if err := os.Rename(filepath.Join(profiles, "p"), parked); err != nil {
+			stageErrs = append(stageErrs, "rename parent: "+err.Error())
+		}
 		cmd := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(profiles, "p"), outside)
-		_ = cmd.Run()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			stageErrs = append(stageErrs, "mklink: "+err.Error()+" "+string(out))
+		}
+		// Prove the staging really took effect.
+		resolved, err := finalPathOfPath(filepath.Join(profiles, "p"))
+		if err != nil {
+			stageErrs = append(stageErrs, "resolve swapped parent: "+err.Error())
+		} else if !strings.EqualFold(resolved, outside) {
+			stageErrs = append(stageErrs, "swapped parent resolves to "+resolved+", want "+outside)
+		}
 	}
 	defer func() { HookBeforeRename = nil }()
 
@@ -46,6 +59,9 @@ func TestHookSwapParentToJunctionDuringRename(t *testing.T) {
 	}
 	defer func() { _ = q.Close() }()
 	HookBeforeRename = nil
+	if len(stageErrs) > 0 {
+		t.Fatalf("attack staging failed (the swap did not take effect): %v", stageErrs)
+	}
 
 	if _, err := os.Stat(filepath.Join(q.Path(), "Preferences")); err != nil {
 		t.Errorf("the verified object was not the one moved: %v", err)
