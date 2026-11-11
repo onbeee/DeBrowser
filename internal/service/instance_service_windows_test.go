@@ -89,3 +89,46 @@ func TestPurgeRefusesJunctionAsProfileDirOnWindows(t *testing.T) {
 		t.Errorf("normal profile dir still exists (err=%v)", err)
 	}
 }
+
+// Deterministic round-4 attack, service level, real junction:
+// verification completes, THEN the intermediate component is
+// swapped for a junction to an outside directory holding a
+// same-named directory. The purge must refuse; record, real
+// profile and outside data all stay intact.
+func TestPurgeSwapIntermediateJunctionAfterVerifyRefusedOnWindows(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "prof"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "prof", "Preferences"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profDir := filepath.Join(cfg.Layout.Profiles, "mid", "prof")
+	if err := os.MkdirAll(profDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profDir, "Preferences"), []byte("user-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := seedInstance(t, cfg, "junctionswap", "profiles/mid/prof")
+
+	svc.afterVerifyHook = func() {
+		_ = os.Rename(filepath.Join(cfg.Layout.Profiles, "mid"), filepath.Join(cfg.Layout.Profiles, "mid-parked"))
+		cmd := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(cfg.Layout.Profiles, "mid"), outside)
+		_ = cmd.Run()
+	}
+	if err := svc.DeleteInstanceAndProfile(in.ID); err == nil {
+		t.Fatal("purge under post-verify junction swap succeeded, want refusal")
+	}
+	if _, err := svc.GetInstance(in.ID); err != nil {
+		t.Errorf("record lost after refused purge: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "prof", "Preferences")); err != nil {
+		t.Errorf("outside directory was harmed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Layout.Profiles, "mid-parked", "prof", "Preferences")); err != nil {
+		t.Errorf("real profile was moved or harmed: %v", err)
+	}
+	_ = os.Remove(filepath.Join(cfg.Layout.Profiles, "mid")) // junction link only
+}
