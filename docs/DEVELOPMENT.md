@@ -42,6 +42,12 @@ wails3 generate bindings -clean=true -ts -i   # regenerate frontend/bindings aft
 
 The full `task build` also generates the Windows icon and `.syso` resources, which requires `build/appicon.png` (a 1024×1024 PNG app icon). That binary asset is **not in the repository yet** — see "Known limitations" below. Until it is added, generate Wails' example icon as a placeholder: `wails3 generate icons -example` (run inside `build/`), which is exactly what CI does.
 
+## Data layer (Stage 2)
+
+- Schema changes ship as new files in `internal/database/migrations/` (`NNNN_name.sql`, append-only — never edit a merged migration).
+- All SQL for core models belongs in `internal/store`; business code uses repositories and `Store.WithTx` for multi-row atomic work, never raw SQL scattered across packages.
+- Tests must use `t.TempDir()` databases; never point tests (or manual experiments with production code paths) at a real user database.
+
 ## Checks (run before opening a PR)
 
 ```powershell
