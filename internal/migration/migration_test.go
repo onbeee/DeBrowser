@@ -8,12 +8,13 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/paths"
 )
 
 func makeLegacyDB(t *testing.T, file string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(file))
+	db, err := sql.Open("sqlite", database.FileURI(file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +37,7 @@ func makeLegacyDB(t *testing.T, file string) {
 
 func readTheme(t *testing.T, file string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(file)+"?mode=ro")
+	db, err := sql.Open("sqlite", database.FileURI(file)+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,5 +161,41 @@ func TestMigrateFreshInstall(t *testing.T) {
 	}
 	if report.Needed {
 		t.Errorf("fresh install reported Needed: %+v", report)
+	}
+}
+
+// The legacy (Stage 1) location and the portable target may both live
+// under directories whose names contain URI-special characters —
+// spaces, '#', '%' and non-ASCII text. The migration's read-only
+// connections must still open exactly the intended files.
+func TestMigrateLegacyDataUnderSpecialCharPaths(t *testing.T) {
+	base := t.TempDir()
+	legacyRoot := filepath.Join(base, "旧 数据#1%", "DeBrowser")
+	if err := os.MkdirAll(legacyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeLegacyDB(t, filepath.Join(legacyRoot, "debrowser.db"))
+
+	layout, err := paths.Resolve(filepath.Join(base, "便携 目录#2%", "DeBrowser"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Run(layout, legacyRoot)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !report.Needed || !report.DatabaseCopied {
+		t.Fatalf("report = %+v, want needed + database copied", report)
+	}
+	if got := readTheme(t, layout.DatabaseFile); got != "warm" {
+		t.Errorf("migrated theme = %q, want warm", got)
+	}
+	// The legacy database is left untouched.
+	if got := readTheme(t, filepath.Join(legacyRoot, "debrowser.db")); got != "warm" {
+		t.Errorf("legacy theme after migration = %q, want warm (untouched)", got)
 	}
 }

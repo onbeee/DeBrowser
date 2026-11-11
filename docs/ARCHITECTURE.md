@@ -21,7 +21,8 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 ├────────────────────────────────────────────────────────┤
 │ Foundation (internal/)                                 │
 │  paths · config · settings · migration · logging       │
-│  database (SQLite + migrations) · version              │
+│  database (SQLite + migrations + backups) · version    │
+│  model · store (repositories, Stage 2)                 │
 │  version                                               │
 ├────────────────────────────────────────────────────────┤
 │ Local resources                                        │
@@ -40,7 +41,7 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 1. `internal/config` + `internal/paths` resolve the portable layout from the executable's directory (never the working directory), create all directories and probe that the application root is writable - a read-only location aborts startup with a clear error; there is no fallback to `%APPDATA%`.
 2. `internal/logging` opens the structured (JSON) log file under `data/logs`.
 3. `internal/migration` performs the one-time, idempotent migration of Stage 1 roaming data (`%AppData%\DeBrowser`): the database is snapshotted with `VACUUM INTO` from a read-only connection (WAL-consistent) and verified; auxiliary files are copied with hash verification; existing files are never overwritten, the legacy folder is kept as a backup, and a failure aborts startup instead of creating an empty replacement database. Legacy WebView2 data is never migrated - the portable build re-initializes it under `<root>\webview2-data`.
-4. `internal/database` opens SQLite (WAL mode, foreign keys on) and applies pending migrations transactionally.
+4. `internal/database` opens SQLite (WAL mode, `synchronous=FULL`, foreign keys on) and applies pending migrations transactionally, taking a verified `VACUUM INTO` backup into `data\backups\` first when upgrading an existing database. Core data access goes through `internal/store` repositories over `internal/model` types (Stage 2).
 5. `internal/service` constructs the Wails services (including persisted user settings from `config/settings.json`, managed by `internal/settings`).
 6. `internal/app` assembles the Wails application (services, main window with `Windows.WebviewUserDataPath` set to the portable WebView2 directory, status event loop) and `main` runs it.
 

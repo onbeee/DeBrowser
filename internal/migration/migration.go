@@ -37,6 +37,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/onbeee/DeBrowser/internal/config"
+	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/paths"
 )
 
@@ -134,7 +135,7 @@ func hasFiles(root string) bool {
 // VACUUM INTO and verifies the result. On any failure the partial
 // target is removed and the legacy database is left untouched.
 func copyDatabase(legacyDB, target string) error {
-	dsn := "file:" + filepath.ToSlash(legacyDB) + "?mode=ro&_pragma=busy_timeout(5000)"
+	dsn := database.FileURI(legacyDB) + "?mode=ro&_pragma=busy_timeout(5000)"
 	src, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("open legacy database: %w", err)
@@ -155,7 +156,7 @@ func copyDatabase(legacyDB, target string) error {
 }
 
 func verifyDatabase(src *sql.DB, target string) error {
-	dst, err := sql.Open("sqlite", "file:"+filepath.ToSlash(target)+"?mode=ro")
+	dst, err := sql.Open("sqlite", database.FileURI(target)+"?mode=ro")
 	if err != nil {
 		return fmt.Errorf("open copied database: %w", err)
 	}

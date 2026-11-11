@@ -77,7 +77,9 @@ func main() {
 		}
 	}
 
-	db, err := database.Open(cfg.Layout.DatabaseFile)
+	db, err := database.OpenWithOptions(cfg.Layout.DatabaseFile, database.Options{
+		BackupDir: cfg.Layout.Backups,
+	})
 	if err != nil {
 		logger.Error("open database failed", "error", err)
 		log.Fatalf("debrowser: %v", err)

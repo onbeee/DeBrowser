@@ -52,8 +52,12 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatalf("count schema_migrations error = %v", err)
 	}
-	if applied != 1 {
-		t.Errorf("applied migrations = %d, want 1", applied)
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations() error = %v", err)
+	}
+	if applied != len(migs) {
+		t.Errorf("applied migrations = %d, want %d", applied, len(migs))
 	}
 
 	// The foundation table must exist and accept rows.
