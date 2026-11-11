@@ -13,6 +13,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/paths"
+	"github.com/onbeee/DeBrowser/internal/safedelete"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
 
@@ -31,6 +32,10 @@ type InstanceService struct {
 	store  *store.Store
 	layout paths.Layout
 	log    *slog.Logger
+	// deleteRecord removes an instance row. It is a field so tests
+	// can inject a failure into the middle of
+	// DeleteInstanceAndProfile and verify the profile restore.
+	deleteRecord func(ctx context.Context, id string) error
 }
 
 // NewInstanceService builds the service and reconciles persisted
@@ -38,6 +43,7 @@ type InstanceService struct {
 // owned by the caller (main) and is never closed here.
 func NewInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger) (*InstanceService, error) {
 	s := &InstanceService{store: store.New(db), layout: layout, log: log}
+	s.deleteRecord = s.store.DeleteInstance
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	n, err := s.store.ReconcileInstanceStatuses(ctx)
@@ -218,10 +224,26 @@ func (s *InstanceService) DeleteInstance(id string) error {
 
 // DeleteInstanceAndProfile is the explicit, destructive counterpart
 // of DeleteInstance: it removes the profile directory AND the
-// metadata. Safety rules, all enforced before anything is removed:
-// the target must resolve strictly inside the layout's profiles
-// directory (never the profiles root itself, never an escaping or
-// absolute path), and a persisted "running" instance is refused.
+// metadata. It is structured so no failure loses data silently:
+//
+//  1. The stored path is proven safe (verifiedProfileTarget: the
+//     directory itself is not a link, and its fully resolved real
+//     path lies strictly inside the profiles directory).
+//  2. The directory is RENAMED into a quarantine slot directly
+//     under profiles (same volume, atomic). Renaming a directory
+//     never follows it; from here on the data sits at a path this
+//     process alone chose, so the check/use gap is closed: whatever
+//     the anchored wipe later removes can only be what the rename
+//     actually moved.
+//  3. The database record is deleted. If that fails, the quarantine
+//     directory is renamed BACK — the operation aborts with the
+//     profile and the record both intact.
+//  4. Only with the record gone is the quarantine tree wiped, by
+//     internal/safedelete's anchored traversal (never follows links
+//     out of the tree). A wipe failure leaves the data in the
+//     quarantine slot — reported in the error, never silently lost.
+//
+// A persisted "running" instance is refused before any of this.
 func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
 	c, cancel := ctx()
 	defer cancel()
@@ -239,19 +261,57 @@ func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
 	if err != nil {
 		return err
 	}
-	// target is the RESOLVED real path ("" when nothing exists on
-	// disk): deletion acts on the verified location itself, never on
-	// a path whose components might redirect it elsewhere.
-	if target != "" {
-		if err := os.RemoveAll(target); err != nil {
-			return fmt.Errorf("删除 Profile 目录失败：%w", err)
+	if target == "" {
+		// Nothing on disk: only the record needs to go.
+		if err := s.store.DeleteInstance(c, id); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("实例不存在")
+			}
+			return err
 		}
+		s.log.Info("instance deleted (no profile directory on disk)", "id", id)
+		return nil
 	}
-	if err := s.store.DeleteInstance(c, id); err != nil {
+
+	quarantine, err := s.quarantinePath()
+	if err != nil {
 		return err
+	}
+	if err := os.Rename(target, quarantine); err != nil {
+		return fmt.Errorf("隔离 Profile 目录失败：%w", err)
+	}
+	if err := s.deleteRecord(c, id); err != nil {
+		// Restore the directory to its original location; the
+		// operation must leave the world exactly as it found it.
+		if rerr := os.Rename(quarantine, target); rerr != nil {
+			return fmt.Errorf("删除实例记录失败，且 Profile 目录恢复失败（数据保留在隔离目录 %s）：%w", quarantine, err)
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("实例不存在")
+		}
+		return err
+	}
+	if err := safedelete.RemoveTree(s.layout.Profiles, quarantine); err != nil {
+		return fmt.Errorf("实例记录已删除，但 Profile 数据清理不完全（残留在隔离目录 %s）：%w", quarantine, err)
 	}
 	s.log.Info("instance and profile deleted", "id", id, "dir", in.UserDataDir)
 	return nil
+}
+
+// quarantinePath picks a fresh, unused quarantine slot directly
+// under the profiles directory.
+func (s *InstanceService) quarantinePath() (string, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		id, err := store.NewID()
+		if err != nil {
+			return "", err
+		}
+		candidate := filepath.Join(s.layout.Profiles, ".debrowser-quarantine-"+id)
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("无法分配隔离目录")
 }
 
 // validateProfileDir checks a user-supplied profile directory: it
