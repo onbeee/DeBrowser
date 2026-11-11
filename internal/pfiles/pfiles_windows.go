@@ -52,6 +52,17 @@ var procSetFileInfoByHandle = syscall.NewLazyDLL("kernel32.dll").NewProc("SetFil
 func MoveToQuarantine(profilesDir, target, quarantineName string) (*Quarantine, error) {
 	cleanRoot := filepath.Clean(profilesDir)
 	cleanTarget := filepath.Clean(target)
+	// Containment must be judged on RESOLVED paths: callers may
+	// hold the profiles root in 8.3 short form (C:\Users\RUNNER~1\
+	// from %TEMP%) while the target arrives resolved to long form —
+	// a lexical Rel between the two forms fails even though the
+	// target is plainly inside. Canonicalize the root through its
+	// own final path first.
+	resolvedRoot, err := finalPathOfPath(cleanRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve profiles root: %v", ErrUnsafe, err)
+	}
+	cleanRoot = resolvedRoot
 	rel, err := filepath.Rel(cleanRoot, cleanTarget)
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return nil, fmt.Errorf("%w: target %s is not inside profiles %s", ErrUnsafe, target, profilesDir)
@@ -199,6 +210,27 @@ func fileInfo(h syscall.Handle) (*syscall.ByHandleFileInformation, error) {
 	return &info, nil
 }
 
+func finalPathOfPath(p string) (string, error) {
+	pathPtr, err := syscall.UTF16PtrFromString(p)
+	if err != nil {
+		return "", err
+	}
+	h, err := syscall.CreateFile(
+		pathPtr,
+		0,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil,
+		syscall.OPEN_EXISTING,
+		fileFlagBackupSemantics|fileFlagOpenReparsePoint,
+		0,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = syscall.CloseHandle(h) }()
+	return finalPathOf(h)
+}
+
 func finalPathOf(h syscall.Handle) (string, error) {
 	getFinalPath := syscall.NewLazyDLL("kernel32.dll").NewProc("GetFinalPathNameByHandleW")
 	buf := make([]uint16, syscall.MAX_PATH)
@@ -237,14 +269,16 @@ func renameByHandle(h syscall.Handle, destPath string) error {
 	// The name is stored without its NUL terminator; FileNameLength
 	// counts bytes.
 	nameBytes := uint32(2 * (len(nameUTF16) - 1))
-	// FILE_RENAME_INFO: BOOLEAN ReplaceIfExists + 7 bytes padding,
-	// HANDLE RootDirectory (8), DWORD FileNameLength (4) + padding,
-	// then the WCHAR name.
-	buf := make([]byte, 24+2*len(nameUTF16))
+	// FILE_RENAME_INFO layout (x64): BOOLEAN ReplaceIfExists at 0
+	// (with the union's padding, RootDirectory lands at offset 8),
+	// DWORD FileNameLength at 16, and the WCHAR FileName at offset
+	// 20 — NOT 24: a 24-byte header would prepend a NUL to the name
+	// and the call fails with ERROR_INVALID_NAME.
+	buf := make([]byte, 20+2*len(nameUTF16))
 	// buf[0] = 0 (ReplaceIfExists = FALSE); RootDirectory = NULL.
 	*(*uint32)(unsafe.Pointer(&buf[16])) = nameBytes
 	for i, c := range nameUTF16 {
-		*(*uint16)(unsafe.Pointer(&buf[24+2*i])) = c
+		*(*uint16)(unsafe.Pointer(&buf[20+2*i])) = c
 	}
 	r1, _, callErr := procSetFileInfoByHandle.Call(
 		uintptr(h),
