@@ -11,10 +11,14 @@ import (
 
 // Windows byte-range locking via LockFileEx, loaded from kernel32
 // through the standard library only (no x/sys dependency). A
-// one-byte exclusive lock at offset 0 arbitrates the whole instance
-// lock: the OS releases it automatically when the holding process
-// dies — cleanly, by crash, or by force kill — so a stale lock can
-// never survive its owner.
+// one-byte exclusive lock at offset 4096 arbitrates the whole
+// instance lock: the OS releases it automatically when the holding
+// process dies — cleanly, by crash, or by force kill — so a stale
+// lock can never survive its owner. The arbitration byte sits far
+// past the informational PID content at the start of the file
+// (see lockOffset): Windows byte-range locks are mandatory, so
+// locking any of the leading bytes would also block other
+// processes from reading the PID recorded there.
 
 var (
 	kernel32       = syscall.NewLazyDLL("kernel32.dll")
