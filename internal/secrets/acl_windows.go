@@ -4,7 +4,6 @@ package secrets
 
 import (
 	"fmt"
-	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -33,17 +32,18 @@ import (
 // one line: D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;<user SID>).
 
 var (
-	advapi32                      = syscall.NewLazyDLL("advapi32.dll")
-	procOpenProcessToken          = advapi32.NewProc("OpenProcessToken")
-	procGetTokenInformation       = advapi32.NewProc("GetTokenInformation")
-	procConvertSidToStringSidW    = advapi32.NewProc("ConvertSidToStringSidW")
-	procConvertStringSDToSDW      = advapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
-	procGetSecurityDescriptorDacl = advapi32.NewProc("GetSecurityDescriptorDacl")
-	procSetNamedSecurityInfoW     = advapi32.NewProc("SetNamedSecurityInfoW")
-	procGetNamedSecurityInfoW     = advapi32.NewProc("GetNamedSecurityInfoW")
-	procConvertSDToStringSDW      = advapi32.NewProc("ConvertSecurityDescriptorToStringSecurityDescriptorW")
-	procGetCurrentProcess         = kernel32ForSecrets.NewProc("GetCurrentProcess")
-	procCloseHandleSecrets        = kernel32ForSecrets.NewProc("CloseHandle")
+	advapi32                         = syscall.NewLazyDLL("advapi32.dll")
+	procOpenProcessToken             = advapi32.NewProc("OpenProcessToken")
+	procGetTokenInformation          = advapi32.NewProc("GetTokenInformation")
+	procConvertSidToStringSidW       = advapi32.NewProc("ConvertSidToStringSidW")
+	procConvertStringSDToSDW         = advapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+	procGetSecurityDescriptorDacl    = advapi32.NewProc("GetSecurityDescriptorDacl")
+	procSetNamedSecurityInfoW        = advapi32.NewProc("SetNamedSecurityInfoW")
+	procGetNamedSecurityInfoW        = advapi32.NewProc("GetNamedSecurityInfoW")
+	procGetSecurityDescriptorControl = advapi32.NewProc("GetSecurityDescriptorControl")
+	procGetAce                       = advapi32.NewProc("GetAce")
+	procGetCurrentProcess            = kernel32ForSecrets.NewProc("GetCurrentProcess")
+	procCloseHandleSecrets           = kernel32ForSecrets.NewProc("CloseHandle")
 )
 
 const (
@@ -55,6 +55,11 @@ const (
 	sddlRevision1     = 1
 	sidSystem         = "S-1-5-18"
 	sidAdministrators = "S-1-5-32-544"
+
+	seDaclPresent        = 0x0004 // SE_DACL_PRESENT
+	seDaclProtected      = 0x1000 // SE_DACL_PROTECTED
+	accessAllowedAceType = 0      // ACCESS_ALLOWED_ACE_TYPE
+	fileAllAccess        = 0x001F01FF
 )
 
 // currentUserSID returns the current process token's user SID in
@@ -150,13 +155,29 @@ func RestrictFile(path string) error {
 	return nil
 }
 
-// VerifyFileRestrictions reads path's DACL back and proves it is
-// exactly the protected three-principal descriptor RestrictFile
-// applies: protected (P, no inheritance flags), full access for
-// SYSTEM, Administrators and the current user, and NO other
-// principal. Anything else is an error.
+// VerifyFileRestrictions reads path's DACL back and proves, at
+// the binary ACE level, that it is exactly the descriptor
+// RestrictFile applies:
+//
+//   - the DACL control has SE_DACL_PROTECTED set (inheritance from
+//     the parent directory is severed — this is THE invariant);
+//   - exactly three ACEs, all ACCESS_ALLOWED, each granting
+//     FILE_ALL_ACCESS;
+//   - the three trustees are precisely Local SYSTEM, the local
+//     Administrators group and the current user (compared as
+//     numeric SID strings, never SDDL aliases).
+//
+// Why not compare the SDDL string form: the string converter is
+// lossy about presentation, not about content. A descriptor
+// applied through SetNamedSecurityInfoW reads back with control
+// flags "PAI" (SE_DACL_AUTO_INHERITED accompanies PROTECTED; it
+// governs propagation to children and does not weaken the
+// protected bit), and well-known trustees render as aliases (the
+// runner's built-in Administrator account renders as "LA", not
+// its numeric SID). Both are presentation details; the binary
+// check below verifies the security content directly.
 func VerifyFileRestrictions(path string) error {
-	sid, err := currentUserSID()
+	userSID, err := currentUserSID()
 	if err != nil {
 		return err
 	}
@@ -173,41 +194,74 @@ func VerifyFileRestrictions(path string) error {
 		return fmt.Errorf("secrets: GetNamedSecurityInfoW failed with code %d", rc)
 	}
 	defer procLocalFreeSecrets.Call(sd)
-	var strPtr *uint16
-	r, _, callErr := procConvertSDToStringSDW.Call(sd, sddlRevision1,
-		uintptr(daclSecurityInfo), uintptr(unsafe.Pointer(&strPtr)), 0)
-	if r == 0 {
-		return fmt.Errorf("secrets: ConvertSecurityDescriptorToString: %v", callErr)
-	}
-	defer procLocalFreeSecrets.Call(uintptr(unsafe.Pointer(strPtr)))
-	got := utf16PtrToString(strPtr)
 
-	if !strings.HasPrefix(got, "D:") {
-		return fmt.Errorf("secrets: unexpected security descriptor %q", got)
+	// SECURITY_DESCRIPTOR_CONTROL is a WORD; the revision is a DWORD.
+	var control uint16
+	var revision uint32
+	r, _, callErr := procGetSecurityDescriptorControl.Call(sd,
+		uintptr(unsafe.Pointer(&control)), uintptr(unsafe.Pointer(&revision)))
+	if r == 0 {
+		return fmt.Errorf("secrets: GetSecurityDescriptorControl: %v", callErr)
 	}
-	rest := got[2:]
-	open := strings.Index(rest, "(")
-	if open < 0 {
-		return fmt.Errorf("secrets: security descriptor has no ACEs: %q", got)
+	if control&seDaclPresent == 0 {
+		return fmt.Errorf("secrets: security descriptor has no DACL")
 	}
-	if flags := rest[:open]; flags != "P" {
-		return fmt.Errorf("secrets: DACL is not protected-only (flags %q): %q", flags, got)
+	if control&seDaclProtected == 0 {
+		return fmt.Errorf("secrets: DACL is not protected (control %#x); directory inheritance still applies", control)
 	}
-	aces := rest[open:]
-	for _, want := range []string{
-		"(A;;FA;;;SY)", "(A;;FA;;;BA)", "(A;;FA;;;" + sid + ")",
-	} {
-		if !strings.Contains(aces, want) {
-			return fmt.Errorf("secrets: DACL missing %s: %q", want, got)
+
+	var present, defaulted int32
+	var daclPtr unsafe.Pointer
+	r, _, callErr = procGetSecurityDescriptorDacl.Call(sd,
+		uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&daclPtr)),
+		uintptr(unsafe.Pointer(&defaulted)))
+	if r == 0 || present == 0 || daclPtr == nil {
+		return fmt.Errorf("secrets: GetSecurityDescriptorDacl: %v", callErr)
+	}
+	// ACL header: revision(1) sbz(1) size(2) aceCount(2) sbz(2).
+	aceCount := int(*(*uint16)(unsafe.Add(daclPtr, 4)))
+	if aceCount != 3 {
+		return fmt.Errorf("secrets: DACL has %d ACEs, expected exactly 3", aceCount)
+	}
+	want := map[string]bool{sidSystem: true, sidAdministrators: true, userSID: true}
+	for i := 0; i < aceCount; i++ {
+		var acePtr unsafe.Pointer
+		r, _, callErr := procGetAce.Call(uintptr(daclPtr), uintptr(i), uintptr(unsafe.Pointer(&acePtr)))
+		if r == 0 || acePtr == nil {
+			return fmt.Errorf("secrets: GetAce %d: %v", i, callErr)
 		}
+		// ACCESS_ALLOWED_ACE: type(1) flags(1) size(2) mask(4) SID...
+		aceType := *(*byte)(acePtr)
+		if aceType != accessAllowedAceType {
+			return fmt.Errorf("secrets: ACE %d has type %d, expected ACCESS_ALLOWED", i, aceType)
+		}
+		mask := *(*uint32)(unsafe.Add(acePtr, 4))
+		if mask != fileAllAccess {
+			return fmt.Errorf("secrets: ACE %d grants mask %#x, expected FILE_ALL_ACCESS", i, mask)
+		}
+		sidStr, err := sidPointerToString(uintptr(unsafe.Add(acePtr, 8)))
+		if err != nil {
+			return err
+		}
+		if !want[sidStr] {
+			return fmt.Errorf("secrets: ACE %d grants unexpected principal %s", i, sidStr)
+		}
+		delete(want, sidStr)
 	}
-	// Exactly three ACEs, all accounted for above: any additional
-	// principal (Everyone, Users, ...) fails the count check.
-	if n := strings.Count(aces, "(A;;"); n != 3 {
-		return fmt.Errorf("secrets: DACL has %d allow ACEs, expected 3: %q", n, got)
-	}
-	if strings.Contains(aces, "(D;;") {
-		return fmt.Errorf("secrets: DACL unexpectedly contains deny ACEs: %q", got)
+	if len(want) != 0 {
+		return fmt.Errorf("secrets: DACL is missing expected principals %v", want)
 	}
 	return nil
+}
+
+// sidPointerToString converts a raw SID in memory to its numeric
+// string form via ConvertSidToStringSidW.
+func sidPointerToString(sid uintptr) (string, error) {
+	var strPtr *uint16
+	r, _, callErr := procConvertSidToStringSidW.Call(sid, uintptr(unsafe.Pointer(&strPtr)))
+	if r == 0 {
+		return "", fmt.Errorf("secrets: ConvertSidToStringSidW: %v", callErr)
+	}
+	defer procLocalFreeSecrets.Call(uintptr(unsafe.Pointer(strPtr)))
+	return utf16PtrToString(strPtr), nil
 }
