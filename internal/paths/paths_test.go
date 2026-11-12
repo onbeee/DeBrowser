@@ -23,7 +23,7 @@ func TestResolveLayoutUnderRoot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Resolve(%s): %v", root, err)
 		}
-		for _, p := range []string{l.Data, l.DatabaseFile, l.Backups, l.Logs, l.LogFile, l.Profiles, l.Mihomo, l.WebView2, l.Config, l.SettingsFile} {
+		for _, p := range []string{l.Data, l.DatabaseFile, l.Backups, l.Logs, l.LogFile, l.Profiles, l.Mihomo, l.WebView2, l.Config, l.SettingsFile, l.SecretsFile} {
 			assertUnder(t, l.Root, p)
 		}
 		if filepath.Base(l.DatabaseFile) != "debrowser.db" {
@@ -31,6 +31,9 @@ func TestResolveLayoutUnderRoot(t *testing.T) {
 		}
 		if filepath.Base(l.WebView2) != "webview2-data" {
 			t.Errorf("webview2 dir = %s", l.WebView2)
+		}
+		if filepath.Base(l.SecretsFile) != "secrets.vault" {
+			t.Errorf("secrets file = %s", l.SecretsFile)
 		}
 		if filepath.Base(l.SettingsFile) != "settings.json" {
 			t.Errorf("settings file = %s", l.SettingsFile)
