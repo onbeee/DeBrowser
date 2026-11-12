@@ -1,0 +1,508 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/model"
+	"github.com/onbeee/DeBrowser/internal/paths"
+	"github.com/onbeee/DeBrowser/internal/pfiles"
+	"github.com/onbeee/DeBrowser/internal/store"
+)
+
+// InstanceService is the browser-instance management service exposed
+// to the frontend over Wails bindings (Stage 3). It is a thin,
+// validating layer over internal/store: all SQL lives in the store,
+// all filesystem effects are confined to the portable layout, and no
+// method ever touches a path outside it.
+//
+// Status semantics: model.Instance.Status is the PERSISTED lifecycle
+// record. Stage 3 has no browser process manager, so no instance can
+// actually be running: at construction, any row still marked
+// "running" (a leftover from a crashed or older process) is
+// reconciled to "stopped". Later stages will own live transitions.
+type InstanceService struct {
+	store  *store.Store
+	layout paths.Layout
+	log    *slog.Logger
+	// deleteRecord removes an instance row. It is a field so tests
+	// can inject a failure into the middle of
+	// DeleteInstanceAndProfile and verify the profile restore.
+	deleteRecord func(ctx context.Context, id string) error
+	// Test seams for deterministic race injection in
+	// DeleteInstanceAndProfile (nil in production): afterVerifyHook
+	// runs between path verification and the object-anchored
+	// quarantine move; beforeRestoreHook runs between a failed
+	// record deletion and the anchored restore;
+	// wipeQuarantine overrides the anchored wipe.
+	afterVerifyHook   func()
+	beforeRestoreHook func()
+	wipeQuarantine    func(q *pfiles.Quarantine) error
+}
+
+// NewInstanceService builds the service and reconciles persisted
+// instance statuses (see the type comment). The database handle is
+// owned by the caller (main) and is never closed here.
+func NewInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger) (*InstanceService, error) {
+	s := &InstanceService{store: store.New(db), layout: layout, log: log}
+	s.deleteRecord = s.store.DeleteInstance
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := s.store.ReconcileInstanceStatuses(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("instance service: %w", err)
+	}
+	if n > 0 {
+		log.Info("reconciled stale running instances to stopped", "count", n)
+	}
+	return s, nil
+}
+
+// CreateInstanceInput carries the user-editable fields for creation.
+// UserDataDir is optional: empty means the default profiles/<id>.
+type CreateInstanceInput struct {
+	Name          string  `json:"name"`
+	ProxyID       *string `json:"proxyId"`
+	StartURL      string  `json:"startUrl"`
+	KernelName    string  `json:"kernelName"`
+	KernelVersion string  `json:"kernelVersion"`
+	UserDataDir   string  `json:"userDataDir"`
+}
+
+// UpdateInstanceInput carries the editable fields of one instance.
+// The profile directory of an existing instance cannot be changed
+// here (moving live profile data is a separate, explicit operation).
+type UpdateInstanceInput struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	ProxyID       *string `json:"proxyId"`
+	StartURL      string  `json:"startUrl"`
+	KernelName    string  `json:"kernelName"`
+	KernelVersion string  `json:"kernelVersion"`
+	SortOrder     int     `json:"sortOrder"`
+}
+
+func ctx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 15*time.Second)
+}
+
+// ListInstances returns all instances in display order.
+func (s *InstanceService) ListInstances() ([]model.Instance, error) {
+	c, cancel := ctx()
+	defer cancel()
+	list, err := s.store.ListInstances(c)
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []model.Instance{}
+	}
+	return list, nil
+}
+
+// GetInstance returns one instance.
+func (s *InstanceService) GetInstance(id string) (model.Instance, error) {
+	c, cancel := ctx()
+	defer cancel()
+	in, err := s.store.GetInstance(c, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return model.Instance{}, fmt.Errorf("实例不存在")
+	}
+	return in, err
+}
+
+// ListProxies returns all proxy nodes (read-only; proxy management
+// itself is Stage 4) so the instance form can offer assignment.
+func (s *InstanceService) ListProxies() ([]model.Proxy, error) {
+	c, cancel := ctx()
+	defer cancel()
+	list, err := s.store.ListProxies(c)
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []model.Proxy{}
+	}
+	return list, nil
+}
+
+// CreateInstance validates and creates an instance. The default
+// profile directory is profiles/<id>; an explicit directory must be
+// a relative path inside profiles/.
+func (s *InstanceService) CreateInstance(input CreateInstanceInput) (model.Instance, error) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return model.Instance{}, fmt.Errorf("实例名称不能为空")
+	}
+	id, err := store.NewID()
+	if err != nil {
+		return model.Instance{}, err
+	}
+	// The raw (untrimmed) spelling goes to validation: trimming
+	// first would erase exactly the evidence the Windows
+	// reinterpretation rules look for (a trailing space or dot on
+	// the final component).
+	dir := input.UserDataDir
+	if strings.TrimSpace(dir) == "" {
+		dir = "profiles/" + id
+	} else {
+		cleaned, err := s.validateProfileDir(dir)
+		if err != nil {
+			return model.Instance{}, err
+		}
+		dir = cleaned
+	}
+	c, cancel := ctx()
+	defer cancel()
+	if input.ProxyID != nil {
+		if _, err := s.store.GetProxy(c, *input.ProxyID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return model.Instance{}, fmt.Errorf("所选代理不存在")
+			}
+			return model.Instance{}, err
+		}
+	}
+	created, err := s.store.CreateInstance(c, model.Instance{
+		ID: id, Name: name, UserDataDir: dir, ProxyID: input.ProxyID,
+		StartURL:      strings.TrimSpace(input.StartURL),
+		KernelName:    strings.TrimSpace(input.KernelName),
+		KernelVersion: strings.TrimSpace(input.KernelVersion),
+	})
+	if err != nil {
+		return model.Instance{}, mapConstraintError(err)
+	}
+	s.log.Info("instance created", "id", created.ID, "name", created.Name)
+	return created, nil
+}
+
+// UpdateInstance validates and updates an instance's editable fields.
+func (s *InstanceService) UpdateInstance(input UpdateInstanceInput) (model.Instance, error) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return model.Instance{}, fmt.Errorf("实例名称不能为空")
+	}
+	c, cancel := ctx()
+	defer cancel()
+	current, err := s.store.GetInstance(c, input.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return model.Instance{}, fmt.Errorf("实例不存在")
+		}
+		return model.Instance{}, err
+	}
+	if input.ProxyID != nil {
+		if _, err := s.store.GetProxy(c, *input.ProxyID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return model.Instance{}, fmt.Errorf("所选代理不存在")
+			}
+			return model.Instance{}, err
+		}
+	}
+	current.Name = name
+	current.ProxyID = input.ProxyID
+	current.StartURL = strings.TrimSpace(input.StartURL)
+	current.KernelName = strings.TrimSpace(input.KernelName)
+	current.KernelVersion = strings.TrimSpace(input.KernelVersion)
+	current.SortOrder = input.SortOrder
+	updated, err := s.store.UpdateInstance(c, current)
+	if err != nil {
+		return model.Instance{}, mapConstraintError(err)
+	}
+	return updated, nil
+}
+
+// DeleteInstance removes ONLY the instance's metadata (and, via the
+// schema cascade, its bookmarks). The profile directory on disk is
+// deliberately left untouched: browser data is never deleted as a
+// side effect of removing a record.
+func (s *InstanceService) DeleteInstance(id string) error {
+	c, cancel := ctx()
+	defer cancel()
+	if err := s.store.DeleteInstance(c, id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("实例不存在")
+		}
+		return err
+	}
+	s.log.Info("instance metadata deleted (profile files kept)", "id", id)
+	return nil
+}
+
+// DeleteInstanceAndProfile is the explicit, destructive counterpart
+// of DeleteInstance: it removes the profile directory AND the
+// metadata. It is structured so no failure loses data silently:
+//
+//  1. The stored path is proven safe (verifiedProfileTarget: the
+//     directory itself is not a link, and its fully resolved real
+//     path lies strictly inside the profiles directory).
+//  2. internal/pfiles moves the VERIFIED OBJECT — not the path
+//     string — into a quarantine slot under profiles: Linux anchors
+//     the move to directory fds (openat O_NOFOLLOW descent +
+//     renameat2 NOREPLACE between pinned fds, with a post-move
+//     identity check), Windows renames through the target's own
+//     directory handle after verifying the handle's identity.
+//     Swapping any path component after step 1 therefore cannot
+//     redirect the move to an outside directory; anything that
+//     cannot be anchored is refused with data and record intact.
+//  3. The database record is deleted. If that fails, the object is
+//     moved back through the same anchor — the operation aborts
+//     with the profile and the record both intact.
+//  4. Only with the record gone is the quarantine tree wiped by
+//     anchored deletion (internal/safedelete). A wipe failure
+//     leaves the data in the quarantine slot — reported in the
+//     error, never silently lost.
+//
+// A persisted "running" instance is refused before any of this.
+func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
+	c, cancel := ctx()
+	defer cancel()
+	in, err := s.store.GetInstance(c, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("实例不存在")
+		}
+		return err
+	}
+	if in.Status == model.StatusRunning {
+		return fmt.Errorf("实例正在运行，不能删除其 Profile 数据")
+	}
+	target, err := s.verifiedProfileTarget(in.UserDataDir)
+	if err != nil {
+		return err
+	}
+	if target == "" {
+		// Nothing on disk: only the record needs to go.
+		if err := s.store.DeleteInstance(c, id); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("实例不存在")
+			}
+			return err
+		}
+		s.log.Info("instance deleted (no profile directory on disk)", "id", id)
+		return nil
+	}
+	if s.afterVerifyHook != nil {
+		s.afterVerifyHook()
+	}
+
+	q, err := s.moveToQuarantine(target)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = q.Close() }()
+
+	if err := s.deleteRecord(c, id); err != nil {
+		// Restore the object to its original location through the
+		// same anchor; the operation must leave the world exactly
+		// as it found it.
+		if s.beforeRestoreHook != nil {
+			s.beforeRestoreHook()
+		}
+		if rerr := q.Restore(); rerr != nil {
+			return fmt.Errorf("删除实例记录失败，且 Profile 目录恢复失败（数据保留在隔离目录 %s）：%w", q.Path(), err)
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("实例不存在")
+		}
+		return err
+	}
+	wipe := s.wipeQuarantine
+	if wipe == nil {
+		wipe = func(q *pfiles.Quarantine) error { return q.Wipe() }
+	}
+	if err := wipe(q); err != nil {
+		return fmt.Errorf("实例记录已删除，但 Profile 数据清理不完全（残留在隔离目录 %s）：%w", q.Path(), err)
+	}
+	s.log.Info("instance and profile deleted", "id", id, "dir", in.UserDataDir)
+	return nil
+}
+
+// moveToQuarantine moves target into a fresh quarantine slot,
+// retrying with another slot name when a name turns out to be
+// occupied (the platform move never overwrites an occupant).
+func (s *InstanceService) moveToQuarantine(target string) (*pfiles.Quarantine, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		id, err := store.NewID()
+		if err != nil {
+			return nil, err
+		}
+		q, err := pfiles.MoveToQuarantine(s.layout.Profiles, target, ".debrowser-quarantine-"+id)
+		if err == nil {
+			return q, nil
+		}
+		if errors.Is(err, pfiles.ErrOccupied) {
+			continue
+		}
+		if errors.Is(err, pfiles.ErrUnsafe) {
+			return nil, fmt.Errorf("无法证明 Profile 目录可被安全隔离，已拒绝删除：%w", err)
+		}
+		return nil, fmt.Errorf("隔离 Profile 目录失败：%w", err)
+	}
+	return nil, fmt.Errorf("无法分配隔离目录")
+}
+
+// validateProfileDir checks a user-supplied profile directory: it
+// must be relative, and its cleaned form must live under profiles/.
+// It returns the cleaned, slash-separated stored form.
+func (s *InstanceService) validateProfileDir(dir string) (string, error) {
+	if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "\\") {
+		return "", fmt.Errorf("数据目录必须是相对路径")
+	}
+	// Profile directories are specified in slash form only. A
+	// backslash is a separator on Windows but a plain name
+	// character elsewhere, so the same spelling would name
+	// different locations on different systems — reject it
+	// outright, deterministically on every platform.
+	if strings.Contains(dir, "\\") {
+		return "", fmt.Errorf("数据目录必须使用正斜杠分隔")
+	}
+	clean := filepath.Clean(strings.TrimSpace(dir))
+	slash := filepath.ToSlash(clean)
+	if slash == "profiles" || !strings.HasPrefix(slash, "profiles/") {
+		return "", fmt.Errorf("数据目录必须位于 profiles 目录之下")
+	}
+	if strings.Contains(slash, "../") || slash == ".." {
+		return "", fmt.Errorf("数据目录不能超出 profiles 目录")
+	}
+	// Every component under profiles/ must be a plain, portable
+	// directory name. Windows reinterprets several spellings, so
+	// they are rejected up front rather than discovered later:
+	// ':' would address an NTFS alternate data stream, a trailing
+	// dot or space is silently stripped by Windows (aliasing two
+	// spellings to one directory), the reserved device names (CON,
+	// PRN, AUX, NUL, CONIN$, CONOUT$, COM1-9, LPT1-9 and the
+	// superscript forms COM¹-³/LPT¹-³, with or without extension)
+	// name devices instead of directories, and a backslash inside
+	// a component is a smuggled separator on Windows even where
+	// the host OS treats it as a regular character. The check runs
+	// on the RAW spelling's segments (only "" and traversal
+	// segments are skipped — those are judged by the containment
+	// checks above), because Clean/TrimSpace would erase trailing
+	// dots and spaces before they could be seen.
+	for _, comp := range strings.Split(filepath.ToSlash(dir), "/") {
+		if comp == "" || comp == "." || comp == ".." || comp == "profiles" {
+			continue
+		}
+		if err := validateProfileComponent(comp); err != nil {
+			return "", err
+		}
+	}
+	// If the directory (or a path to it) already exists, it must also
+	// pass the same real-path verification used for deletion: a
+	// pre-planted symlink inside profiles must not legitimise an
+	// outside location as a profile directory.
+	full := filepath.Join(s.layout.Data, clean)
+	if _, err := os.Lstat(full); err == nil {
+		if _, err := s.verifiedProfileTarget(slash); err != nil {
+			return "", err
+		}
+	}
+	return slash, nil
+}
+
+// validateProfileComponent checks one profile directory name
+// component against the Windows reinterpretation rules described
+// in validateProfileDir.
+func validateProfileComponent(comp string) error {
+	if comp == "" || comp == "." || comp == ".." {
+		return fmt.Errorf("数据目录包含无效的路径组件")
+	}
+	if strings.ContainsAny(comp, "<>:\"|?*\\") {
+		return fmt.Errorf("数据目录组件 %q 包含不允许的字符", comp)
+	}
+	for _, r := range comp {
+		if r < 0x20 {
+			return fmt.Errorf("数据目录组件 %q 包含控制字符", comp)
+		}
+	}
+	if strings.HasSuffix(comp, ".") || strings.HasSuffix(comp, " ") {
+		return fmt.Errorf("数据目录组件 %q 不能以点或空格结尾", comp)
+	}
+	base := comp
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	switch strings.ToUpper(base) {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+		// Microsoft's naming rules also reserve the superscript
+		// forms: Windows treats the ISO/IEC 8859-1 superscript
+		// digits ¹ ² ³ as digits in COM#/LPT# device names.
+		"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³":
+		return fmt.Errorf("数据目录组件 %q 是 Windows 保留设备名", comp)
+	}
+	return nil
+}
+
+// verifiedProfileTarget proves that the stored profile path is safe
+// to delete and returns the RESOLVED absolute path to remove (""
+// when nothing exists on disk). String containment is only the first
+// gate; the real proof is filesystem-based:
+//
+//  1. The lexical target must be strictly inside the profiles dir.
+//  2. The target itself must not be a symbolic link / reparse point
+//     (deleting "through" it is refused outright, wherever it aims).
+//  3. resolveFinalPath resolves EVERY component — intermediate
+//     symlinks and Windows junctions/reparse points included
+//     (EvalSymlinks on Unix, GetFinalPathNameByHandle on Windows,
+//     where EvalSymlinks alone misses a junction that is the final
+//     component) — and the resolved target must still be strictly
+//     inside the resolved profiles directory. Anything that cannot
+//     be proven inside is refused.
+//
+// Deleting the resolved path (rather than the lexical one) keeps the
+// verified location and the deleted location identical.
+func (s *InstanceService) verifiedProfileTarget(stored string) (string, error) {
+	target := filepath.Join(s.layout.Data, filepath.FromSlash(stored))
+	cleanTarget := filepath.Clean(target)
+	cleanProfiles := filepath.Clean(s.layout.Profiles)
+	if cleanTarget == cleanProfiles || !strings.HasPrefix(cleanTarget, cleanProfiles+string(os.PathSeparator)) {
+		return "", fmt.Errorf("拒绝删除：目标路径不在 profiles 目录之内")
+	}
+	info, err := os.Lstat(cleanTarget)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil // nothing on disk: nothing to protect
+		}
+		return "", fmt.Errorf("拒绝删除：无法检查目标路径：%w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("拒绝删除：Profile 目录本身是符号链接")
+	}
+	resolvedProfiles, err := resolveFinalPath(cleanProfiles)
+	if err != nil {
+		return "", fmt.Errorf("拒绝删除：无法解析 profiles 目录：%w", err)
+	}
+	resolvedTarget, err := resolveFinalPath(cleanTarget)
+	if err != nil {
+		return "", fmt.Errorf("拒绝删除：无法解析目标真实路径：%w", err)
+	}
+	if resolvedTarget == resolvedProfiles || !strings.HasPrefix(resolvedTarget, resolvedProfiles+string(os.PathSeparator)) {
+		return "", fmt.Errorf("拒绝删除：目标真实路径不在 profiles 目录之内")
+	}
+	return resolvedTarget, nil
+}
+
+// mapConstraintError turns SQLite constraint failures into messages
+// the UI can show directly.
+func mapConstraintError(err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "UNIQUE constraint failed: browser_instances.name"):
+		return fmt.Errorf("实例名称已存在，请换一个名称")
+	case strings.Contains(msg, "UNIQUE constraint failed: browser_instances.user_data_dir"):
+		return fmt.Errorf("该数据目录已被其他实例占用")
+	case strings.Contains(msg, "FOREIGN KEY constraint failed"):
+		return fmt.Errorf("关联数据不存在或已被删除")
+	default:
+		return err
+	}
+}

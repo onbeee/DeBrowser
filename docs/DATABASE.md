@@ -93,3 +93,7 @@ Schema changes are the riskiest moment for a local database, so upgrades protect
 - The Stage 1.5 roaming→portable data migration (`internal/migration`) is a separate, file-level one-time migration that runs before the database is opened; it is unchanged and composes with this mechanism (a migrated Stage 1 database arrives at schema v1 and is then backed up and upgraded by the normal path).
 
 Full backup/restore UX ships in Stage 7.
+
+## Stage 3 note
+
+Stage 3 (application lifecycle and instance management foundation) adds **no schema migration**: it works entirely on the existing tables. One behavioural addition lives in the repository layer, not the schema — at startup the instance service reconciles any `browser_instances` row still marked `running` back to `stopped` (see `Store.ReconcileInstanceStatuses`), because with app-level single-instance protection such a row can only be a leftover from a process that no longer exists.

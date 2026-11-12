@@ -30,10 +30,12 @@ Development follows AGENTS.md section 9: small, testable stages, one Pull Reques
 - Repository layer (`internal/store`) over shared `internal/model` types, a `WithTx` transaction entry for cross-repository atomic work, and `synchronous=FULL`
 - Verified pre-migration backups (`VACUUM INTO`) that abort the upgrade when they fail
 
-## Stage 3 — Browser kernel detection and instance lifecycle
+## Stage 3 — Application lifecycle and instance management foundation (delivered)
 
-- Detect locally installed Chromium kernels
-- Instance CRUD, start/stop, per-instance user data directories and CDP wiring (localhost only)
+- App-level single-instance protection per portable installation, with stale-lock recovery and focus-the-running-window activation
+- Application lifecycle governance: context-owned background loops that drain on shutdown, `run() error` instead of mid-startup `log.Fatalf`, ordered resource release (loops → database → lock → log)
+- Instance management foundation: validated metadata CRUD over the Stage 2 store, startup status reconciliation, and a profile-deletion safety model that separates metadata deletion from profile data deletion
+- Still to come in later stages: kernel detection, instance start/stop with managed Chromium processes and CDP wiring (localhost only)
 
 ## Stage 4 — Proxy and Mihomo integration
 
