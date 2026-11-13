@@ -258,36 +258,99 @@ func buildACLWithUserAceFlags(t *testing.T, path string, userAceFlags uintptr) {
 }
 
 func TestVerifyRejectsAceFlags(t *testing.T) {
-	cases := []struct {
-		name  string
-		flags uintptr
-	}{
-		{"inherit only", 0x8},             // INHERIT_ONLY_ACE: ACE would not apply to the file itself
-		{"object+container inherit", 0x3}, // OI|CI: meaningless for a file, never set by RestrictFile
-		{"inherited ace marker", 0x10},    // INHERITED_ACE: claims the ACE came from a parent
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "probe.bin")
-			if err := os.WriteFile(path, []byte("probe"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			buildACLWithUserAceFlags(t, path, tc.flags)
-			if err := VerifyFileRestrictions(path); err == nil {
-				t.Fatalf("ACE flags %#x passed verification", tc.flags)
-			} else {
-				t.Logf("rejected as expected: %v", err)
-			}
-		})
-	}
-	// Control: identical construction with zero flags must pass.
+	// INHERIT_ONLY_ACE persists on a file DACL and changes the
+	// ACE's meaning (it would not apply to the file itself), so
+	// the verifier must reject it. This is the AceFlags branch's
+	// load-bearing case.
 	path := filepath.Join(t.TempDir(), "probe.bin")
 	if err := os.WriteFile(path, []byte("probe"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	buildACLWithUserAceFlags(t, path, 0)
-	if err := VerifyFileRestrictions(path); err != nil {
+	buildACLWithUserAceFlags(t, path, 0x8) // INHERIT_ONLY_ACE
+	if err := VerifyFileRestrictions(path); err == nil {
+		t.Fatal("INHERIT_ONLY ACE flag passed verification")
+	} else {
+		t.Logf("rejected as expected: %v", err)
+	}
+	// Control: identical construction with zero flags must pass.
+	path2 := filepath.Join(t.TempDir(), "probe.bin")
+	if err := os.WriteFile(path2, []byte("probe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buildACLWithUserAceFlags(t, path2, 0)
+	if err := VerifyFileRestrictions(path2); err != nil {
 		t.Fatalf("zero-flag control DACL rejected: %v", err)
+	}
+}
+
+// readAceFlagsForTest returns the AceFlags of every ACE in path's
+// DACL, in order, using the package's advapi32 primitives.
+func readAceFlagsForTest(t *testing.T, path string) []byte {
+	t.Helper()
+	pathW, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sd uintptr
+	rc, _, _ := procGetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(pathW)), seFileObject,
+		uintptr(daclSecurityInfo), 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(&sd)))
+	if rc != 0 {
+		t.Fatalf("GetNamedSecurityInfoW failed with code %d", rc)
+	}
+	defer procLocalFreeSecrets.Call(sd)
+	var present, defaulted int32
+	var daclPtr unsafe.Pointer
+	r, _, callErr := procGetSecurityDescriptorDacl.Call(sd,
+		uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&daclPtr)),
+		uintptr(unsafe.Pointer(&defaulted)))
+	if r == 0 || present == 0 || daclPtr == nil {
+		t.Fatalf("GetSecurityDescriptorDacl: %v", callErr)
+	}
+	count := int(*(*uint16)(unsafe.Add(daclPtr, 4)))
+	out := make([]byte, 0, count)
+	for i := 0; i < count; i++ {
+		var acePtr unsafe.Pointer
+		r, _, callErr := procGetAce.Call(uintptr(daclPtr), uintptr(i), uintptr(unsafe.Pointer(&acePtr)))
+		if r == 0 || acePtr == nil {
+			t.Fatalf("GetAce %d: %v", i, callErr)
+		}
+		out = append(out, *(*byte)(unsafe.Add(acePtr, 1)))
+	}
+	return out
+}
+
+func TestPlatformStripsPropagationAndInheritedFlags(t *testing.T) {
+	// The propagation bits (OI|CI) and the INHERITED_ACE marker
+	// cannot persist on a FILE's DACL through the documented
+	// apply path: SetNamedSecurityInfoW canonicalization strips
+	// them (propagation is meaningless for a non-container, and
+	// an explicitly applied ACE is by definition not inherited).
+	// CI run 43343591519 demonstrated this — DACLs built with
+	// these flags read back normalized, so a "verifier rejects
+	// them" test would assert a premise the platform makes
+	// unreachable. This test instead LOCKS the platform behavior
+	// with executable evidence: after applying flags 0x3 / 0x10,
+	// every stored ACE flag must read back as 0 and verification
+	// passes. If a future Windows change ever lets these flags
+	// persist, this test fails loudly — and the verifier's
+	// AceFlags==0 check (proven by the INHERIT_ONLY case above)
+	// is already in place to reject them.
+	for _, flags := range []uintptr{0x3, 0x10} {
+		path := filepath.Join(t.TempDir(), "probe.bin")
+		if err := os.WriteFile(path, []byte("probe"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		buildACLWithUserAceFlags(t, path, flags)
+		for i, f := range readAceFlagsForTest(t, path) {
+			if f != 0 {
+				t.Fatalf("flags %#x: stored ACE %d kept flags %#x; platform normalization no longer holds", flags, i, f)
+			}
+		}
+		if err := VerifyFileRestrictions(path); err != nil {
+			t.Fatalf("flags %#x: normalized DACL rejected: %v", flags, err)
+		}
 	}
 }
 
