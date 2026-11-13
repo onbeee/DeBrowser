@@ -253,6 +253,13 @@ func TestIPAllowedByPolicySpecialRanges(t *testing.T) {
 		"100::1",           // discard-only
 		"64:ff9b::8.8.8.8", // NAT64 well-known prefix
 		"3fff::1",          // documentation
+		// Second SSRF fix round: remaining registry gaps.
+		"64:ff9b:1::1",      // NAT64 local-use translation (RFC 8215)
+		"100:0:0:1::1",      // dummy prefix (RFC 7600)
+		"2001:10::1",        // ORCHID, deprecated (RFC 4843)
+		"2002:0808:0808::1", // 6to4 embedding 8.8.8.8 — tunnel spelling refused wholesale
+		"192.88.99.1",       // 6to4 relay anycast, deprecated (RFC 7526)
+		"5f00::1",           // SRv6 segment IDs (RFC 9603)
 		// IPv4-mapped IPv6 spellings must be judged as IPv4
 		"::ffff:127.0.0.1",    // loopback
 		"::ffff:192.168.0.10", // RFC1918 (deny without LAN)
@@ -310,7 +317,9 @@ func TestIPAllowedByPolicySpecialRanges(t *testing.T) {
 // mixed public+special case.
 func TestFetchRejectsSpecialRangesWithoutDialing(t *testing.T) {
 	fx, _ := newFetchFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
-	specials := []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.9", "2001:db8::1"}
+	specials := []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.9", "2001:db8::1",
+		// Second SSRF fix round additions.
+		"64:ff9b:1::1", "100:0:0:1::1", "2001:10::1", "2002:0808:0808::1", "192.88.99.1"}
 	for _, raw := range specials {
 		fx.dialedTo = nil
 		fx.resolve["subs.example.com"] = []net.IP{net.ParseIP(raw)}

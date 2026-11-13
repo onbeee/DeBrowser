@@ -96,7 +96,12 @@ func validateSubscriptionURL(raw string) error {
 // public unicast space and are therefore refused in both policy
 // modes (Stage 6 review: net.IP.IsPrivate alone does not cover
 // them). Each entry names the registry purpose that keeps it out
-// of the public target set.
+// of the public target set. The list follows the IANA IPv4/IPv6
+// special-purpose registries; allocations the registries mark
+// globally reachable (the AS112 and AMT anycast ranges, for
+// example) are deliberately NOT listed, and no broad aggregate
+// such as 2001::/23 is banned, because it contains globally
+// reachable assignments.
 var specialUsePrefixes = []netip.Prefix{
 	// IPv4
 	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 791)
@@ -106,15 +111,21 @@ var specialUsePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2 documentation (RFC 5737)
 	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3 documentation (RFC 5737)
 	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking (RFC 2544)
+	netip.MustParsePrefix("192.88.99.0/24"),  // 6to4 relay anycast, deprecated (RFC 7526)
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, incl. the limited broadcast (RFC 1112)
 	// IPv6
-	netip.MustParsePrefix("64:ff9b::/96"),  // NAT64 well-known prefix (RFC 6052): translated, not a direct target
-	netip.MustParsePrefix("100::/64"),      // discard-only (RFC 6666)
-	netip.MustParsePrefix("2001::/32"),     // Teredo tunnelling (RFC 4380)
-	netip.MustParsePrefix("2001:2::/48"),   // benchmarking (RFC 5180)
-	netip.MustParsePrefix("2001:db8::/32"), // documentation (RFC 3849)
-	netip.MustParsePrefix("2001:20::/28"),  // ORCHIDv2 (RFC 7343)
-	netip.MustParsePrefix("3fff::/20"),     // documentation (RFC 9637)
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix (RFC 6052): translated, not a direct target
+	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use translation prefix (RFC 8215)
+	netip.MustParsePrefix("100::/64"),       // discard-only (RFC 6666)
+	netip.MustParsePrefix("100:0:0:1::/64"), // dummy prefix (RFC 7600)
+	netip.MustParsePrefix("2001::/32"),      // Teredo tunnelling (RFC 4380)
+	netip.MustParsePrefix("2001:2::/48"),    // benchmarking (RFC 5180)
+	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849)
+	netip.MustParsePrefix("2001:10::/28"),   // ORCHID, deprecated (RFC 4843)
+	netip.MustParsePrefix("2001:20::/28"),   // ORCHIDv2 (RFC 7343)
+	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637)
+	netip.MustParsePrefix("2002::/16"),      // 6to4 (RFC 3056): tunnels an embedded IPv4 target — refused wholesale so the tunnel spelling cannot bypass the IPv4 policy
+	netip.MustParsePrefix("5f00::/16"),      // SRv6 segment IDs (RFC 9603): locator space, not host targets
 }
 
 // ipAllowedByPolicy classifies one resolved IP under the
