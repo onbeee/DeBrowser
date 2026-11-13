@@ -29,8 +29,8 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 │  <root>\data\debrowser.db (portable layout)      │
 │  <root>\data\profiles\<instance-id>\  (Stage 3)│
 │  <root>\webview2-data\  (app window WebView2 data)    │
-│  Chromium processes over CDP                  (Stage 3)│
-│  Mihomo proxy engine                          (Stage 4)│
+│  Chromium processes over CDP                  (Stage 9)│
+│  Mihomo proxy engine                          (Stage 7)│
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -63,9 +63,11 @@ Ownership rules from AGENTS.md: Go owns browser process management, instance lif
 - `src/stores/` — Zustand store for UI state (current page, console visibility, backend status, session console lines).
 - Styling is Tailwind CSS v4 through the `@tailwindcss/vite` plugin (`src/index.css`).
 
-## Browser isolation (from Stage 3)
+## Browser isolation (foundations in Stage 3, runtime in Stage 9)
 
-Every browser instance will have a unique ID, an independent user data directory under `profiles/`, an independent configuration, its own managed Chromium process and an optional independent proxy. A user data directory is never shared between running instances, and a live profile is never copied while Chromium is using it. DeBrowser does not claim fingerprint isolation unless it is explicitly implemented and tested.
+Stage 3 delivered the foundations only: instance metadata management, the independent profile directory layout under `profiles/` (one directory per instance ID), and the profile-deletion safety mechanism described above. Stage 3 does NOT implement Chromium process management or actually launching a browser — there is no process manager yet.
+
+Stage 9 adds the runtime: browser kernel management, managed Chromium processes, instance start/stop, CDP wiring, independent browser configuration and runtime isolation. In that final form, every browser instance has a unique ID, an independent user data directory under `profiles/`, an independent configuration, its own managed Chromium process and an optional independent proxy. A user data directory is never shared between running instances, and a live profile is never copied while Chromium is using it. DeBrowser does not claim fingerprint isolation unless it is explicitly implemented and tested.
 
 ## Credential storage (Stage 4A, internal/secrets)
 
@@ -80,11 +82,11 @@ All proxy credentials and subscription URLs live in one encrypted vault file, `d
 
 ## Instance readiness verification (Mihomo-integration constraint, recorded in 4A)
 
-A proxied instance is "ready" only when the Mihomo core itself confirms it through the external controller — a successful TCP connection to the listener port is NOT sufficient evidence, because any other process could be occupying that port. Readiness (the Mihomo integration stage's `VerifyInstanceReady`) must establish, via the controller: (1) the running core is the expected version and healthy; (2) the instance's listener exists in the core's applied configuration; (3) its bind address, port and bound outbound match the intended assignment; (4) the applied configuration corresponds to the current database state. Any mismatch means not ready, and a not-ready proxied instance must fail closed (the browser-launch stage must not launch it, and must never fall back to a direct connection).
+A proxied instance is "ready" only when the Mihomo core itself confirms it through the external controller — a successful TCP connection to the listener port is NOT sufficient evidence, because any other process could be occupying that port. Readiness (Stage 7's `VerifyInstanceReady`, in the Mihomo integration stage) must establish, via the controller: (1) the running core is the expected version and healthy; (2) the instance's listener exists in the core's applied configuration; (3) its bind address, port and bound outbound match the intended assignment; (4) the applied configuration corresponds to the current database state. Any mismatch means not ready, and a not-ready proxied instance must fail closed (Stage 9, the browser-launch stage, must not launch it, and must never fall back to a direct connection).
 
 ## Security notes
 
-- CDP debugging ports are never exposed publicly; they bind to localhost only (Stage 3).
+- CDP debugging ports are never exposed publicly; they bind to localhost only (Stage 9).
 - The frontend cannot execute arbitrary commands; it can only call the explicitly registered service methods.
 - Secrets (credentials, subscription URLs, private proxy configuration) are never stored in SQLite in plain committed files and never enter this repository — see `docs/DATABASE.md` and `.gitignore`.
 
