@@ -69,11 +69,10 @@ func run() error {
 	logger := logSystem.Logger()
 	defer func() { _ = logSystem.Close() }()
 
-	logger.Info("starting debrowser",
-		"root", cfg.Layout.Root,
-		"dataDir", cfg.Layout.Data,
-		"database", cfg.Layout.DatabaseFile,
-	)
+	// The startup record deliberately carries no filesystem paths:
+	// log files leave the machine in diagnostic exports, and
+	// absolute paths disclose the user's directory layout.
+	logger.Info("starting debrowser")
 
 	// Single-instance protection, scoped to this portable folder.
 	// A second launch never touches the database: it asks the

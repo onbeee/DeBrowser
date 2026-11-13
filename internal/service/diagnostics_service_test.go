@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -250,4 +251,265 @@ func readZipEntry(t *testing.T, zf *zip.File) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// ---- Stage 5B review fixes: path redaction + atomic replace ----
+
+func appendToCategoryFile(t *testing.T, logsDir, prefix, line string) string {
+	t.Helper()
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix+"-") {
+			p := filepath.Join(logsDir, e.Name())
+			fh, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fh.WriteString(line + "\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fh.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+	}
+	t.Fatalf("no %s-* file in %s", prefix, logsDir)
+	return ""
+}
+
+func hashDirFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		out[e.Name()] = hex.EncodeToString(sum[:])
+	}
+	return out
+}
+
+func TestExportRedactsAbsolutePaths(t *testing.T) {
+	f := newDiagFixture(t)
+	f.logs.Logger().Info("normal run line")
+	_ = f.logs.Close()
+
+	// Historical lines as they exist on disk (JSON-escaped forms),
+	// with absolute paths in field values and in error text.
+	appendToCategoryFile(t, f.layout.Logs, "run",
+		`{"timestamp":"2026-11-12T08:00:00Z","level":"INFO","category":"run","event":"startup paths","root":"C:\\Users\\Alice\\AppData\\Local\\DeBrowser\\data","other":"D:\\Private\\DeBrowser","share":"\\\\server\\share\\DeBrowser"}`)
+	appendToCategoryFile(t, f.layout.Logs, "error",
+		`{"timestamp":"2026-11-12T08:01:00Z","level":"ERROR","category":"error","event":"open failed","error":"open /home/alice/.config/debrowser: permission denied; also /Users/alice/Library/Application Support/DeBrowser and /tmp/debrowser-private were tried, see https://example.com/docs for help"}`)
+
+	before := hashDirFiles(t, f.layout.Logs)
+	dest := filepath.Join(t.TempDir(), "diag.zip")
+	if _, err := f.svc.exportTo(dest); err != nil {
+		t.Fatalf("exportTo: %v", err)
+	}
+	// The original log files must be byte-identical after export.
+	after := hashDirFiles(t, f.layout.Logs)
+	if len(before) != len(after) {
+		t.Fatalf("log file set changed by export: %v -> %v", keys2(before), keys2(after))
+	}
+	for name, h := range before {
+		if after[name] != h {
+			t.Fatalf("original log file %s was modified by export", name)
+		}
+	}
+
+	zr, err := zip.OpenReader(dest)
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer func() { _ = zr.Close() }()
+	byName := map[string][]byte{}
+	for _, zf := range zr.File {
+		byName[zf.Name] = readZipEntry(t, zf)
+	}
+	forbidden := []string{"Alice", "alice",
+		`C:\Users`, `C:\\Users`, `D:\Private`, `D:\\Private`,
+		`server\share`, `server\\share`,
+		"/home/", "/Users/", "Application Support", "/tmp/debrowser-private", ".config/debrowser"}
+	manifestRaw, ok := byName["manifest.json"]
+	if !ok {
+		t.Fatal("zip missing manifest.json")
+	}
+	acceptRaw, ok := byName["acceptance-record.json"]
+	if !ok {
+		t.Fatal("zip missing acceptance-record.json")
+	}
+	for _, doc := range [][]byte{manifestRaw, acceptRaw} {
+		for _, bad := range forbidden {
+			if strings.Contains(string(doc), bad) {
+				t.Fatalf("metadata document contains forbidden %q", bad)
+			}
+		}
+	}
+	var manifest struct {
+		Files []struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+			Size   int    `json:"size"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatalf("manifest JSON: %v", err)
+	}
+	sawRedaction := false
+	for _, entry := range manifest.Files {
+		content, ok := byName[entry.Path]
+		if !ok {
+			t.Fatalf("manifest lists %s but zip lacks it", entry.Path)
+		}
+		// Manifest hash and size describe the shipped (redacted) bytes.
+		sum := sha256.Sum256(content)
+		if hex.EncodeToString(sum[:]) != entry.SHA256 {
+			t.Fatalf("manifest sha256 mismatch for %s", entry.Path)
+		}
+		if entry.Size != len(content) {
+			t.Fatalf("manifest size mismatch for %s", entry.Path)
+		}
+		for _, bad := range forbidden {
+			if strings.Contains(string(content), bad) {
+				t.Fatalf("exported %s contains forbidden %q:\n%s", entry.Path, bad, content)
+			}
+		}
+		if strings.Contains(string(content), "[REDACTED_PATH]") {
+			sawRedaction = true
+		}
+		// Every exported log line is still valid JSON.
+		for i, line := range strings.Split(string(content), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if !json.Valid([]byte(line)) {
+				t.Fatalf("%s line %d not valid JSON after redaction: %q", entry.Path, i+1, line)
+			}
+		}
+	}
+	if !sawRedaction {
+		t.Fatal("no [REDACTED_PATH] placeholder found in exported logs; redaction did not run")
+	}
+	// Diagnostic value survives: event names and the non-path
+	// parts of the error message are preserved, URLs unharmed.
+	var errContent string
+	for name, content := range byName {
+		if strings.HasPrefix(name, "logs/error/") {
+			errContent = string(content)
+		}
+		if strings.HasPrefix(name, "logs/run/") && !strings.Contains(string(content), `"event":"startup paths"`) {
+			t.Fatalf("run export lost the event field: %s", content)
+		}
+	}
+	for _, want := range []string{"permission denied", "https://example.com/docs"} {
+		if !strings.Contains(errContent, want) {
+			t.Fatalf("error export lost %q: %s", want, errContent)
+		}
+	}
+}
+
+func keys2(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func TestExportReplacesExistingDestination(t *testing.T) {
+	f := newDiagFixture(t)
+	f.logs.Logger().Info("first")
+	dest := filepath.Join(t.TempDir(), "diag.zip")
+	if _, err := f.svc.exportTo(dest); err != nil {
+		t.Fatalf("first exportTo: %v", err)
+	}
+	f.logs.Logger().Info("second")
+	// Second export to the SAME path exercises the platform
+	// replace (MoveFileExW REPLACE_EXISTING on Windows CI).
+	summary, err := f.svc.exportTo(dest)
+	if err != nil {
+		t.Fatalf("second exportTo (replace): %v", err)
+	}
+	if summary.Bytes <= 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	zr, err := zip.OpenReader(dest)
+	if err != nil {
+		t.Fatalf("replaced zip does not open: %v", err)
+	}
+	defer func() { _ = zr.Close() }()
+	found := false
+	for _, zf := range zr.File {
+		if zf.Name == "manifest.json" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("replaced zip has no manifest.json")
+	}
+}
+
+func TestExportReplaceFailureKeepsExistingDest(t *testing.T) {
+	f := newDiagFixture(t)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "diag.zip")
+	sentinel := []byte("PREVIOUS EXPORT - DO NOT LOSE")
+	if err := os.WriteFile(dest, sentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.replaceFile = func(string, string) error {
+		return errors.New("injected replace failure")
+	}
+	if _, err := f.svc.exportTo(dest); err == nil {
+		t.Fatal("exportTo succeeded despite injected replace failure")
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(sentinel) {
+		t.Fatalf("destination changed after failed replace: %q", data)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("temporary files left behind: %v", entries)
+	}
+}
+
+func TestExportReplaceFailureWithoutDest(t *testing.T) {
+	f := newDiagFixture(t)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "diag.zip")
+	f.svc.replaceFile = func(string, string) error {
+		return errors.New("injected replace failure")
+	}
+	if _, err := f.svc.exportTo(dest); err == nil {
+		t.Fatal("exportTo succeeded despite injected replace failure")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("failed export left a target file at %s", dest)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary files left behind: %v", entries)
+	}
 }

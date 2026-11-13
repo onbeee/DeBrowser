@@ -41,13 +41,19 @@ type DiagnosticsService struct {
 	// result means "cancelled".
 	SavePathPicker func(defaultName string) (string, error)
 
+	// replaceFile atomically replaces the export destination with
+	// the finished temporary archive (platform implementation in
+	// replace_windows.go / replace_unix.go). It is a field so
+	// tests can inject failures.
+	replaceFile func(src, dst string) error
+
 	mu         sync.Mutex
 	lastExport *ExportSummary
 }
 
 // NewDiagnosticsService builds the service.
 func NewDiagnosticsService(db *database.DB, logs *logging.System, app *AppService) *DiagnosticsService {
-	return &DiagnosticsService{db: db, logs: logs, app: app}
+	return &DiagnosticsService{db: db, logs: logs, app: app, replaceFile: platformReplaceFile}
 }
 
 // CategoryView is the diagnostics view of one log category.
@@ -179,9 +185,19 @@ func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
 		var catBytes int64
 		oldest, newest := "", ""
 		for _, f := range files {
-			data, err := os.ReadFile(f.Path)
+			raw, err := os.ReadFile(f.Path)
 			if err != nil {
 				return ExportSummary{}, fmt.Errorf("读取日志文件失败（%s）：%w", f.Name, err)
+			}
+			// Historical log lines may still contain absolute
+			// paths (from before they were removed at the source,
+			// or inside error text). Redact them in memory — the
+			// file on disk is never modified — then validate the
+			// JSON Lines format and run the sensitivity scan on
+			// exactly the bytes that will be archived and hashed.
+			data := redactPaths(raw)
+			if err := validateJSONLines(data); err != nil {
+				return ExportSummary{}, fmt.Errorf("日志格式验证未通过（%s）：%w", f.Name, err)
 			}
 			if err := ScanForSecrets(data); err != nil {
 				return ExportSummary{}, fmt.Errorf("敏感信息检查未通过（%s）：%w", f.Name, err)
@@ -240,6 +256,10 @@ func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
 	if err != nil {
 		return ExportSummary{}, err
 	}
+	// Both documents are path-free by construction (relative names
+	// only); run them through the same redaction as a guarantee.
+	manifestJSON = redactPaths(manifestJSON)
+	acceptanceJSON = redactPaths(acceptanceJSON)
 	if err := ScanForSecrets(manifestJSON); err != nil {
 		return ExportSummary{}, fmt.Errorf("敏感信息检查未通过（manifest.json）：%w", err)
 	}
@@ -283,10 +303,13 @@ func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
 	if err := tmp.Close(); err != nil {
 		return ExportSummary{}, fmt.Errorf("完成导出文件失败：%w", err)
 	}
-	// The user picked this destination in the save dialog; replace
-	// a previous export of the same name if one exists.
-	_ = os.Remove(dest)
-	if err := os.Rename(tmpName, dest); err != nil {
+	// The user picked this destination in the save dialog. Replace
+	// it with the platform's atomic replace (MoveFileExW with
+	// REPLACE_EXISTING | WRITE_THROUGH on Windows, rename on
+	// Unix): the destination is never deleted first, so a failure
+	// leaves a previous export byte-identical, and the deferred
+	// cleanup above removes the temporary file.
+	if err := s.replaceFile(tmpName, dest); err != nil {
 		return ExportSummary{}, fmt.Errorf("保存导出文件失败：%w", err)
 	}
 	st, err := os.Stat(dest)

@@ -35,6 +35,14 @@ var deniedAttrKeys = map[string]bool{
 	"config": true, "config_json": true, "configjson": true,
 	"apikey": true, "api_key": true, "api-key": true,
 	"vault": true, "envelope": true, "blob": true,
+	// Filesystem locations: absolute paths disclose the user's
+	// directory layout and must not reach log files (diagnostic
+	// exports leave the machine). Error TEXT can still contain a
+	// path; the export pipeline redacts those (see the diagnostics
+	// service), but path-valued attributes stop here.
+	"dir": true, "path": true, "file": true, "filename": true,
+	"root": true, "datadir": true, "data_dir": true,
+	"profile_dir": true, "userdatadir": true, "database": true,
 }
 
 var (
