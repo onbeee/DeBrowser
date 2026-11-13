@@ -2,28 +2,18 @@
 //
 // DeBrowser is portable-first: every persistent file lives under the
 // directory that contains the executable (see internal/paths).
-//
-// Startup is two-phase (Stage 5A). Phase one only RESOLVES the
-// layout and classifies the installation (internal/installstate) —
-// it creates nothing. An initialized installation takes the normal
-// startup: create/verify directories, set up logging, take the
-// single-instance lock, open and migrate the SQLite database, open
-// the credential vault, load services, run the Wails application.
-// An uninitialized installation shows the first-launch welcome window
-// instead: it runs entirely out of a temporary workspace in the OS
-// temp directory (WebView2 data, log, single-instance coordination),
-// so the portable folder stays exe-only until the user chooses
-// "新用户", which runs the initialization (internal/initialize) and
-// then restarts this executable into the normal startup. An
-// interrupted initialization is detected by its marker and cleaned
-// up before the welcome window is shown again.
-//
-// Shutdown of the normal startup is the mirror image: the app drains
-// its background loops, then the database, the instance lock and the
-// log are closed in that order. Any failure before the window opens
+// Startup is direct: resolve the configuration and create the
+// portable directories (first launch creates and initializes them),
+// set up logging, take the single-instance lock, open and migrate
+// the SQLite database, open the credential vault, load settings and
+// services, then run the Wails application. There is no first-launch
+// choice and no scanning or migration of data from any external
+// location — the Stage 1 Roaming auto-migration was removed in
+// Stage 5A. Shutdown is the mirror image: the app drains its
+// background loops, then the database, the instance lock and the log
+// are closed in that order. Any failure before the window opens
 // aborts startup with a clear error — the app never falls back to
-// writing data into %APPDATA% or %LOCALAPPDATA%, and it never scans
-// or migrates data from any external location.
+// writing data into %APPDATA% or %LOCALAPPDATA%.
 //
 // main is a thin wrapper over run: run returns errors instead of
 // calling log.Fatalf, so every deferred cleanup always executes.
@@ -34,10 +24,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -45,12 +32,10 @@ import (
 	"github.com/onbeee/DeBrowser/internal/app"
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
-	"github.com/onbeee/DeBrowser/internal/installstate"
 	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/service"
 	"github.com/onbeee/DeBrowser/internal/singleinstance"
-	"github.com/onbeee/DeBrowser/internal/welcomerun"
 )
 
 //go:embed all:frontend/dist
@@ -68,50 +53,8 @@ func main() {
 }
 
 func run() error {
-	// Phase one: resolve only. Nothing is created on disk yet, so an
-	// uninitialized installation stays exactly as it was downloaded.
-	cfg, err := config.Resolve(os.Getenv)
+	cfg, err := config.Load(os.Getenv)
 	if err != nil {
-		return fmt.Errorf("configuration: %w", err)
-	}
-
-	switch installstate.Detect(cfg.Layout) {
-	case installstate.PhaseReady:
-		// A completed installation must also pass the data-layout
-		// version check: a layout written by a newer DeBrowser, or
-		// older than this build can upgrade, is never silently
-		// started, never treated as a new installation and never
-		// cleaned up — startup refuses and says why.
-		if err := installstate.CheckLayoutCompatibility(cfg.Layout); err != nil {
-			var incompat *installstate.IncompatibleLayoutError
-			if errors.As(err, &incompat) {
-				if incompat.Found > incompat.Supported {
-					return fmt.Errorf("数据布局版本不兼容：当前数据由更高版本创建（布局版本 %d），本程序支持的布局版本为 %d，已阻止启动以保护数据。请使用与该数据匹配的 DeBrowser 版本。", incompat.Found, incompat.Supported)
-				}
-				return fmt.Errorf("数据布局版本过旧：当前数据布局版本为 %d，本程序支持的布局版本为 %d，需要先完成布局兼容升级才能启动；本版本尚无对应的布局迁移，已阻止启动以保护数据。", incompat.Found, incompat.Supported)
-			}
-			return err
-		}
-		return runFormal(cfg)
-	case installstate.PhaseInitializing:
-		// A previous new-user initialization was interrupted (crash,
-		// power loss, killed process). Its marker proves no completed
-		// initialization ever produced user data, so its partial
-		// artifacts are removed and the user starts over from the
-		// welcome page. A cleanup failure is reported, never hidden.
-		if err := installstate.CleanupFormal(cfg.Layout); err != nil {
-			return fmt.Errorf("清理上次未完成的初始化失败，无法继续启动：%w", err)
-		}
-		fmt.Fprintln(os.Stderr, "检测到上次初始化未完成，已清理其残留文件。")
-		return runWelcome(cfg)
-	default:
-		return runWelcome(cfg)
-	}
-}
-
-// runFormal is the normal startup of an initialized installation.
-func runFormal(cfg config.Config) error {
-	if err := cfg.Layout.Ensure(); err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
 
@@ -176,17 +119,6 @@ func runFormal(cfg config.Config) error {
 		return err
 	}
 
-	// Installations created before Stage 5A have no marker file yet:
-	// record the completed state once the database has opened and
-	// migrated successfully. Best effort — a marker write failure
-	// must not block a healthy startup, and the database check in
-	// installstate.Detect keeps classifying the install as ready.
-	if _, exists, _ := installstate.ReadMarker(cfg.Layout); !exists {
-		if err := installstate.MarkComplete(cfg.Layout); err != nil {
-			logger.Warn("record install marker failed", "error", err)
-		}
-	}
-
 	appService, err := service.NewAppService(cfg, db, logger)
 	if err != nil {
 		logger.Error("load settings failed", "error", err)
@@ -240,52 +172,4 @@ func runFormal(cfg config.Config) error {
 		logger.Error("application exited with error", "error", runErr)
 	}
 	return runErr
-}
-
-// runWelcome is the first-launch flow of an uninitialized
-// installation. The workspace, log and single-instance lifecycle —
-// including the rule that only the lock-owning process may remove
-// the workspace — lives in internal/welcomerun; this function only
-// builds the welcome window inside it. After a successful
-// initialization the formal application is started as a new process
-// (which takes the normal startup path) and the welcome process
-// exits, so there is exactly one initialization and no in-process
-// service swapping.
-func runWelcome(cfg config.Config) error {
-	return welcomerun.Run(cfg, func(ws installstate.Workspace, logger *slog.Logger) error {
-		var welcomeApp *app.WelcomeApp
-		welcomeService := service.NewWelcomeService(cfg.Layout, logger, func() {
-			if err := startFormalProcess(); err != nil {
-				// Initialization DID complete and its marker is
-				// written: the next launch takes the normal path.
-				// Keep the welcome window open so the frontend's
-				// completion view can tell the user to relaunch
-				// manually.
-				logger.Error("start formal process after initialization failed", "error", err)
-				return
-			}
-			logger.Info("initialization complete; formal process started, welcome exiting")
-			welcomeApp.Quit()
-		})
-		welcomeApp = app.NewWelcome(cfg, welcomeService, ws, logger, assets)
-		return welcomeApp.Run()
-	})
-}
-
-// startFormalProcess launches this executable again; the new process
-// sees the completed install marker and takes the normal startup.
-func startFormalProcess() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locate executable: %w", err)
-	}
-	cmd := exec.Command(exe, os.Args[1:]...)
-	cmd.Dir = filepath.Dir(exe)
-	cmd.Env = os.Environ()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start debrowser: %w", err)
-	}
-	return nil
 }

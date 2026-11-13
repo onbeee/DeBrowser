@@ -3,7 +3,7 @@
 ## Engine
 
 - SQLite, accessed through the pure-Go driver `modernc.org/sqlite` (no CGO required, which keeps Windows x64 builds simple).
-- The database file is `debrowser.db` inside the portable data directory (`<application root>\data\debrowser.db`; the root follows the executable — see `internal/paths`). It is created by the Stage 5A first-launch initialization (or by the normal startup of an already initialized installation); no data is ever imported automatically from `%AppData%` or any other external location (see ARCHITECTURE.md).
+- The database file is `debrowser.db` inside the portable data directory (`<application root>\data\debrowser.db`; the root follows the executable — see `internal/paths`). It is created by the normal startup when missing (first launch) and opened as-is afterwards; no data is ever imported automatically from `%AppData%` or any other external location (see ARCHITECTURE.md).
 - The path always comes from `internal/paths`; no code outside that package constructs storage locations, and there is no AppData fallback.
 
 ## Open-time pragmas
@@ -27,7 +27,7 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 
 ## Schema (current state)
 
-Current state (migrations 0001-0005, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
+Current state (migrations 0001-0005, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 10 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 

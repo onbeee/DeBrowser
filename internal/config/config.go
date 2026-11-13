@@ -26,11 +26,10 @@ type Config struct {
 	LogLevel string
 }
 
-// Resolve resolves the configuration: application root and portable
-// layout. It creates NOTHING on disk — Stage 5A decides between the
-// first-launch welcome flow and the normal startup from the resolved
-// layout before any directory is made.
-func Resolve(getenv func(string) string) (Config, error) {
+// Load resolves the configuration: application root, portable layout,
+// and directory creation with a writability check. A root that cannot
+// be written to is a hard error — there is no fallback location.
+func Load(getenv func(string) string) (Config, error) {
 	root := strings.TrimSpace(getenv(EnvAppRoot))
 	if root == "" {
 		exeDir, err := paths.ExecutableDir()
@@ -43,6 +42,9 @@ func Resolve(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := layout.Ensure(); err != nil {
+		return Config{}, err
+	}
 	cfg := Config{Layout: layout, LogLevel: "info"}
 	if lv := strings.ToLower(strings.TrimSpace(getenv("DEBROWSER_LOG_LEVEL"))); lv != "" {
 		switch lv {
@@ -51,22 +53,6 @@ func Resolve(getenv func(string) string) (Config, error) {
 		default:
 			return Config{}, fmt.Errorf("invalid DEBROWSER_LOG_LEVEL %q", lv)
 		}
-	}
-	return cfg, nil
-}
-
-// Load resolves the configuration and creates the portable directory
-// layout with its writability check. A root that cannot be written to
-// is a hard error — there is no fallback location. Load is the normal
-// startup path; the first-launch welcome flow uses Resolve instead so
-// no formal directory exists before the user chooses.
-func Load(getenv func(string) string) (Config, error) {
-	cfg, err := Resolve(getenv)
-	if err != nil {
-		return Config{}, err
-	}
-	if err := cfg.Layout.Ensure(); err != nil {
-		return Config{}, err
 	}
 	return cfg, nil
 }

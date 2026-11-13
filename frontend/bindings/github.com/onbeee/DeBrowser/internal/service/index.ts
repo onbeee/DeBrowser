@@ -4,12 +4,10 @@
 import * as AppService from "./appservice.js";
 import * as InstanceService from "./instanceservice.js";
 import * as ProxyService from "./proxyservice.js";
-import * as WelcomeService from "./welcomeservice.js";
 export {
     AppService,
     InstanceService,
-    ProxyService,
-    WelcomeService
+    ProxyService
 };
 
 export type {

@@ -55,7 +55,7 @@ DeBrowser is portable-first and local-first. Everything lives next to the execut
   config\          settings.json (language, theme)
 ```
 
-Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch the app shows a welcome page with two choices — 「新用户」 initializes a fresh portable data directory in place, and 「导入数据」 will restore a backup once that feature lands in Stage 5B (this version only shows a notice). Nothing is created before the user chooses, and no data is scanned, detected or migrated from `%AppData%` or any other location. The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
+Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch the app directly creates its portable data directory and initializes the database and credential vault automatically — no setup choices are required, and no data is scanned, detected or migrated from `%AppData%` or any other location. The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
 
 ## License
 
