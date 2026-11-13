@@ -231,3 +231,112 @@ func TestIPAllowedByPolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestIPAllowedByPolicySpecialRanges extends the policy table
+// with the special-use ranges the Stage 6 review required to be
+// refused explicitly (in BOTH allowLAN modes), including
+// IPv4-mapped IPv6 spellings of forbidden IPv4 targets.
+func TestIPAllowedByPolicySpecialRanges(t *testing.T) {
+	alwaysDeny := []string{
+		// CGNAT shared address space (RFC 6598)
+		"100.64.0.1", "100.127.255.254",
+		// Documentation TEST-NETs (RFC 5737)
+		"192.0.2.1", "198.51.100.1", "203.0.113.1",
+		// Benchmarking (RFC 2544)
+		"198.18.0.1", "198.19.255.254",
+		// IETF special registry + "this network" + reserved
+		"192.0.0.1", "0.1.2.3", "240.0.0.1", "255.255.255.255",
+		// IPv6 special ranges
+		"2001:db8::1",      // documentation
+		"2001::1",          // Teredo
+		"2001:2::1",        // benchmarking
+		"100::1",           // discard-only
+		"64:ff9b::8.8.8.8", // NAT64 well-known prefix
+		"3fff::1",          // documentation
+		// IPv4-mapped IPv6 spellings must be judged as IPv4
+		"::ffff:127.0.0.1",    // loopback
+		"::ffff:192.168.0.10", // RFC1918 (deny without LAN)
+		"::ffff:100.64.0.1",   // CGNAT
+		"::ffff:8.8.8.8",      // public — handled below, not in alwaysDeny
+	}
+	for _, raw := range alwaysDeny[:len(alwaysDeny)-1] {
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			t.Fatalf("bad test IP %q", raw)
+		}
+		if ipAllowedByPolicy(ip, false) {
+			t.Errorf("%s allowed with allowLAN=false", raw)
+		}
+		if ipAllowedByPolicy(ip, true) && raw != "::ffff:192.168.0.10" {
+			t.Errorf("%s allowed with allowLAN=true", raw)
+		}
+	}
+	// The mapped RFC1918 address follows the LAN rule after
+	// unmapping: refused without, allowed with.
+	mappedPrivate := net.ParseIP("::ffff:192.168.0.10")
+	if ipAllowedByPolicy(mappedPrivate, false) {
+		t.Error("mapped RFC1918 allowed without allowLAN")
+	}
+	if !ipAllowedByPolicy(mappedPrivate, true) {
+		t.Error("mapped RFC1918 refused with allowLAN (unmapping broken)")
+	}
+	// A mapped PUBLIC address stays allowed in both modes.
+	mappedPublic := net.ParseIP("::ffff:8.8.8.8")
+	if !ipAllowedByPolicy(mappedPublic, false) || !ipAllowedByPolicy(mappedPublic, true) {
+		t.Error("mapped public address refused")
+	}
+	// IPv6 private/link-local/loopback follow their rules.
+	if ipAllowedByPolicy(net.ParseIP("fd00::5"), false) || !ipAllowedByPolicy(net.ParseIP("fd00::5"), true) {
+		t.Error("ULA did not follow the allowLAN rule")
+	}
+	if ipAllowedByPolicy(net.ParseIP("fe80::5"), true) {
+		t.Error("IPv6 link-local allowed with allowLAN")
+	}
+	if ipAllowedByPolicy(net.ParseIP("::1"), true) {
+		t.Error("IPv6 loopback allowed with allowLAN")
+	}
+	// Ordinary public addresses are NOT caught by the special
+	// table.
+	for _, raw := range []string{"1.1.1.1", "8.8.4.4", "93.184.216.34", "2606:4700:4700::1111", "2001:4860:4860::8888"} {
+		if !ipAllowedByPolicy(net.ParseIP(raw), false) {
+			t.Errorf("public address %s refused", raw)
+		}
+	}
+}
+
+// TestFetchRejectsSpecialRangesWithoutDialing: at the fetch
+// level, a DNS answer containing any special-use address refuses
+// the whole host and NO dial is ever attempted — including the
+// mixed public+special case.
+func TestFetchRejectsSpecialRangesWithoutDialing(t *testing.T) {
+	fx, _ := newFetchFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	specials := []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.9", "2001:db8::1"}
+	for _, raw := range specials {
+		fx.dialedTo = nil
+		fx.resolve["subs.example.com"] = []net.IP{net.ParseIP(raw)}
+		if _, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/x", true); err == nil {
+			t.Errorf("%s: fetch succeeded", raw)
+		}
+		if len(fx.dialedTo) != 0 {
+			t.Errorf("%s: dial attempted despite refusal: %v", raw, fx.dialedTo)
+		}
+	}
+	// Mixed public + special: whole resolution refused, no dial.
+	fx.dialedTo = nil
+	fx.resolve["subs.example.com"] = []net.IP{net.ParseIP("93.184.216.34"), net.ParseIP("100.64.0.1")}
+	if _, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/x", false); err == nil {
+		t.Fatal("mixed public+special resolution accepted")
+	}
+	if len(fx.dialedTo) != 0 {
+		t.Fatalf("dial attempted for mixed resolution: %v", fx.dialedTo)
+	}
+	// An IPv4-mapped loopback in the DNS answer is refused too.
+	fx.dialedTo = nil
+	fx.resolve["subs.example.com"] = []net.IP{net.ParseIP("::ffff:127.0.0.1")}
+	if _, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/x", true); err == nil {
+		t.Fatal("mapped loopback resolution accepted")
+	}
+	if len(fx.dialedTo) != 0 {
+		t.Fatalf("dial attempted for mapped loopback: %v", fx.dialedTo)
+	}
+}

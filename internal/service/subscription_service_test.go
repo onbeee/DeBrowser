@@ -590,3 +590,119 @@ func TestRefreshCompensatesOnDBFailure(t *testing.T) {
 		t.Fatalf("old node set changed: %v", names)
 	}
 }
+
+const nestedSecretFeed = `
+proxies:
+  - name: 嵌套节点
+    type: ss
+    server: n.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: svc-top-secret
+    extra:
+      layers:
+        - - {password: svc-deep-array-secret}
+        - - {uuid: svc-deep-uuid}
+      endpoints:
+        - {host: e1.example.com, auth: {password: svc-deep-auth}}
+`
+
+// TestImportNestedSecretsAcrossStores is the service-level proof
+// for the deep-classification fix: after importing a document
+// whose credentials are buried under alternating map/array
+// layers, no secret appears in SQLite config_json or in the
+// on-disk artifact, while every secret is present in the vault
+// envelope. A subsequent DB-failing refresh must still
+// compensate its vault writes and keep the good data.
+func TestImportNestedSecretsAcrossStores(t *testing.T) {
+	f := newSubFixture(t)
+	v := f.createSub(t)
+	f.stubFeed(nestedSecretFeed)
+	sum, err := f.svc.RefreshSubscription(v.ID)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if sum.Added != 1 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	secrets := []string{"svc-top-secret", "svc-deep-array-secret", "svc-deep-uuid", "svc-deep-auth"}
+	c, cancel := ctx()
+	defer cancel()
+	proxies, err := f.store.ListProxiesBySubscription(c, v.ID)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("proxies = %v err %v", proxies, err)
+	}
+	row := proxies[0]
+	// 1. SQLite config_json carries no secret at any depth, but
+	// keeps the non-secret nested data.
+	for _, s := range secrets {
+		if strings.Contains(row.ConfigJSON, s) {
+			t.Fatalf("config_json leaks %q: %s", s, row.ConfigJSON)
+		}
+	}
+	if !strings.Contains(row.ConfigJSON, "e1.example.com") {
+		t.Fatalf("non-secret nested data lost: %s", row.ConfigJSON)
+	}
+	// 2. The vault envelope holds every secret (under distinct
+	// dotted paths).
+	if row.SecretRef == "" {
+		t.Fatal("node has no vault envelope")
+	}
+	raw, err := f.vault.Get(row.SecretRef)
+	if err != nil {
+		t.Fatalf("vault.Get: %v", err)
+	}
+	var envelope map[string]string
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("envelope JSON: %v", err)
+	}
+	for _, s := range secrets {
+		found := false
+		for _, val := range envelope {
+			if strings.Contains(val, s) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("secret %q missing from vault envelope %v", s, envelope)
+		}
+	}
+	for _, path := range []string{"extra.layers.0.0.password", "extra.layers.1.0.uuid", "extra.endpoints.0.auth"} {
+		if _, ok := envelope[path]; !ok {
+			t.Fatalf("envelope missing path %q: %v", path, envelope)
+		}
+	}
+	// 3. The on-disk artifact is clean.
+	cfg, err := f.store.GetMihomoConfigBySubscription(c, v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := os.ReadFile(filepath.Join(f.layout.Mihomo, cfg.FilePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range secrets {
+		if strings.Contains(string(artifact), s) {
+			t.Fatalf("artifact leaks %q", s)
+		}
+	}
+	// 4. A DB-failing refresh of the same payload compensates:
+	// vault entry count unchanged, prior data intact.
+	refsBefore := len(f.vault.Refs())
+	realTx := f.proxy.withTx
+	f.proxy.withTx = func(context.Context, func(tx *store.Store) error) error {
+		return errors.New("injected tx failure")
+	}
+	_, err = f.svc.RefreshSubscription(v.ID)
+	f.proxy.withTx = realTx
+	if err == nil {
+		t.Fatal("refresh succeeded despite tx failure")
+	}
+	if got := len(f.vault.Refs()); got != refsBefore {
+		t.Fatalf("vault entries = %d, want %d after failed refresh", got, refsBefore)
+	}
+	proxiesAfter, _ := f.store.ListProxiesBySubscription(c, v.ID)
+	if len(proxiesAfter) != 1 || proxiesAfter[0].ID != row.ID || proxiesAfter[0].SecretRef != row.SecretRef {
+		t.Fatal("prior import damaged by failed refresh")
+	}
+}

@@ -61,9 +61,13 @@ func checkYAMLTree(root *yaml.Node) error {
 				}
 			}
 		case yaml.AliasNode:
-			// Aliases are followed for limit purposes only; the
-			// target was already counted at its anchor site, so do
-			// not recurse (an alias chain could otherwise loop).
+			// Safety-first (Stage 6 review): aliases are refused
+			// outright. nodeToAny would otherwise expand them,
+			// letting a small document amplify into an unbounded
+			// structure (alias bomb) past the node/depth limits,
+			// which count the unexpanded tree. Anchors that are
+			// never referenced through an alias remain fine.
+			return errf("不支持 YAML 锚点引用（alias）：请将被引用的内容直接展开")
 		}
 		return nil
 	}
@@ -102,10 +106,10 @@ func nodeToAny(n *yaml.Node) (any, error) {
 		}
 		return out, nil
 	case yaml.AliasNode:
-		if n.Alias == nil {
-			return nil, errf("YAML 别名无法解析")
-		}
-		return nodeToAny(n.Alias)
+		// Unreachable after checkYAMLTree (which rejects aliases
+		// first); kept as a hard stop so no future caller can
+		// expand an alias by accident.
+		return nil, errf("不支持 YAML 锚点引用（alias）")
 	case yaml.ScalarNode:
 		return scalarValue(n), nil
 	}
@@ -154,50 +158,52 @@ func scalarString(v any) string {
 }
 
 // classifyFields splits a decoded mapping into non-secret config
-// and extracted secrets. Secret keys are recognised at ANY depth;
-// nested secrets are recorded under dotted paths (for example
-// "plugin-opts.password") and removed from the config copy. The
-// input map is not modified.
+// and extracted secrets. Secret keys are recognised at ANY depth
+// — inside nested maps and inside arrays at any nesting level —
+// and recorded under unambiguous dotted paths (map keys as field
+// names, array positions as numeric indices), so two secrets in
+// different positions never overwrite each other. The input is
+// never modified; the returned config is a deep-cleaned copy.
 func classifyFields(in map[string]any) (config map[string]any, secrets map[string]string) {
-	config = make(map[string]any, len(in))
 	secrets = map[string]string{}
-	for key, val := range in {
-		classifyValue(key, key, val, config, secrets)
-	}
+	config = classifyMap(in, "", secrets)
 	return config, secrets
 }
 
-// classifyValue handles one key/value pair. When the key itself
-// is a credential name, the whole value becomes one secret
-// (scalars in natural form, containers as compact JSON).
-func classifyValue(key, path string, val any, config map[string]any, secrets map[string]string) {
-	if isSecretKey(key) {
-		secrets[path] = secretString(val)
-		return
+// classifyMap cleans one mapping level, extracting credential
+// fields found directly in it and recursing into everything else.
+func classifyMap(in map[string]any, prefix string, secrets map[string]string) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, val := range in {
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+		if isSecretKey(key) {
+			secrets[path] = secretString(val)
+			continue
+		}
+		out[key] = classifyValue(val, path, secrets)
 	}
+	return out
+}
+
+// classifyValue deep-cleans one non-secret-keyed value: maps and
+// arrays are rebuilt recursively (their inner maps go through
+// classifyMap, so a credential field is caught however deeply it
+// is buried), scalars pass through unchanged.
+func classifyValue(val any, path string, secrets map[string]string) any {
 	switch child := val.(type) {
 	case map[string]any:
-		sub := make(map[string]any, len(child))
-		for ck, cv := range child {
-			classifyValue(ck, path+"."+ck, cv, sub, secrets)
-		}
-		config[key] = sub
+		return classifyMap(child, path, secrets)
 	case []any:
 		out := make([]any, len(child))
-		for i, cv := range child {
-			if m, ok := cv.(map[string]any); ok {
-				sub := make(map[string]any, len(m))
-				for ck, cvv := range m {
-					classifyValue(ck, fmt.Sprintf("%s.%d.%s", path, i, ck), cvv, sub, secrets)
-				}
-				out[i] = sub
-			} else {
-				out[i] = cv
-			}
+		for i, el := range child {
+			out[i] = classifyValue(el, fmt.Sprintf("%s.%d", path, i), secrets)
 		}
-		config[key] = out
+		return out
 	default:
-		config[key] = val
+		return val
 	}
 }
 
@@ -289,9 +295,7 @@ func extractConfigSecrets(doc *yaml.Node, bundle map[string]string) {
 				n.Value = cleaned
 			}
 		case yaml.AliasNode:
-			// Aliases share their target; extracting through an
-			// alias would double-record. Targets are visited at
-			// their anchor site.
+			// Rejected earlier by checkYAMLTree; nothing to do.
 		}
 	}
 	walk(doc, "")

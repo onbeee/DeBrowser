@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -91,18 +92,68 @@ func validateSubscriptionURL(raw string) error {
 	return nil
 }
 
-// ipAllowedByPolicy classifies one resolved IP. allowLAN permits
-// private (RFC 1918 / ULA) targets only; loopback, unspecified,
-// multicast and link-local are refused in both modes.
+// specialUsePrefixes are address ranges that are NOT ordinary
+// public unicast space and are therefore refused in both policy
+// modes (Stage 6 review: net.IP.IsPrivate alone does not cover
+// them). Each entry names the registry purpose that keeps it out
+// of the public target set.
+var specialUsePrefixes = []netip.Prefix{
+	// IPv4
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 791)
+	netip.MustParsePrefix("100.64.0.0/10"),   // shared address space / CGNAT (RFC 6598)
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF special registry (RFC 6890)
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 documentation (RFC 5737)
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2 documentation (RFC 5737)
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3 documentation (RFC 5737)
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking (RFC 2544)
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, incl. the limited broadcast (RFC 1112)
+	// IPv6
+	netip.MustParsePrefix("64:ff9b::/96"),  // NAT64 well-known prefix (RFC 6052): translated, not a direct target
+	netip.MustParsePrefix("100::/64"),      // discard-only (RFC 6666)
+	netip.MustParsePrefix("2001::/32"),     // Teredo tunnelling (RFC 4380)
+	netip.MustParsePrefix("2001:2::/48"),   // benchmarking (RFC 5180)
+	netip.MustParsePrefix("2001:db8::/32"), // documentation (RFC 3849)
+	netip.MustParsePrefix("2001:20::/28"),  // ORCHIDv2 (RFC 7343)
+	netip.MustParsePrefix("3fff::/20"),     // documentation (RFC 9637)
+}
+
+// ipAllowedByPolicy classifies one resolved IP under the
+// subscription fetch policy:
+//
+//   - loopback, unspecified, multicast and link-local addresses
+//     are ALWAYS refused;
+//   - RFC 1918 IPv4 private space and IPv6 ULA are refused unless
+//     the subscription explicitly allows LAN access;
+//   - special-use, reserved, documentation, benchmarking and
+//     other non-public ranges (specialUsePrefixes) are ALWAYS
+//     refused — allowLAN never widens beyond private space;
+//   - everything else is ordinary public space and is allowed.
+//
+// The address is normalised with netip first: an IPv4-mapped IPv6
+// address is unmapped to its IPv4 form before any check, so the
+// IPv6 spelling of a forbidden IPv4 target cannot slip through.
 func ipAllowedByPolicy(ip net.IP, allowLAN bool) bool {
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		if v4 := ip.To4(); v4 != nil {
+			addr, ok = netip.AddrFromSlice(v4)
+		}
+		if !ok {
+			return false
+		}
+	}
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
 		return false
 	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return false
-	}
-	if ip.IsPrivate() {
+	if addr.IsPrivate() {
 		return allowLAN
+	}
+	for _, prefix := range specialUsePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
 	}
 	return true
 }

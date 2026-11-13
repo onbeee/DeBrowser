@@ -188,9 +188,6 @@ func extractYAMLNodes(seqNode *yaml.Node) ([]Node, error) {
 	}
 	var nodes []Node
 	for i, item := range seqNode.Content {
-		if item.Kind == yaml.AliasNode && item.Alias != nil {
-			item = item.Alias
-		}
 		if item.Kind != yaml.MappingNode {
 			return nil, errf("第 %d 个代理节点格式无效：必须是字段映射", i+1)
 		}
@@ -220,9 +217,6 @@ func extractYAMLGroups(root, seqNode *yaml.Node, out *Parsed) ([]Group, error) {
 	}
 	var groups []Group
 	for i, item := range seqNode.Content {
-		if item.Kind == yaml.AliasNode && item.Alias != nil {
-			item = item.Alias
-		}
 		if item.Kind != yaml.MappingNode {
 			return nil, errf("第 %d 个代理组格式无效：必须是字段映射", i+1)
 		}
@@ -291,10 +285,6 @@ func placeholderSecrets(n *yaml.Node) {
 	case yaml.ScalarNode:
 		if cleaned, ui := scrubUserinfo(n.Value); ui != "" {
 			n.Value = cleaned
-		}
-	case yaml.AliasNode:
-		if n.Alias != nil {
-			placeholderSecrets(n.Alias)
 		}
 	}
 }
