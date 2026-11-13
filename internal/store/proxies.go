@@ -10,7 +10,7 @@ import (
 )
 
 const proxyColumns = `id, name, protocol, address, port, config_json, secret_ref, enabled,
-	group_id, sort_order, source, subscription_id, dedup_key,
+	sort_order, source, subscription_id, dedup_key,
 	last_latency_ms, last_test_ok, last_tested_at, created_at, updated_at`
 
 func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
@@ -18,7 +18,6 @@ func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 		p        model.Proxy
 		port     sql.NullInt64
 		enable   int
-		groupID  sql.NullString
 		subID    sql.NullString
 		latency  sql.NullInt64
 		testOK   sql.NullInt64
@@ -26,7 +25,7 @@ func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 	)
 	if err := row.Scan(&p.ID, &p.Name, &p.Protocol, &p.Address, &port,
 		&p.ConfigJSON, &p.SecretRef, &enable,
-		&groupID, &p.SortOrder, &p.Source, &subID, &p.DedupKey,
+		&p.SortOrder, &p.Source, &subID, &p.DedupKey,
 		&latency, &testOK, &testedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return model.Proxy{}, err
 	}
@@ -35,9 +34,6 @@ func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 		p.Port = &v
 	}
 	p.Enabled = enable != 0
-	if groupID.Valid {
-		p.GroupID = &groupID.String
-	}
 	if subID.Valid {
 		p.SubscriptionID = &subID.String
 	}
@@ -86,12 +82,12 @@ func (s *Store) CreateProxy(ctx context.Context, p model.Proxy) (model.Proxy, er
 	}
 	if _, err := s.q.ExecContext(ctx, `INSERT INTO proxies
 		(id, name, protocol, address, port, config_json, secret_ref, enabled,
-		 group_id, sort_order, source, subscription_id, dedup_key,
+		 sort_order, source, subscription_id, dedup_key,
 		 last_latency_ms, last_test_ok, last_tested_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.Protocol, p.Address, nullInt(p.Port),
 		p.ConfigJSON, p.SecretRef, boolInt(p.Enabled),
-		nullStr(p.GroupID), p.SortOrder, p.Source, nullStr(p.SubscriptionID), p.DedupKey,
+		p.SortOrder, p.Source, nullStr(p.SubscriptionID), p.DedupKey,
 		nullInt(p.LastLatencyMs), nullBool(p.LastTestOK), nullStr(p.LastTestedAt)); err != nil {
 		return model.Proxy{}, fmt.Errorf("store: create proxy: %w", err)
 	}
@@ -139,12 +135,12 @@ func (s *Store) ListProxies(ctx context.Context) ([]model.Proxy, error) {
 func (s *Store) UpdateProxy(ctx context.Context, p model.Proxy) (model.Proxy, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE proxies SET
 		name = ?, protocol = ?, address = ?, port = ?, config_json = ?,
-		secret_ref = ?, enabled = ?, group_id = ?, sort_order = ?,
+		secret_ref = ?, enabled = ?, sort_order = ?,
 		source = ?, subscription_id = ?, dedup_key = ?,
 		updated_at = datetime('now')
 		WHERE id = ?`,
 		p.Name, p.Protocol, p.Address, nullInt(p.Port), p.ConfigJSON,
-		p.SecretRef, boolInt(p.Enabled), nullStr(p.GroupID), p.SortOrder,
+		p.SecretRef, boolInt(p.Enabled), p.SortOrder,
 		p.Source, nullStr(p.SubscriptionID), p.DedupKey, p.ID)
 	if err != nil {
 		return model.Proxy{}, fmt.Errorf("store: update proxy: %w", err)
@@ -178,8 +174,7 @@ func (s *Store) UpdateProxyTestResult(ctx context.Context, id string, latencyMs 
 }
 
 // DeleteProxy removes a proxy. Instances that referenced it keep
-// existing with proxy_id set to NULL (schema ON DELETE SET NULL);
-// its tag associations are removed (ON DELETE CASCADE).
+// existing with proxy_id set to NULL (schema ON DELETE SET NULL).
 func (s *Store) DeleteProxy(ctx context.Context, id string) error {
 	res, err := s.q.ExecContext(ctx, `DELETE FROM proxies WHERE id = ?`, id)
 	if err != nil {
