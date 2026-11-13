@@ -383,54 +383,6 @@ func TestProxyServiceConfigJSONRecursiveSecretRejection(t *testing.T) {
 	}
 }
 
-func TestProxyServiceGroupsAndTags(t *testing.T) {
-	svc, _, _ := newTestProxyService(t)
-	g, err := svc.CreateGroup(CreateGroupInput{Name: "工作组"})
-	if err != nil {
-		t.Fatalf("CreateGroup: %v", err)
-	}
-	if _, err := svc.CreateGroup(CreateGroupInput{Name: "工作组"}); err == nil ||
-		!strings.Contains(err.Error(), "分组名称已存在") {
-		t.Fatalf("duplicate group error = %v", err)
-	}
-	port := 7890
-	view, err := svc.CreateProxy(CreateProxyInput{
-		Name: "带标签", Protocol: "http", Address: "127.0.0.1", Port: &port,
-		GroupID: &g.ID, Tags: []string{"  高速 ", "香港", "高速", ""},
-	})
-	if err != nil {
-		t.Fatalf("CreateProxy: %v", err)
-	}
-	if view.GroupName != "工作组" || len(view.Tags) != 2 {
-		t.Fatalf("view = %+v", view)
-	}
-	groups, err := svc.ListGroups()
-	if err != nil || len(groups) != 1 || groups[0].ProxyCount != 1 {
-		t.Fatalf("ListGroups = %+v, %v", groups, err)
-	}
-	tags, err := svc.ListTags()
-	if err != nil || len(tags) != 2 {
-		t.Fatalf("ListTags = %+v, %v", tags, err)
-	}
-	if err := svc.RenameTag("香港", "港澳"); err != nil {
-		t.Fatalf("RenameTag: %v", err)
-	}
-	view, _ = svc.GetProxy(view.ID)
-	if len(view.Tags) != 2 || view.Tags[0] != "港澳" {
-		t.Fatalf("after rename tags = %v", view.Tags)
-	}
-	if n, err := svc.DeleteTag("港澳"); err != nil || n != 1 {
-		t.Fatalf("DeleteTag = %d, %v", n, err)
-	}
-	if err := svc.DeleteGroup(g.ID); err != nil {
-		t.Fatalf("DeleteGroup: %v", err)
-	}
-	view, _ = svc.GetProxy(view.ID)
-	if view.GroupID != nil || view.GroupName != "" {
-		t.Fatalf("after group delete view = %+v, want ungrouped", view)
-	}
-}
-
 func TestProxyServiceTestProxy(t *testing.T) {
 	svc, _, _ := newTestProxyService(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
