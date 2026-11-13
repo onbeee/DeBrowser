@@ -27,7 +27,7 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 
 ## Schema (current state)
 
-Current state (migrations 0001-0005, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 10 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
+Current state (migrations 0001-0005, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 
@@ -104,10 +104,10 @@ Schema changes are the riskiest moment for a local database, so upgrades protect
 - The backup uses **`VACUUM INTO`**, which produces a transactionally consistent snapshot including data that still lives in the WAL. Copying the `.db` file directly is never used — it would silently miss uncheckpointed transactions.
 - The snapshot is verified with `PRAGMA integrity_check` before migration proceeds. **If the backup fails, the migration is aborted** with an explicit error; the existing database is left untouched.
 - A brand-new database (nothing applied yet) skips the backup — there is nothing to protect.
-- `DB.BackupNow` exposes the same verified snapshot mechanism for manual backups (used by Stage 7's full backup/restore feature).
+- `DB.BackupNow` exposes the same verified snapshot mechanism for manual backups (a low-level safety facility; the full user backup/restore feature is Stage 12 work).
 - The external Stage 1 Roaming data migration that once ran before the database was opened was removed in Stage 5A (no automatic legacy-data migration exists); this in-database schema migration mechanism is unaffected and remains the long-term compatibility path.
 
-Full backup/restore UX ships in Stage 7.
+Full backup/restore UX ships in Stage 12.
 
 ## Stage 3 note
 

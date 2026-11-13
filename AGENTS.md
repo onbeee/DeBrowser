@@ -144,6 +144,8 @@ Stage 5: Bookmarks and kernel management.
 Stage 6: Multi-window synchronization.
 Stage 7: Backup, recovery, performance and release testing.
 
+> Historical note (2026-11-13): the seven lines above are the ORIGINAL stage plan recorded when this file was written (2026-11-10) and are kept as a historical record only — the project no longer follows these numbers (Stages 3 and 4, for example, were delivered with different scopes). The authoritative current roadmap, with the final stage numbering fixed by the product owner on 2026-11-13 (Stage 5A direct startup … Stage 12 full backup & restore, last), is `docs/ROADMAP.md`.
+
 Do not implement all stages in one change.
 
 Before each implementation:
