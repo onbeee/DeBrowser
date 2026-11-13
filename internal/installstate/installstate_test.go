@@ -1,6 +1,8 @@
 package installstate
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -177,4 +179,156 @@ func TestTempWorkspace(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("TempWorkspace created %d entries in the portable root, want 0", len(entries))
 	}
+}
+
+// Interruption before the marker could be recorded: only formal
+// residue exists (an empty data directory, a config directory, a
+// webview2-data directory, or a torn marker temp file). Detect must
+// classify it as an interrupted initialization — never as ready and
+// never as a plain uninitialized folder — and CleanupFormal must
+// restore exe-only.
+func TestDetectResidueWithoutMarker(t *testing.T) {
+	cases := map[string]func(layout paths.Layout){
+		"data dir only": func(layout paths.Layout) {
+			if err := os.MkdirAll(layout.Data, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"config dir only": func(layout paths.Layout) {
+			if err := os.MkdirAll(layout.Config, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"webview2 dir only": func(layout paths.Layout) {
+			if err := os.MkdirAll(layout.WebView2, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"torn marker temp file": func(layout paths.Layout) {
+			writeFile(t, filepath.Join(layout.Data, ".install-123456.tmp"))
+		},
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			layout := testLayout(t)
+			exe := filepath.Join(layout.Root, "DeBrowser.exe")
+			writeFile(t, exe)
+			plant(layout)
+			if got := Detect(layout); got != PhaseInitializing {
+				t.Fatalf("Detect = %v, want PhaseInitializing (interrupted residue)", got)
+			}
+			if err := CleanupFormal(layout); err != nil {
+				t.Fatalf("CleanupFormal: %v", err)
+			}
+			entries, err := os.ReadDir(layout.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != "DeBrowser.exe" {
+				t.Fatalf("root entries = %v, want exe-only after recovery", entries)
+			}
+			if got := Detect(layout); got != PhaseUninitialized {
+				t.Fatalf("Detect after recovery = %v, want PhaseUninitialized", got)
+			}
+		})
+	}
+}
+
+// Interruption at the vault stage: marker written, database created,
+// vault file present but initialization never completed. The marker
+// still classifies it as interrupted and recovery restores exe-only.
+func TestInterruptedAtVaultStage(t *testing.T) {
+	layout := testLayout(t)
+	writeFile(t, filepath.Join(layout.Root, "DeBrowser.exe"))
+	if err := MarkInitializing(layout); err != nil {
+		t.Fatalf("MarkInitializing: %v", err)
+	}
+	writeFile(t, layout.DatabaseFile)
+	writeFile(t, layout.SecretsFile)
+	if got := Detect(layout); got != PhaseInitializing {
+		t.Fatalf("Detect = %v, want PhaseInitializing", got)
+	}
+	if err := CleanupFormal(layout); err != nil {
+		t.Fatalf("CleanupFormal: %v", err)
+	}
+	if got := Detect(layout); got != PhaseUninitialized {
+		t.Fatalf("Detect after recovery = %v, want PhaseUninitialized", got)
+	}
+}
+
+func writeMarkerRaw(t *testing.T, layout paths.Layout, state string, version int) {
+	t.Helper()
+	if err := os.MkdirAll(layout.Data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(fmt.Sprintf(`{"state":%q,"layoutVersion":%d,"updatedAt":"2026-11-13T00:00:00Z"}`, state, version))
+	if err := os.WriteFile(layout.InstallFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Layout-version compatibility: a completed marker at the supported
+// version starts normally; a higher or lower version is refused
+// (never treated as a new installation); a legacy database-only
+// installation passes and is detected ready.
+func TestCheckLayoutCompatibility(t *testing.T) {
+	t.Run("current version passes", func(t *testing.T) {
+		layout := testLayout(t)
+		writeMarkerRaw(t, layout, StateComplete, LayoutVersion)
+		if err := CheckLayoutCompatibility(layout); err != nil {
+			t.Fatalf("CheckLayoutCompatibility: %v", err)
+		}
+		if got := Detect(layout); got != PhaseReady {
+			t.Fatalf("Detect = %v, want PhaseReady", got)
+		}
+	})
+	t.Run("newer version refused", func(t *testing.T) {
+		layout := testLayout(t)
+		writeMarkerRaw(t, layout, StateComplete, LayoutVersion+1)
+		err := CheckLayoutCompatibility(layout)
+		var incompat *IncompatibleLayoutError
+		if !errors.As(err, &incompat) {
+			t.Fatalf("error = %v, want IncompatibleLayoutError", err)
+		}
+		if incompat.Found != LayoutVersion+1 || incompat.Supported != LayoutVersion {
+			t.Fatalf("incompat = %+v, want Found=%d Supported=%d", incompat, LayoutVersion+1, LayoutVersion)
+		}
+		// Still classified ready (startup refuses with the version
+		// error) — it must NOT fall back to the welcome flow.
+		if got := Detect(layout); got != PhaseReady {
+			t.Fatalf("Detect = %v, want PhaseReady", got)
+		}
+	})
+	t.Run("older version refused", func(t *testing.T) {
+		layout := testLayout(t)
+		writeMarkerRaw(t, layout, StateComplete, 0)
+		err := CheckLayoutCompatibility(layout)
+		var incompat *IncompatibleLayoutError
+		if !errors.As(err, &incompat) {
+			t.Fatalf("error = %v, want IncompatibleLayoutError", err)
+		}
+		if incompat.Found != 0 {
+			t.Fatalf("incompat.Found = %d, want 0", incompat.Found)
+		}
+	})
+	t.Run("no marker (legacy database install) passes", func(t *testing.T) {
+		layout := testLayout(t)
+		writeFile(t, layout.DatabaseFile)
+		if err := CheckLayoutCompatibility(layout); err != nil {
+			t.Fatalf("CheckLayoutCompatibility: %v", err)
+		}
+		if got := Detect(layout); got != PhaseReady {
+			t.Fatalf("Detect = %v, want PhaseReady", got)
+		}
+	})
+	t.Run("initializing marker not version-checked", func(t *testing.T) {
+		layout := testLayout(t)
+		writeMarkerRaw(t, layout, StateInitializing, LayoutVersion+5)
+		if err := CheckLayoutCompatibility(layout); err != nil {
+			t.Fatalf("CheckLayoutCompatibility = %v, want nil (recovery path)", err)
+		}
+		if got := Detect(layout); got != PhaseInitializing {
+			t.Fatalf("Detect = %v, want PhaseInitializing", got)
+		}
+	})
 }

@@ -6,8 +6,9 @@
 //
 // Protocol (instruction §6):
 //  1. snapshot what already exists under the formal directories
-//  2. create the formal directories (Layout.Ensure)
-//  3. write the "initializing" marker
+//  2. record the start of initialization (the "initializing"
+//     marker; writing it creates the data directory)
+//  3. create the formal directories (Layout.Ensure)
 //  4. open the database and apply all schema migrations
 //  5. open the credential vault
 //  6. write the default settings
@@ -15,6 +16,14 @@
 //     structure
 //  8. write the "complete" marker (which also clears the
 //     in-progress state — both live in the same marker file)
+//
+// Recording the start FIRST closes the crash window between creating
+// directories and writing the marker: even a crash inside step 2
+// itself (data directory created, marker file not yet renamed into
+// place, a torn temp file left behind) is recognized at the next
+// launch, because installstate.Detect classifies any formal residue
+// without a database as an interrupted initialization and startup
+// cleans it back to exe-only.
 //
 // A new-user initialization starts from an installation with no user
 // data, so on ANY failure the function closes what it opened and
@@ -59,12 +68,14 @@ func NewUser(l paths.Layout, log *slog.Logger) error {
 		return fmt.Errorf("初始化在「%s」失败：%w；本次创建的文件已清理，可重新尝试", step, err)
 	}
 
-	// 1-2. Formal directories, then the in-progress marker.
+	// 1-2. Record the start of initialization FIRST (this creates
+	// the data directory and atomically renames the marker into
+	// place), then create the remaining formal directories.
+	if err := installstate.MarkInitializing(l); err != nil {
+		return fail("记录初始化开始", err)
+	}
 	if err := l.Ensure(); err != nil {
 		return fail("创建数据目录", err)
-	}
-	if err := installstate.MarkInitializing(l); err != nil {
-		return fail("写入初始化标记", err)
 	}
 	log.Info("initialization started", "root", l.Root)
 

@@ -157,8 +157,8 @@ func TestNewUserFailureDirectoryBlocked(t *testing.T) {
 	if err == nil {
 		t.Fatal("NewUser succeeded despite a blocked data path")
 	}
-	if !strings.Contains(err.Error(), "创建数据目录") {
-		t.Fatalf("error = %q, want it to name the 创建数据目录 step", err)
+	if !strings.Contains(err.Error(), "记录初始化开始") {
+		t.Fatalf("error = %q, want it to name the 记录初始化开始 step (recording the start creates the data directory)", err)
 	}
 	entries := dirEntries(t, layout.Root)
 	if len(entries) != 1 || entries[0].Name() != "data" {
@@ -195,8 +195,17 @@ func TestNewUserFailureDatabaseBlocked(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "debrowser.db" {
 		t.Fatalf("data entries = %v, want only the pre-existing planted directory", entries)
 	}
+	// The leftover husk (a data directory with no marker and no
+	// database file) is classified as an interrupted initialization,
+	// and the startup recovery cleanup restores exe-only.
+	if got := installstate.Detect(layout); got != installstate.PhaseInitializing {
+		t.Fatalf("Detect = %v, want PhaseInitializing for the leftover residue", got)
+	}
+	if err := installstate.CleanupFormal(layout); err != nil {
+		t.Fatalf("CleanupFormal: %v", err)
+	}
 	if got := installstate.Detect(layout); got != installstate.PhaseUninitialized {
-		t.Fatalf("Detect = %v, want PhaseUninitialized after cleanup", got)
+		t.Fatalf("Detect = %v, want PhaseUninitialized after recovery cleanup", got)
 	}
 }
 
@@ -230,8 +239,14 @@ func TestNewUserFailureVaultBlocked(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "secrets.vault" {
 		t.Fatalf("data entries = %v, want only the pre-existing planted directory", entries)
 	}
+	if got := installstate.Detect(layout); got != installstate.PhaseInitializing {
+		t.Fatalf("Detect = %v, want PhaseInitializing for the leftover residue", got)
+	}
+	if err := installstate.CleanupFormal(layout); err != nil {
+		t.Fatalf("CleanupFormal: %v", err)
+	}
 	if got := installstate.Detect(layout); got != installstate.PhaseUninitialized {
-		t.Fatalf("Detect = %v, want PhaseUninitialized after cleanup", got)
+		t.Fatalf("Detect = %v, want PhaseUninitialized after recovery cleanup", got)
 	}
 }
 

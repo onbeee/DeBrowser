@@ -34,6 +34,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/service"
 	"github.com/onbeee/DeBrowser/internal/singleinstance"
+	"github.com/onbeee/DeBrowser/internal/welcomerun"
 )
 
 //go:embed all:frontend/dist
@@ -75,6 +77,21 @@ func run() error {
 
 	switch installstate.Detect(cfg.Layout) {
 	case installstate.PhaseReady:
+		// A completed installation must also pass the data-layout
+		// version check: a layout written by a newer DeBrowser, or
+		// older than this build can upgrade, is never silently
+		// started, never treated as a new installation and never
+		// cleaned up — startup refuses and says why.
+		if err := installstate.CheckLayoutCompatibility(cfg.Layout); err != nil {
+			var incompat *installstate.IncompatibleLayoutError
+			if errors.As(err, &incompat) {
+				if incompat.Found > incompat.Supported {
+					return fmt.Errorf("数据布局版本不兼容：当前数据由更高版本创建（布局版本 %d），本程序支持的布局版本为 %d，已阻止启动以保护数据。请使用与该数据匹配的 DeBrowser 版本。", incompat.Found, incompat.Supported)
+				}
+				return fmt.Errorf("数据布局版本过旧：当前数据布局版本为 %d，本程序支持的布局版本为 %d，需要先完成布局兼容升级才能启动；本版本尚无对应的布局迁移，已阻止启动以保护数据。", incompat.Found, incompat.Supported)
+			}
+			return err
+		}
 		return runFormal(cfg)
 	case installstate.PhaseInitializing:
 		// A previous new-user initialization was interrupted (crash,
@@ -226,74 +243,33 @@ func runFormal(cfg config.Config) error {
 }
 
 // runWelcome is the first-launch flow of an uninitialized
-// installation. Everything it needs at runtime — WebView2 user data,
-// the log file and the single-instance coordination files — lives in
-// a per-installation workspace under the OS temp directory and is
-// removed when the welcome process exits; the portable folder is not
-// touched until the user chooses "新用户" and initialization runs.
-// After a successful initialization the formal application is
-// started as a new process (which takes the normal startup path) and
-// the welcome process exits, so there is exactly one initialization
-// and no in-process service swapping.
+// installation. The workspace, log and single-instance lifecycle —
+// including the rule that only the lock-owning process may remove
+// the workspace — lives in internal/welcomerun; this function only
+// builds the welcome window inside it. After a successful
+// initialization the formal application is started as a new process
+// (which takes the normal startup path) and the welcome process
+// exits, so there is exactly one initialization and no in-process
+// service swapping.
 func runWelcome(cfg config.Config) error {
-	ws, err := installstate.TempWorkspace(cfg.Layout.Root)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(ws.Dir) }()
-
-	logCfg := cfg
-	logCfg.Layout.LogFile = ws.LogFile
-	logger, closeLog, err := logging.New(logCfg)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = closeLog() }()
-
-	logger.Info("starting debrowser welcome (installation not initialized)",
-		"root", cfg.Layout.Root,
-		"workspace", ws.Dir,
-	)
-
-	// Single-instance protection for the welcome flow, scoped to
-	// this installation via its temp workspace: a second launch
-	// focuses the open welcome window instead of racing a second
-	// initialization.
-	lock, err := singleinstance.Acquire(ws.LockFile)
-	if err != nil {
-		var already *singleinstance.AlreadyRunningError
-		if errors.As(err, &already) {
-			if serr := singleinstance.SignalActivation(ws.ActivationFile); serr != nil {
-				logger.Warn("could not signal the running welcome window", "error", serr)
+	return welcomerun.Run(cfg, func(ws installstate.Workspace, logger *slog.Logger) error {
+		var welcomeApp *app.WelcomeApp
+		welcomeService := service.NewWelcomeService(cfg.Layout, logger, func() {
+			if err := startFormalProcess(); err != nil {
+				// Initialization DID complete and its marker is
+				// written: the next launch takes the normal path.
+				// Keep the welcome window open so the frontend's
+				// completion view can tell the user to relaunch
+				// manually.
+				logger.Error("start formal process after initialization failed", "error", err)
+				return
 			}
-			logger.Info("welcome window already open; activation signaled", "pid", already.PID)
-			fmt.Fprintf(os.Stderr, "DeBrowser 首次启动页面已在运行（进程 %d），已尝试唤起现有窗口。\n", already.PID)
-			return nil
-		}
-		logger.Error("welcome single-instance lock failed", "error", err)
-		return err
-	}
-	defer func() {
-		if rerr := lock.Release(); rerr != nil {
-			logger.Warn("release welcome lock failed", "error", rerr)
-		}
-	}()
-
-	var welcomeApp *app.WelcomeApp
-	welcomeService := service.NewWelcomeService(cfg.Layout, logger, func() {
-		if err := startFormalProcess(); err != nil {
-			// Initialization DID complete and its marker is written:
-			// the next launch takes the normal path. Keep the
-			// welcome window open so the frontend's completion view
-			// can tell the user to relaunch manually.
-			logger.Error("start formal process after initialization failed", "error", err)
-			return
-		}
-		logger.Info("initialization complete; formal process started, welcome exiting")
-		welcomeApp.Quit()
+			logger.Info("initialization complete; formal process started, welcome exiting")
+			welcomeApp.Quit()
+		})
+		welcomeApp = app.NewWelcome(cfg, welcomeService, ws, logger, assets)
+		return welcomeApp.Run()
 	})
-	welcomeApp = app.NewWelcome(cfg, welcomeService, ws, logger, assets)
-	return welcomeApp.Run()
 }
 
 // startFormalProcess launches this executable again; the new process

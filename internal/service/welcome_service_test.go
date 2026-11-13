@@ -60,7 +60,15 @@ func TestWelcomeServiceStartNewUserFailure(t *testing.T) {
 	if ready {
 		t.Fatal("onReady invoked after a failed initialization")
 	}
+	// The blocking file is residue of an interrupted initialization:
+	// startup recovery classifies it as such and cleans it up.
+	if got := installstate.Detect(layout); got != installstate.PhaseInitializing {
+		t.Fatalf("Detect = %v, want PhaseInitializing for the leftover residue", got)
+	}
+	if err := installstate.CleanupFormal(layout); err != nil {
+		t.Fatalf("CleanupFormal: %v", err)
+	}
 	if got := installstate.Detect(layout); got != installstate.PhaseUninitialized {
-		t.Fatalf("Detect = %v, want PhaseUninitialized after failure", got)
+		t.Fatalf("Detect = %v, want PhaseUninitialized after recovery cleanup", got)
 	}
 }

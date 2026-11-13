@@ -9,13 +9,18 @@
 // only when the on-disk structure changes, not on every release.
 //
 // State rules (Stage 5A):
-//   - marker "complete"                     -> initialized
+//   - marker "complete"                     -> initialized (after the
+//     layout-version compatibility check)
 //   - marker "initializing"                  -> a new-user initialization
 //     was interrupted; its artifacts are not user data and are cleaned
 //     up before the welcome page is shown again
 //   - no marker, but the formal database file exists -> initialized
 //     (installations created before the marker existed)
-//   - no marker and no database              -> not initialized
+//   - no marker and no database, but formal directory residue exists
+//     -> an initialization interrupted before its marker could be
+//     recorded; the residue is cleaned up like any other interrupted
+//     initialization
+//   - none of the above                      -> not initialized
 //
 // Nothing in this package scans %APPDATA%, %LOCALAPPDATA% or any
 // other location: the state is derived exclusively from this portable
@@ -86,22 +91,38 @@ func ReadMarker(l paths.Layout) (marker Marker, exists bool, err error) {
 }
 
 // Detect classifies the installation for startup. It only stats and
-// reads files inside the portable layout; it creates nothing.
+// reads files inside the portable layout; it creates nothing and it
+// never looks outside the portable directory.
+//
+// The order of the checks matters:
+//   - An "initializing" marker wins over everything else: the marker
+//     is recorded before any other initialization artifact exists,
+//     so anything in the formal directories was made by that
+//     interrupted initialization and holds no user data.
+//   - A "complete" marker means initialized (its layout version is
+//     validated separately, see CheckLayoutCompatibility).
+//   - A formal database without a marker is an installation created
+//     before the marker existed (or whose marker was lost): it is
+//     initialized, and its data is never treated as residue.
+//   - Anything else found in the formal directories — the data,
+//     config or webview2-data directory, a corrupt or unknown-state
+//     marker, a leftover marker temp file — without a database is
+//     residue of an initialization that was interrupted before it
+//     could even record or complete its marker, and is classified
+//     PhaseInitializing so startup cleans it up.
+//   - Only a folder with none of the above is genuinely
+//     uninitialized.
 func Detect(l paths.Layout) Phase {
 	marker, exists, err := ReadMarker(l)
 	if err == nil && exists {
 		switch marker.State {
+		case StateInitializing:
+			return PhaseInitializing
 		case StateComplete:
 			return PhaseReady
-		case StateInitializing:
-			// The marker is written before the database is created,
-			// so it wins over the database check below: anything in
-			// the formal directories was made by the interrupted
-			// initialization and holds no user data.
-			return PhaseInitializing
 		}
-		// An unknown state value is treated like an interrupted
-		// initialization unless a database proves otherwise below.
+		// An unknown state value falls through: a database still
+		// proves an initialized installation below.
 	}
 	if fileExists(l.DatabaseFile) {
 		return PhaseReady
@@ -112,7 +133,58 @@ func Detect(l paths.Layout) Phase {
 		// and interrupted.
 		return PhaseInitializing
 	}
+	if hasFormalResidue(l) {
+		return PhaseInitializing
+	}
 	return PhaseUninitialized
+}
+
+// hasFormalResidue reports whether any formal directory of the
+// layout exists. It is only consulted when there is no marker and no
+// database, where anything present can only be residue of an
+// interrupted initialization (a completed or pre-marker installation
+// always has its database).
+func hasFormalResidue(l paths.Layout) bool {
+	for _, dir := range []string{l.Data, l.Config, l.WebView2} {
+		if _, err := os.Stat(dir); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// IncompatibleLayoutError reports a completed installation whose
+// recorded data-layout version this build cannot use: either written
+// by a newer version of DeBrowser, or older than the current layout
+// with no layout migration available yet. Startup must refuse in
+// both cases — the data is never treated as a new installation and
+// never deleted or rebuilt.
+type IncompatibleLayoutError struct {
+	Found     int // layout version recorded in the marker
+	Supported int // layout version supported by this build
+}
+
+func (e *IncompatibleLayoutError) Error() string {
+	return fmt.Sprintf("data layout version %d is not supported by this build (supported: %d)", e.Found, e.Supported)
+}
+
+// CheckLayoutCompatibility validates the layout version of a
+// completed marker. Installations without a marker (created before
+// Stage 5A) use the current layout by definition and pass, as do
+// installations whose initialization is still in progress (their
+// recovery does not depend on the version).
+func CheckLayoutCompatibility(l paths.Layout) error {
+	marker, exists, err := ReadMarker(l)
+	if err != nil || !exists {
+		return nil
+	}
+	if marker.State != StateComplete {
+		return nil
+	}
+	if marker.LayoutVersion != LayoutVersion {
+		return &IncompatibleLayoutError{Found: marker.LayoutVersion, Supported: LayoutVersion}
+	}
+	return nil
 }
 
 // MarkInitializing records that a new-user initialization is in
