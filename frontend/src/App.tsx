@@ -11,6 +11,7 @@ import InstancesPage from "./pages/InstancesPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
 import ProxiesPage from "./pages/ProxiesPage";
+import SubscriptionsPage from "./pages/SubscriptionsPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
 
@@ -72,6 +73,8 @@ export default function App() {
             <InstancesPage />
           ) : page === "proxies" ? (
             <ProxiesPage />
+          ) : page === "subscriptions" ? (
+            <SubscriptionsPage />
           ) : page === "diagnostics" ? (
             <DiagnosticsPage />
           ) : (

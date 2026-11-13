@@ -30,6 +30,12 @@ type Proxy struct {
 	SortOrder      int     `json:"sortOrder"`
 	Source         string  `json:"source"`
 	SubscriptionID *string `json:"subscriptionId,omitempty"`
+	// ConfigID is the imported Mihomo config this node came from
+	// (Stage 6); nil for manually created nodes. SourceNodeName is
+	// the node's name inside its source document — native
+	// proxy-group members address nodes by that name.
+	ConfigID       *string `json:"configId,omitempty"`
+	SourceNodeName string  `json:"sourceNodeName"`
 	DedupKey       string  `json:"dedupKey"`
 	LastLatencyMs  *int    `json:"lastLatencyMs,omitempty"`
 	LastTestOK     *bool   `json:"lastTestOk,omitempty"`
@@ -73,6 +79,52 @@ type Instance struct {
 	SortOrder       int            `json:"sortOrder"`
 	CreatedAt       string         `json:"createdAt"`
 	UpdatedAt       string         `json:"updatedAt"`
+}
+
+// MihomoConfig is one imported Mihomo configuration document
+// (Stage 6). The sanitized document itself is a file under
+// data/mihomo/configs/; this row holds only its relative path,
+// content hash and the opaque vault reference of the extracted
+// config-level credential bundle.
+type MihomoConfig struct {
+	ID                 string  `json:"id"`
+	Name               string  `json:"name"`
+	SourceType         string  `json:"sourceType"` // "file" | "subscription"
+	SubscriptionID     *string `json:"subscriptionId,omitempty"`
+	FilePath           string  `json:"filePath"` // relative to data/mihomo/
+	SHA256             string  `json:"sha256"`
+	SecretRef          string  `json:"secretRef"`
+	FormatVersion      int     `json:"formatVersion"`
+	SecurityReportJSON string  `json:"securityReportJson"`
+	CreatedAt          string  `json:"createdAt"`
+	UpdatedAt          string  `json:"updatedAt"`
+}
+
+// MihomoProxyGroup is one native Mihomo proxy-group of an imported
+// config, preserved structurally. It is the config author's group,
+// not a DeBrowser grouping feature.
+type MihomoProxyGroup struct {
+	ID          string                   `json:"id"`
+	ConfigID    string                   `json:"configId"`
+	Name        string                   `json:"name"`
+	Type        string                   `json:"type"`
+	OptionsJSON string                   `json:"optionsJson"`
+	SortOrder   int                      `json:"sortOrder"`
+	Members     []MihomoProxyGroupMember `json:"members,omitempty"`
+	CreatedAt   string                   `json:"createdAt"`
+	UpdatedAt   string                   `json:"updatedAt"`
+}
+
+// MihomoProxyGroupMember is one member of a native proxy-group, in
+// document order. Exactly one target is set, per Kind: ProxyID for
+// "proxy", TargetGroupID for "group", neither for "builtin".
+type MihomoProxyGroupMember struct {
+	GroupID       string  `json:"groupId"`
+	SortOrder     int     `json:"sortOrder"`
+	MemberName    string  `json:"memberName"`
+	Kind          string  `json:"kind"` // "proxy" | "group" | "builtin"
+	ProxyID       *string `json:"proxyId,omitempty"`
+	TargetGroupID *string `json:"targetGroupId,omitempty"`
 }
 
 // Bookmark is a single bookmark. A nil InstanceID means the bookmark

@@ -168,7 +168,12 @@ func run() error {
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
 
-	wailsApp := app.New(cfg, appService, instanceService, proxyService, diagnosticsService, logger, assets)
+	// Stage 6: subscriptions and Mihomo config import, sharing
+	// the ProxyService's store, vault and mutex by construction.
+	subscriptionService := service.NewSubscriptionService(proxyService, cfg.Layout, logger)
+	subscriptionService.Auditor = logSystem
+
+	wailsApp := app.New(cfg, appService, instanceService, proxyService, diagnosticsService, subscriptionService, logger, assets)
 	runErr := wailsApp.Run()
 
 	// The app has fully stopped and its background loops are drained:

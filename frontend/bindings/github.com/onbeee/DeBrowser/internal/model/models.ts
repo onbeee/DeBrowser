@@ -56,6 +56,15 @@ export interface Proxy {
     "sortOrder": number;
     "source": string;
     "subscriptionId"?: string | null;
+
+    /**
+     * ConfigID is the imported Mihomo config this node came from
+     * (Stage 6); nil for manually created nodes. SourceNodeName is
+     * the node's name inside its source document — native
+     * proxy-group members address nodes by that name.
+     */
+    "configId"?: string | null;
+    "sourceNodeName": string;
     "dedupKey": string;
     "lastLatencyMs"?: number | null;
     "lastTestOk"?: boolean | null;
