@@ -11,15 +11,12 @@ export {
 };
 
 export type {
-    CreateGroupInput,
     CreateInstanceInput,
     CreateProxyInput,
-    ProxyGroupView,
     ProxyPortRange,
     ProxyView,
     Status,
     TestProxyResult,
-    UpdateGroupInput,
     UpdateInstanceInput,
     UpdateProxyInput
 } from "./models.js";
