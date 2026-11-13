@@ -31,6 +31,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/migration"
+	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/service"
 	"github.com/onbeee/DeBrowser/internal/singleinstance"
 )
@@ -152,7 +153,33 @@ func run() error {
 		return err
 	}
 
-	wailsApp := app.New(cfg, appService, instanceService, logger, assets)
+	// The credential vault opens after the database: proxy rows
+	// reference vault entries, and the proxy service's startup
+	// garbage collection needs both. A vault that cannot be opened
+	// at all (permissions cannot be established, I/O failure)
+	// aborts startup — silently continuing would risk treating
+	// stored credentials as absent. A vault recovered from its
+	// backup, or quarantined as unrecoverable, is reported loudly
+	// and surfaces per-proxy as credential-unavailable.
+	vault, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
+	if err != nil {
+		logger.Error("open credential vault failed", "error", err)
+		return err
+	}
+	if vaultRecovery.Unrecoverable {
+		logger.Warn("credential vault unrecoverable; corrupt files quarantined, affected proxies report credential-unavailable",
+			"quarantined", vaultRecovery.Quarantined)
+	} else if vaultRecovery.RecoveredFromBackup {
+		logger.Warn("credential vault recovered from its backup snapshot")
+	}
+
+	proxyService, err := service.NewProxyService(db, vault, logger)
+	if err != nil {
+		logger.Error("proxy service failed", "error", err)
+		return err
+	}
+
+	wailsApp := app.New(cfg, appService, instanceService, proxyService, logger, assets)
 	runErr := wailsApp.Run()
 
 	// The app has fully stopped and its background loops are drained:
