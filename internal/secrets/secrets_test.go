@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -72,21 +73,27 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 	if err != nil || string(got) != "s3cret-password" {
 		t.Fatalf("get after reopen = %q, %v", got, err)
 	}
-	if err := s2.Delete(ref); err != nil {
-		t.Fatalf("delete: %v", err)
+	deleted, err := s2.DeleteIfUnreferenced(ref, noRefs)
+	if err != nil || !deleted {
+		t.Fatalf("cleanup delete = %v, %v; want true, nil", deleted, err)
 	}
 	if _, err := s2.Get(ref); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get after delete err = %v, want ErrNotFound", err)
 	}
-	// Delete is idempotent: compensation and cleanup paths may
-	// repeat it freely.
-	if err := s2.Delete(ref); err != nil {
-		t.Fatalf("second delete: %v", err)
+	// Cleanup is idempotent: repeating it is a no-op success.
+	deleted, err = s2.DeleteIfUnreferenced(ref, noRefs)
+	if err != nil || deleted {
+		t.Fatalf("second cleanup = %v, %v; want false, nil", deleted, err)
 	}
-	if err := s2.Delete("never-existed"); err != nil {
-		t.Fatalf("delete missing: %v", err)
+	deleted, err = s2.DeleteIfUnreferenced("never-existed", noRefs)
+	if err != nil || deleted {
+		t.Fatalf("cleanup of missing ref = %v, %v; want false, nil", deleted, err)
 	}
 }
+
+// noRefs is a live-reference check that reports nothing referenced,
+// for tests whose simulated database is empty.
+func noRefs(string) (bool, error) { return false, nil }
 
 func TestConcurrentPuts(t *testing.T) {
 	s, path := newTestStore(t)
@@ -177,9 +184,12 @@ func TestConsistencyCreateWithDBFailureCompensates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// step 2: the database transaction FAILS -> compensate.
-	if err := s.Delete(ref); err != nil {
-		t.Fatalf("compensating delete: %v", err)
+	// step 2: the database transaction FAILS -> compensate. The
+	// ref is still pending (never committed), so compensation is
+	// the dedicated, structurally safe path.
+	deleted, err := s.DeleteCompensating(ref)
+	if err != nil || !deleted {
+		t.Fatalf("compensating delete = %v, %v; want true, nil", deleted, err)
 	}
 	if got := vaultRefSet(t, path); len(got) != 0 {
 		t.Fatalf("vault not empty after compensation: %v", got)
@@ -201,9 +211,10 @@ func TestConsistencyUpdateSwapAndCleanupFailure(t *testing.T) {
 
 	// Cleanup of the old entry FAILS (injected): the old blob must
 	// remain as an identifiable orphan, the new state consistent.
+	stillUsed := func(r string) (bool, error) { return db[r], nil }
 	HookBeforePersist = func() error { return errors.New("injected") }
-	if err := s.Delete(oldRef); err == nil {
-		t.Fatal("delete with failing persist succeeded")
+	if _, err := s.DeleteIfUnreferenced(oldRef, stillUsed); err == nil {
+		t.Fatal("cleanup with failing persist succeeded")
 	}
 	HookBeforePersist = nil
 	disk := vaultRefSet(t, path)
@@ -211,8 +222,9 @@ func TestConsistencyUpdateSwapAndCleanupFailure(t *testing.T) {
 		t.Fatalf("after failed cleanup, disk = %v, want both refs", disk)
 	}
 	// Retry succeeds; final disk state equals the DB reference set.
-	if err := s.Delete(oldRef); err != nil {
-		t.Fatalf("retry delete: %v", err)
+	deleted, err := s.DeleteIfUnreferenced(oldRef, stillUsed)
+	if err != nil || !deleted {
+		t.Fatalf("retry cleanup = %v, %v; want true, nil", deleted, err)
 	}
 	disk = vaultRefSet(t, path)
 	if len(disk) != len(db) || !disk[newRef] {
@@ -288,6 +300,262 @@ func TestGCPendingEntryProtected(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != ref {
 		t.Fatalf("after commit, removed = %v, want the entry", removed)
+	}
+}
+
+// ---- Shared-reference safety (Node B review fix) ------------------
+//
+// Several database rows may reference ONE vault entry. The store
+// has no unconditional delete: business cleanup must prove the
+// reference is unused, and compensation only ever applies to a
+// pending, never-committed entry of this process.
+
+func TestSharedReferenceSurvivesUntilLastRowRemoved(t *testing.T) {
+	s, path := newTestStore(t)
+	ref, _ := s.Put([]byte("shared-pw"))
+	s.MarkCommitted(ref)
+	// Simulated database: rows A and B share the reference.
+	db := map[string]string{"rowA": ref, "rowB": ref}
+	stillUsed := func(r string) (bool, error) {
+		for _, v := range db {
+			if v == r {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	// Delete row A and run cleanup: the credential must survive
+	// untouched because row B still uses it.
+	delete(db, "rowA")
+	deleted, err := s.DeleteIfUnreferenced(ref, stillUsed)
+	if err != nil || deleted {
+		t.Fatalf("cleanup with a live sharer = %v, %v; want false, nil", deleted, err)
+	}
+	if got, err := s.Get(ref); err != nil || string(got) != "shared-pw" {
+		t.Fatalf("shared credential damaged: %q, %v", got, err)
+	}
+	// Delete row B: now cleanup may remove the entry.
+	delete(db, "rowB")
+	deleted, err = s.DeleteIfUnreferenced(ref, stillUsed)
+	if err != nil || !deleted {
+		t.Fatalf("final cleanup = %v, %v; want true, nil", deleted, err)
+	}
+	if _, err := s.Get(ref); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get after final cleanup err = %v, want ErrNotFound", err)
+	}
+	if disk := vaultRefSet(t, path); len(disk) != 0 {
+		t.Fatalf("disk not empty after final cleanup: %v", disk)
+	}
+}
+
+func TestDeleteCompensatingRefusesCommittedRef(t *testing.T) {
+	s, _ := newTestStore(t)
+	ref, _ := s.Put([]byte("committed-pw"))
+	s.MarkCommitted(ref)
+	// Compensation for a committed (potentially shared) reference
+	// must be refused and must not touch the entry.
+	if _, err := s.DeleteCompensating(ref); !errors.Is(err, ErrNotCompensable) {
+		t.Fatalf("compensating a committed ref err = %v, want ErrNotCompensable", err)
+	}
+	if got, err := s.Get(ref); err != nil || string(got) != "committed-pw" {
+		t.Fatalf("entry damaged by refused compensation: %q, %v", got, err)
+	}
+	// Compensation of a nonexistent ref is an idempotent no-op.
+	deleted, err := s.DeleteCompensating("never-existed")
+	if err != nil || deleted {
+		t.Fatalf("compensating missing ref = %v, %v; want false, nil", deleted, err)
+	}
+}
+
+func TestDeleteIfUnreferencedRequiresWorkingCheck(t *testing.T) {
+	s, _ := newTestStore(t)
+	ref, _ := s.Put([]byte("pw"))
+	s.MarkCommitted(ref)
+	if _, err := s.DeleteIfUnreferenced(ref, nil); err == nil {
+		t.Fatal("nil live-reference check accepted")
+	}
+	broken := func(string) (bool, error) { return false, errors.New("db unavailable") }
+	if _, err := s.DeleteIfUnreferenced(ref, broken); err == nil {
+		t.Fatal("failing live-reference check accepted")
+	}
+	if got, err := s.Get(ref); err != nil || string(got) != "pw" {
+		t.Fatalf("entry damaged by rejected cleanups: %q, %v", got, err)
+	}
+}
+
+func TestConcurrentSharedRefCleanup(t *testing.T) {
+	s, _ := newTestStore(t)
+	ref, _ := s.Put([]byte("shared"))
+	s.MarkCommitted(ref)
+	const rows = 16
+	// The documented caller contract, modeled faithfully: one
+	// service mutex serializes DB reference changes AND cleanup
+	// calls, so check-and-delete is atomic w.r.t. sharing.
+	var mu sync.Mutex
+	db := map[string]string{}
+	for i := 0; i < rows; i++ {
+		db[string(rune('a'+i))] = ref
+	}
+	stillUsed := func(r string) (bool, error) {
+		for _, v := range db {
+			if v == r {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	ids := make([]string, 0, len(db))
+	for id := range db {
+		ids = append(ids, id)
+	}
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			mu.Lock()
+			defer mu.Unlock()
+			delete(db, id)
+			if _, err := s.DeleteIfUnreferenced(ref, stillUsed); err != nil {
+				t.Errorf("cleanup: %v", err)
+				return
+			}
+			// Invariant at every step: while any row references
+			// the entry, the entry must exist (no dangling ref).
+			if len(db) > 0 && !s.Has(ref) {
+				t.Errorf("entry deleted while %d rows still reference it", len(db))
+			}
+		}(id)
+	}
+	wg.Wait()
+	if s.Has(ref) {
+		t.Fatal("entry survived after the last referencing row was removed")
+	}
+	if _, err := s.Get(ref); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("final get err = %v, want ErrNotFound", err)
+	}
+}
+
+// ---- Post-write content verification ------------------------------
+
+func writeVaultVariant(t *testing.T, mutate func(*vaultFile)) string {
+	t.Helper()
+	s, path := newTestStore(t)
+	if _, err := s.Put([]byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put([]byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vf vaultFile
+	if err := json.Unmarshal(raw, &vf); err != nil {
+		t.Fatal(err)
+	}
+	want := cloneEntries(vf.Entries)
+	mutate(&vf)
+	out, err := json.Marshal(vf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "variant.vault")
+	if err := os.WriteFile(p, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWrittenVault(p, want); err == nil {
+		t.Fatal("tampered variant passed verification")
+	}
+	// The untampered original must verify cleanly.
+	if err := verifyWrittenVault(path, want); err != nil {
+		t.Fatalf("original vault failed verification: %v", err)
+	}
+	return p
+}
+
+func TestVerifyWrittenVaultExactComparison(t *testing.T) {
+	t.Run("same count, renamed ref", func(t *testing.T) {
+		writeVaultVariant(t, func(vf *vaultFile) {
+			for ref, e := range vf.Entries {
+				delete(vf.Entries, ref)
+				vf.Entries["00000000-0000-4000-8000-000000000000"] = e
+				break
+			}
+		})
+	})
+	t.Run("same count, altered blob", func(t *testing.T) {
+		writeVaultVariant(t, func(vf *vaultFile) {
+			for ref, e := range vf.Entries {
+				e.Data = base64.StdEncoding.EncodeToString([]byte("FAKE1:different"))
+				vf.Entries[ref] = e
+				break
+			}
+		})
+	})
+	t.Run("altered created_at", func(t *testing.T) {
+		writeVaultVariant(t, func(vf *vaultFile) {
+			for ref, e := range vf.Entries {
+				e.CreatedAt = e.CreatedAt.Add(time.Hour)
+				vf.Entries[ref] = e
+				break
+			}
+		})
+	})
+	t.Run("extra entry", func(t *testing.T) {
+		writeVaultVariant(t, func(vf *vaultFile) {
+			vf.Entries["11111111-1111-4111-8111-111111111111"] = entry{CreatedAt: time.Now(), Data: "AAAA"}
+		})
+	})
+	t.Run("missing entry", func(t *testing.T) {
+		writeVaultVariant(t, func(vf *vaultFile) {
+			for ref := range vf.Entries {
+				delete(vf.Entries, ref)
+				break
+			}
+		})
+	})
+	t.Run("wrong version", func(t *testing.T) {
+		writeVaultVariant(t, func(vf *vaultFile) { vf.Version = 99 })
+	})
+}
+
+func TestPersistDetectsPostReplaceTampering(t *testing.T) {
+	s, _ := newTestStore(t)
+	prior, _ := s.Put([]byte("prior"))
+	// Simulate a torn/misdirected write: after the atomic replace,
+	// damage the just-written file's new entry before the store's
+	// verification read. The persist MUST fail rather than report
+	// success, and in-memory state must stay at the prior state.
+	HookAfterReplace = func(p string) {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return
+		}
+		var vf vaultFile
+		if err := json.Unmarshal(raw, &vf); err != nil {
+			return
+		}
+		for ref, e := range vf.Entries {
+			if ref != prior {
+				e.Data = base64.StdEncoding.EncodeToString([]byte("FAKE1:tampered"))
+				vf.Entries[ref] = e
+			}
+		}
+		out, _ := json.Marshal(vf)
+		_ = os.WriteFile(p, out, 0o600)
+	}
+	defer func() { HookAfterReplace = nil }()
+	if _, err := s.Put([]byte("victim")); err == nil {
+		t.Fatal("put succeeded despite post-replace tampering")
+	}
+	HookAfterReplace = nil
+	if got, err := s.Get(prior); err != nil || string(got) != "prior" {
+		t.Fatalf("prior entry damaged in memory: %q, %v", got, err)
+	}
+	if n := len(s.Refs()); n != 1 {
+		t.Fatalf("in-memory store holds %d entries after failed put, want 1", n)
 	}
 }
 
