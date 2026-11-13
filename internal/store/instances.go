@@ -9,21 +9,26 @@ import (
 	"github.com/onbeee/DeBrowser/internal/model"
 )
 
-const instanceColumns = `id, name, kernel_id, kernel_name, kernel_version, user_data_dir, proxy_id, status, start_url, sort_order, created_at, updated_at`
+const instanceColumns = `id, name, kernel_id, kernel_name, kernel_version, user_data_dir, proxy_id, proxy_listen_port, status, start_url, sort_order, created_at, updated_at`
 
 func scanInstance(row interface{ Scan(dest ...any) error }) (model.Instance, error) {
 	var (
-		in      model.Instance
-		proxyID sql.NullString
-		status  string
+		in         model.Instance
+		proxyID    sql.NullString
+		listenPort sql.NullInt64
+		status     string
 	)
 	if err := row.Scan(&in.ID, &in.Name, &in.KernelID, &in.KernelName,
-		&in.KernelVersion, &in.UserDataDir, &proxyID, &status,
+		&in.KernelVersion, &in.UserDataDir, &proxyID, &listenPort, &status,
 		&in.StartURL, &in.SortOrder, &in.CreatedAt, &in.UpdatedAt); err != nil {
 		return model.Instance{}, err
 	}
 	if proxyID.Valid {
 		in.ProxyID = &proxyID.String
+	}
+	if listenPort.Valid {
+		v := int(listenPort.Int64)
+		in.ProxyListenPort = &v
 	}
 	in.Status = model.InstanceStatus(status)
 	return in, nil
@@ -44,10 +49,10 @@ func (s *Store) CreateInstance(ctx context.Context, in model.Instance) (model.In
 	}
 	if _, err := s.q.ExecContext(ctx, `INSERT INTO browser_instances
 		(id, name, kernel_id, kernel_name, kernel_version, user_data_dir,
-		 proxy_id, status, start_url, sort_order)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 proxy_id, proxy_listen_port, status, start_url, sort_order)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ID, in.Name, in.KernelID, in.KernelName, in.KernelVersion,
-		in.UserDataDir, nullStr(in.ProxyID), string(in.Status),
+		in.UserDataDir, nullStr(in.ProxyID), nullInt(in.ProxyListenPort), string(in.Status),
 		in.StartURL, in.SortOrder); err != nil {
 		return model.Instance{}, fmt.Errorf("store: create instance: %w", err)
 	}
@@ -94,11 +99,11 @@ func (s *Store) ListInstances(ctx context.Context) ([]model.Instance, error) {
 func (s *Store) UpdateInstance(ctx context.Context, in model.Instance) (model.Instance, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE browser_instances SET
 		name = ?, kernel_id = ?, kernel_name = ?, kernel_version = ?,
-		user_data_dir = ?, proxy_id = ?, status = ?, start_url = ?,
+		user_data_dir = ?, proxy_id = ?, proxy_listen_port = ?, status = ?, start_url = ?,
 		sort_order = ?, updated_at = datetime('now')
 		WHERE id = ?`,
 		in.Name, in.KernelID, in.KernelName, in.KernelVersion,
-		in.UserDataDir, nullStr(in.ProxyID), string(in.Status),
+		in.UserDataDir, nullStr(in.ProxyID), nullInt(in.ProxyListenPort), string(in.Status),
 		in.StartURL, in.SortOrder, in.ID)
 	if err != nil {
 		return model.Instance{}, fmt.Errorf("store: update instance: %w", err)
