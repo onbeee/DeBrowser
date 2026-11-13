@@ -24,14 +24,28 @@
 // possible by this API's ordering guarantees):
 //
 //   - Create: Put (durable) FIRST, then commit the DB row holding
-//     the reference. If the DB commit fails, Delete the reference
-//     as compensation. Put only reports success after the new vault
-//     file is atomically in place, so the database can never point
-//     at a secret that was not persisted.
+//     the reference. If the DB commit fails, compensate with
+//     DeleteCompensating — valid only while the reference is still
+//     pending (created by this process, never committed), which
+//     makes it structurally incapable of touching a credential any
+//     database row uses. Put only reports success after the new
+//     vault file is atomically in place, so the database can never
+//     point at a secret that was not persisted.
 //   - Update: Put the new secret, swap the reference in one DB
-//     transaction, then Delete the old reference. A cleanup failure
-//     leaves an identifiable orphan, never a dangling reference.
-//   - Delete: remove the DB row first, then Delete the entry.
+//     transaction, then clean up the old reference with
+//     DeleteIfUnreferenced. A cleanup failure leaves an
+//     identifiable orphan, never a dangling reference.
+//   - Delete: remove the DB row first, then clean up with
+//     DeleteIfUnreferenced.
+//   - Shared references: several DB rows may reference one entry.
+//     There is deliberately NO unconditional delete in this API:
+//     business cleanup goes through DeleteIfUnreferenced, whose
+//     caller-supplied check runs under the vault lock at decision
+//     time, and garbage collection takes the complete live set.
+//     Callers (the future ProxyService) must serialize their DB
+//     mutations that create or drop references together with these
+//     cleanup calls under one service-level mutex, so the check
+//     and the delete are atomic with respect to reference changes.
 //   - Garbage: CollectGarbage removes entries no database row
 //     references, but only when they are older than 24 hours and
 //     not pending in this process — the age gate covers the crash
@@ -124,6 +138,21 @@ const orphanAge = 24 * time.Hour
 // never sets it), in the same style as pfiles.HookBeforeRename.
 var HookBeforePersist func() error
 
+// HookAfterReplace, when non-nil, runs inside persistLocked after
+// the main vault file has been atomically replaced but before the
+// post-write content verification. Test-only fault-injection seam
+// (production code never sets it): it lets tests corrupt the
+// just-written file and prove the verification catches it.
+var HookAfterReplace func(path string)
+
+// verifyRestrictions is the internal call point for
+// VerifyFileRestrictions. Tests may substitute it to inject
+// permission-verification failures for specific paths (temp file,
+// backup, final file) without weakening the production check,
+// which is always the platform implementation; production code
+// never reassigns it.
+var verifyRestrictions = VerifyFileRestrictions
+
 // Store is the credential vault. All methods are safe for
 // concurrent use; mutations are serialized internally. The
 // single-instance lock guarantees one app process owns the file.
@@ -203,12 +232,15 @@ func openWithProtector(path string, prot Protector) (*Store, Recovery, error) {
 		if err := RestrictFile(path); err != nil {
 			return nil, rec, fmt.Errorf("secrets: restrict vault permissions: %w", err)
 		}
-		if err := VerifyFileRestrictions(path); err != nil {
+		if err := verifyRestrictions(path); err != nil {
 			return nil, rec, fmt.Errorf("secrets: verify vault permissions: %w", err)
 		}
 		if _, err := os.Stat(path + ".bak"); err == nil {
 			if err := RestrictFile(path + ".bak"); err != nil {
 				return nil, rec, fmt.Errorf("secrets: restrict vault backup permissions: %w", err)
+			}
+			if err := verifyRestrictions(path + ".bak"); err != nil {
+				return nil, rec, fmt.Errorf("secrets: verify vault backup permissions: %w", err)
 			}
 		}
 	}
@@ -294,26 +326,77 @@ func (s *Store) Has(ref string) bool {
 	return ok
 }
 
-// Delete removes ref's entry. Deleting a missing ref is a no-op
-// success, so cleanup paths (compensation, post-delete, GC retries)
-// can be repeated freely. A persistence failure leaves the entry in
-// place — an identifiable orphan that CollectGarbage can retry —
-// and returns the error.
-func (s *Store) Delete(ref string) error {
+// ErrNotCompensable reports a DeleteCompensating call for a
+// reference that is not a pending, never-committed entry of this
+// process. The entry is left untouched.
+var ErrNotCompensable = errors.New("secrets: reference is not compensable")
+
+// DeleteCompensating removes the entry created by a Put in THIS
+// process whose database commit then failed. It is valid ONLY
+// while ref is still pending (Put but never MarkCommitted): a
+// pending reference was never published to the database, so no row
+// can reference it and no other row can share it — compensation
+// therefore cannot damage a live credential. Calling it for a
+// committed or unknown-process reference fails with
+// ErrNotCompensable and deletes nothing. Deleting a missing ref
+// returns (false, nil): compensation is idempotent.
+func (s *Store) DeleteCompensating(ref string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.entries[ref]; !ok {
-		return nil
+		return false, nil
 	}
+	if !s.pending[ref] {
+		return false, ErrNotCompensable
+	}
+	return s.deleteLocked(ref)
+}
+
+// DeleteIfUnreferenced removes ref's entry ONLY if the
+// caller-supplied stillReferenced check reports that no database
+// row references it anymore. The check runs under the vault lock,
+// at decision time, so the answer and the deletion are one atomic
+// step from the vault's perspective; callers must additionally
+// serialize reference-creating DB writes against this call (see
+// the package documentation's caller contract). A nil check is
+// rejected: business cleanup must never rest on an unverified
+// assumption. When the entry is kept, the result is (false, nil).
+// Deleting a missing ref returns (false, nil) — cleanup is
+// idempotent and may be retried freely. A persistence failure
+// leaves the entry in place (an identifiable orphan) and returns
+// the error.
+func (s *Store) DeleteIfUnreferenced(ref string, stillReferenced func(ref string) (bool, error)) (bool, error) {
+	if stillReferenced == nil {
+		return false, errors.New("secrets: DeleteIfUnreferenced requires a live-reference check")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.entries[ref]; !ok {
+		return false, nil
+	}
+	used, err := stillReferenced(ref)
+	if err != nil {
+		return false, fmt.Errorf("secrets: live-reference check: %w", err)
+	}
+	if used {
+		return false, nil
+	}
+	return s.deleteLocked(ref)
+}
+
+// deleteLocked persists the vault without ref and commits the
+// in-memory state. Caller holds s.mu and has already established
+// that removing ref is safe.
+func (s *Store) deleteLocked(ref string) (bool, error) {
 	next := cloneEntries(s.entries)
 	delete(next, ref)
 	if err := s.persistLocked(next); err != nil {
-		return err
+		return false, err
 	}
 	s.entries = next
 	delete(s.corrupt, ref)
 	delete(s.pending, ref)
-	return nil
+	return true, nil
 }
 
 // MarkCommitted records that the database transaction referencing
@@ -376,9 +459,14 @@ func (s *Store) CollectGarbage(live map[string]bool, now time.Time) ([]string, e
 
 // persistLocked atomically replaces the vault file with the given
 // entries: temp file (same directory) → fsync → restrict
-// permissions → snapshot the current good file to .bak → atomic
-// replace → post-write verification read. Any failure leaves the
-// previous vault file untouched.
+// permissions → VERIFY the temp file's restrictions → snapshot the
+// current good file to .bak (its temp file likewise restricted and
+// verified first) → atomic replace → post-write verification.
+// Every credential-bearing file is verified after it is
+// restricted, and the final files are verified again after the
+// replace: a RestrictFile success alone never counts as proof.
+// Verification or content mismatches fail the whole persistence;
+// the in-memory state is then left unchanged by the caller.
 func (s *Store) persistLocked(entries map[string]entry) error {
 	if HookBeforePersist != nil {
 		if err := HookBeforePersist(); err != nil {
@@ -398,6 +486,9 @@ func (s *Store) persistLocked(entries map[string]entry) error {
 	if err := RestrictFile(tmp); err != nil {
 		return fmt.Errorf("secrets: restrict temp vault: %w", err)
 	}
+	if err := verifyRestrictions(tmp); err != nil {
+		return fmt.Errorf("secrets: verify temp vault permissions: %w", err)
+	}
 	// Snapshot the current good vault as .bak before replacing it,
 	// so a later corruption of the new file can roll back one step.
 	if current, err := readVaultFile(s.path); err == nil && len(current) >= 0 {
@@ -410,6 +501,9 @@ func (s *Store) persistLocked(entries map[string]entry) error {
 			if err := RestrictFile(bakTmp); err != nil {
 				return fmt.Errorf("secrets: restrict backup vault: %w", err)
 			}
+			if err := verifyRestrictions(bakTmp); err != nil {
+				return fmt.Errorf("secrets: verify backup vault permissions: %w", err)
+			}
 			if err := replaceFile(bakTmp, s.path+".bak"); err != nil {
 				return fmt.Errorf("secrets: snapshot backup vault: %w", err)
 			}
@@ -419,14 +513,63 @@ func (s *Store) persistLocked(entries map[string]entry) error {
 		return fmt.Errorf("secrets: replace vault: %w", err)
 	}
 	syncDir(dir)
-	// Post-write verification: the file on disk must parse and hold
-	// exactly the entries we intended to write.
-	got, err := readVaultFile(s.path)
+	if HookAfterReplace != nil {
+		HookAfterReplace(s.path)
+	}
+	// Post-write content verification: the file on disk must hold
+	// EXACTLY the intended state — version, the same reference
+	// set, and per-entry CreatedAt and blob data. A matching entry
+	// COUNT alone proves nothing.
+	if err := verifyWrittenVault(s.path, entries); err != nil {
+		return err
+	}
+	// Post-replace permission verification of the final files.
+	if err := verifyRestrictions(s.path); err != nil {
+		return fmt.Errorf("secrets: verify final vault permissions: %w", err)
+	}
+	if _, err := os.Stat(s.path + ".bak"); err == nil {
+		if err := verifyRestrictions(s.path + ".bak"); err != nil {
+			return fmt.Errorf("secrets: verify final backup permissions: %w", err)
+		}
+	}
+	return nil
+}
+
+// verifyWrittenVault reads the vault file at path and proves its
+// content equals want exactly: same format version, no missing
+// entry, no extra entry, and every entry's CreatedAt and encrypted
+// blob identical.
+func verifyWrittenVault(path string, want map[string]entry) error {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("secrets: verify written vault: %w", err)
 	}
-	if len(got) != len(entries) {
-		return fmt.Errorf("secrets: written vault holds %d entries, expected %d", len(got), len(entries))
+	var vf vaultFile
+	if err := json.Unmarshal(raw, &vf); err != nil {
+		return fmt.Errorf("secrets: verify written vault: %w", err)
+	}
+	if vf.Version != vaultVersion {
+		return fmt.Errorf("secrets: written vault version is %d, expected %d", vf.Version, vaultVersion)
+	}
+	if len(vf.Entries) != len(want) {
+		return fmt.Errorf("secrets: written vault holds %d entries, expected %d", len(vf.Entries), len(want))
+	}
+	for ref, w := range want {
+		g, ok := vf.Entries[ref]
+		if !ok {
+			return fmt.Errorf("secrets: written vault is missing entry %s", ref)
+		}
+		if !g.CreatedAt.Equal(w.CreatedAt) {
+			return fmt.Errorf("secrets: written vault entry %s has a different created_at", ref)
+		}
+		if g.Data != w.Data {
+			return fmt.Errorf("secrets: written vault entry %s has different data", ref)
+		}
+	}
+	for ref := range vf.Entries {
+		if _, ok := want[ref]; !ok {
+			return fmt.Errorf("secrets: written vault holds unexpected entry %s", ref)
+		}
 	}
 	return nil
 }
