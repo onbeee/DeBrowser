@@ -276,6 +276,113 @@ func TestProxyServiceValidation(t *testing.T) {
 	}
 }
 
+// TestProxyServiceConfigJSONRecursiveSecretRejection pins the
+// credential-hygiene rule at the SERVICE layer: a credential field
+// anywhere in the config_json value tree — nested objects, array
+// elements, any depth, any key casing — must reject the write,
+// and a rejected write must leave no proxy row behind. Non-object
+// JSON roots are rejected too; only real objects pass, and the
+// empty config keeps its "{}" normalisation.
+func TestProxyServiceConfigJSONRecursiveSecretRejection(t *testing.T) {
+	svc, st, _ := newTestProxyService(t)
+	ctx := context.Background()
+	port := 8080
+	tryCreate := func(cfg string) error {
+		_, err := svc.CreateProxy(CreateProxyInput{
+			Name: "配置校验", Protocol: "http", Address: "127.0.0.1",
+			Port: &port, ConfigJSON: cfg,
+		})
+		return err
+	}
+	proxyCount := func() int {
+		list, err := st.ListProxies(ctx)
+		if err != nil {
+			t.Fatalf("ListProxies: %v", err)
+		}
+		return len(list)
+	}
+
+	rejected := map[string]string{
+		"top-level password":   `{"password":"secret"}`,
+		"nested object":        `{"auth":{"password":"secret"}}`,
+		"array of objects":     `{"servers":[{"uuid":"secret"}]}`,
+		"multi-level nesting":  `{"nested":[{"deep":{"private_key":"secret"}}]}`,
+		"case variant":         `{"Password":"secret"}`,
+		"nested case variant":  `{"Auth":{"UUID":"secret"}}`,
+		"null root":            `null`,
+		"array root":           `[{"name":"x"}]`,
+		"string root":          `"just-a-string"`,
+		"number root":          `42`,
+		"bool root":            `true`,
+		"invalid json":         `{"broken"`,
+		"secret next to valid": `{"sni":"example.com","tls":{"token":"secret"}}`,
+	}
+	for name, cfg := range rejected {
+		before := proxyCount()
+		if err := tryCreate(cfg); err == nil {
+			t.Errorf("%s: create succeeded with config %s, want rejection", name, cfg)
+		}
+		if after := proxyCount(); after != before {
+			t.Errorf("%s: rejected create still wrote a proxy row (count %d -> %d)", name, before, after)
+		}
+	}
+
+	// A normal nested, non-sensitive configuration saves fine and
+	// round-trips.
+	valid := `{"transport":{"network":"ws","ws-opts":{"path":"/ray"}},"tls":{"enabled":true},"fallbacks":[{"port":443},{"port":8443}]}`
+	view, err := svc.CreateProxy(CreateProxyInput{
+		Name: "正常嵌套配置", Protocol: "vless", Address: "203.0.113.10",
+		Port: &port, ConfigJSON: valid,
+	})
+	if err != nil {
+		t.Fatalf("valid nested config rejected: %v", err)
+	}
+	got, err := svc.GetProxy(view.ID)
+	if err != nil {
+		t.Fatalf("GetProxy: %v", err)
+	}
+	if !strings.Contains(got.ConfigJSON, `"ws-opts"`) || !strings.Contains(got.ConfigJSON, `"fallbacks"`) {
+		t.Fatalf("stored config = %s, want the nested config preserved", got.ConfigJSON)
+	}
+
+	// The empty config still normalises to "{}".
+	empty, err := svc.CreateProxy(CreateProxyInput{
+		Name: "空配置", Protocol: "http", Address: "127.0.0.1", Port: &port,
+	})
+	if err != nil {
+		t.Fatalf("empty config create: %v", err)
+	}
+	if empty.ConfigJSON != "{}" {
+		t.Fatalf("empty config stored as %q, want {}", empty.ConfigJSON)
+	}
+	// And "{}" itself is of course legal.
+	if err := tryCreate(`{}`); err != nil {
+		t.Fatalf("explicit {} rejected: %v", err)
+	}
+
+	// The update path shares the same validation: a nested secret
+	// in an update is rejected and the stored config is untouched.
+	before := proxyCount()
+	_, uerr := svc.UpdateProxy(UpdateProxyInput{
+		ID: view.ID, Name: view.Name, Protocol: "vless",
+		Address: "203.0.113.10", Port: &port, Enabled: true,
+		ConfigJSON: `{"auth":{"password":"secret"}}`,
+	})
+	if uerr == nil {
+		t.Fatal("update with a nested secret config succeeded, want rejection")
+	}
+	if after := proxyCount(); after != before {
+		t.Fatalf("rejected update changed the proxy count (%d -> %d)", before, after)
+	}
+	still, err := svc.GetProxy(view.ID)
+	if err != nil {
+		t.Fatalf("GetProxy after rejected update: %v", err)
+	}
+	if !strings.Contains(still.ConfigJSON, `"ws-opts"`) {
+		t.Fatalf("stored config changed after rejected update: %s", still.ConfigJSON)
+	}
+}
+
 func TestProxyServiceGroupsAndTags(t *testing.T) {
 	svc, _, _ := newTestProxyService(t)
 	g, err := svc.CreateGroup(CreateGroupInput{Name: "工作组"})
