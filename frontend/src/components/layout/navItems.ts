@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Network,
   RefreshCw,
+  Rss,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -24,6 +25,7 @@ export const NAV_ITEMS: NavItem[] = [
   { key: "overview", label: "总览", icon: LayoutDashboard, stage: "阶段 1" },
   { key: "instances", label: "浏览器实例", icon: AppWindow, stage: "阶段 3" },
   { key: "proxies", label: "代理", icon: Network, stage: "阶段 4" },
+  { key: "subscriptions", label: "订阅与配置", icon: Rss, stage: "阶段 6" },
   { key: "kernels", label: "浏览器内核", icon: Cpu, stage: "阶段 5" },
   { key: "bookmarks", label: "书签", icon: Bookmark, stage: "阶段 5" },
   { key: "sync", label: "同步", icon: RefreshCw, stage: "阶段 6" },

@@ -112,7 +112,7 @@ func TestUpgradeFromV1PreservesDataAndRecordsOrder(t *testing.T) {
 		t.Fatalf("Migrate (upgrade): %v", err)
 	}
 	got := appliedVersions(t, db)
-	want := []int{1, 2, 3, 4, 5}
+	want := []int{1, 2, 3, 4, 5, 6}
 	if len(got) != len(want) {
 		t.Fatalf("applied = %v, want %v", got, want)
 	}
@@ -133,8 +133,8 @@ func TestUpgradeFromV1PreservesDataAndRecordsOrder(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	if got := appliedVersions(t, db); len(got) != 5 {
-		t.Errorf("after second Migrate applied = %v, want 5 rows", got)
+	if got := appliedVersions(t, db); len(got) != 6 {
+		t.Errorf("after second Migrate applied = %v, want 6 rows", got)
 	}
 }
 

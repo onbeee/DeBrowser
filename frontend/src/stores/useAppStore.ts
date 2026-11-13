@@ -5,6 +5,7 @@ export type PageKey =
   | "overview"
   | "instances"
   | "proxies"
+  | "subscriptions"
   | "kernels"
   | "bookmarks"
   | "sync"

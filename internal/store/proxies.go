@@ -11,7 +11,8 @@ import (
 
 const proxyColumns = `id, name, protocol, address, port, config_json, secret_ref, enabled,
 	sort_order, source, subscription_id, dedup_key,
-	last_latency_ms, last_test_ok, last_tested_at, created_at, updated_at`
+	last_latency_ms, last_test_ok, last_tested_at, created_at, updated_at,
+	config_id, source_node_name`
 
 func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 	var (
@@ -22,12 +23,17 @@ func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 		latency  sql.NullInt64
 		testOK   sql.NullInt64
 		testedAt sql.NullString
+		configID sql.NullString
 	)
 	if err := row.Scan(&p.ID, &p.Name, &p.Protocol, &p.Address, &port,
 		&p.ConfigJSON, &p.SecretRef, &enable,
 		&p.SortOrder, &p.Source, &subID, &p.DedupKey,
-		&latency, &testOK, &testedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&latency, &testOK, &testedAt, &p.CreatedAt, &p.UpdatedAt,
+		&configID, &p.SourceNodeName); err != nil {
 		return model.Proxy{}, err
+	}
+	if configID.Valid {
+		p.ConfigID = &configID.String
 	}
 	if port.Valid {
 		v := int(port.Int64)
@@ -83,12 +89,14 @@ func (s *Store) CreateProxy(ctx context.Context, p model.Proxy) (model.Proxy, er
 	if _, err := s.q.ExecContext(ctx, `INSERT INTO proxies
 		(id, name, protocol, address, port, config_json, secret_ref, enabled,
 		 sort_order, source, subscription_id, dedup_key,
-		 last_latency_ms, last_test_ok, last_tested_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 last_latency_ms, last_test_ok, last_tested_at,
+		 config_id, source_node_name)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.Protocol, p.Address, nullInt(p.Port),
 		p.ConfigJSON, p.SecretRef, boolInt(p.Enabled),
 		p.SortOrder, p.Source, nullStr(p.SubscriptionID), p.DedupKey,
-		nullInt(p.LastLatencyMs), nullBool(p.LastTestOK), nullStr(p.LastTestedAt)); err != nil {
+		nullInt(p.LastLatencyMs), nullBool(p.LastTestOK), nullStr(p.LastTestedAt),
+		nullStr(p.ConfigID), p.SourceNodeName); err != nil {
 		return model.Proxy{}, fmt.Errorf("store: create proxy: %w", err)
 	}
 	return s.GetProxy(ctx, p.ID)
@@ -137,11 +145,13 @@ func (s *Store) UpdateProxy(ctx context.Context, p model.Proxy) (model.Proxy, er
 		name = ?, protocol = ?, address = ?, port = ?, config_json = ?,
 		secret_ref = ?, enabled = ?, sort_order = ?,
 		source = ?, subscription_id = ?, dedup_key = ?,
+		config_id = ?, source_node_name = ?,
 		updated_at = datetime('now')
 		WHERE id = ?`,
 		p.Name, p.Protocol, p.Address, nullInt(p.Port), p.ConfigJSON,
 		p.SecretRef, boolInt(p.Enabled), p.SortOrder,
-		p.Source, nullStr(p.SubscriptionID), p.DedupKey, p.ID)
+		p.Source, nullStr(p.SubscriptionID), p.DedupKey,
+		nullStr(p.ConfigID), p.SourceNodeName, p.ID)
 	if err != nil {
 		return model.Proxy{}, fmt.Errorf("store: update proxy: %w", err)
 	}
@@ -188,10 +198,10 @@ func (s *Store) DeleteProxy(ctx context.Context, id string) error {
 	return nil
 }
 
-// SecretRefInUse reports whether any database row (proxy or
-// subscription) currently references the given credential ref. It
-// backs the vault's guarded cleanup: a ref that is still in use
-// must never be deleted from the vault.
+// SecretRefInUse reports whether any database row (proxy,
+// subscription or imported Mihomo config) currently references
+// the given credential ref. It backs the vault's guarded cleanup:
+// a ref that is still in use must never be deleted from the vault.
 func (s *Store) SecretRefInUse(ctx context.Context, ref string) (bool, error) {
 	if ref == "" {
 		return false, nil
@@ -199,21 +209,24 @@ func (s *Store) SecretRefInUse(ctx context.Context, ref string) (bool, error) {
 	var n int
 	if err := s.q.QueryRowContext(ctx,
 		`SELECT (SELECT COUNT(1) FROM proxies WHERE secret_ref = ?) +
-		        (SELECT COUNT(1) FROM subscriptions WHERE secret_ref = ?)`,
-		ref, ref).Scan(&n); err != nil {
+		        (SELECT COUNT(1) FROM subscriptions WHERE secret_ref = ?) +
+		        (SELECT COUNT(1) FROM mihomo_configs WHERE secret_ref = ?)`,
+		ref, ref, ref).Scan(&n); err != nil {
 		return false, fmt.Errorf("store: secret ref in use: %w", err)
 	}
 	return n > 0, nil
 }
 
 // AllSecretRefs returns the set of credential refs currently
-// referenced by any proxy or subscription row — the live set for
-// vault garbage collection.
+// referenced by any proxy, subscription or imported-config row —
+// the live set for vault garbage collection.
 func (s *Store) AllSecretRefs(ctx context.Context) (map[string]bool, error) {
 	rows, err := s.q.QueryContext(ctx,
 		`SELECT secret_ref FROM proxies WHERE secret_ref <> ''
 		 UNION
-		 SELECT secret_ref FROM subscriptions WHERE secret_ref <> ''`)
+		 SELECT secret_ref FROM subscriptions WHERE secret_ref <> ''
+		 UNION
+		 SELECT secret_ref FROM mihomo_configs WHERE secret_ref <> ''`)
 	if err != nil {
 		return nil, fmt.Errorf("store: all secret refs: %w", err)
 	}

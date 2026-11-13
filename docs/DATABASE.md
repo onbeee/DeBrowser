@@ -27,7 +27,7 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 
 ## Schema (current state)
 
-Current state (migrations 0001-0005, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
+Current state (migrations 0001-0006, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances`, `bookmarks`, `mihomo_configs`, `mihomo_proxy_groups` and `mihomo_proxy_group_members` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 
@@ -39,9 +39,23 @@ Proxy nodes. `protocol` is constrained to `http, https, socks5, vmess, vless, tr
 
 Stage 4A (migration 0004) adds: `sort_order`, `source` (`manual` / `file_import` / `subscription`), `subscription_id` (FK → `subscriptions`, `ON DELETE CASCADE`), `dedup_key` (import fingerprint; partial UNIQUE index `WHERE dedup_key <> ''`, so empty keys never collide), and the connection-test record `last_latency_ms` / `last_test_ok` / `last_tested_at`. (Migration 0004 also added a `group_id` column here and to `subscriptions`, plus the `proxy_groups` / `proxy_tags` tables; the Stage 4A correction removed all of them again — see migration 0005 below.)
 
+Stage 6 (migration 0006) adds: `config_id` (FK → `mihomo_configs`, `ON DELETE SET NULL`) — the imported config a node came from — and `source_node_name` (the node's name inside its source document; native proxy-group members address nodes by this name, so it is kept separately from the editable display `name`). Imported nodes carry a non-empty `dedup_key` of the form `<scope>:<owner-id>:<sha256>` where the fingerprint covers owner ID + name + protocol + server + port (never secrets): a subscription refresh matches its own previous nodes by this key and preserves their row IDs, and different subscriptions can hold same-named nodes without colliding.
+
 ### `subscriptions`
 
-Subscription metadata; the import pipeline itself is Stage 6 work. The **full subscription URL is never stored here** — it may carry credentials and lives exclusively in the vault under `secret_ref`; this table keeps only `url_hint` (scheme+host), the fetch policy (`allow_lan` default 0, `auto_update_minutes` default 0 = off) and a sanitised refresh record (`last_updated_at`, `last_status`, `last_error` — status class only, never a URL).
+Subscription metadata; the refresh pipeline is Stage 6 work (implemented). The **full subscription URL is never stored here** — it may carry credentials and lives exclusively in the vault under `secret_ref`; this table keeps only `url_hint` (scheme+host), the fetch policy (`allow_lan` default 0, `auto_update_minutes` default 0 = off) and a sanitised refresh record (`last_updated_at`, `last_status`, `last_error` — status class only, never a URL).
+
+### `mihomo_configs` (Stage 6, migration 0006)
+
+One row per imported Mihomo configuration document. `source_type` is `file` (local import; `subscription_id` is NULL) or `subscription` (owned by a subscription; a partial UNIQUE index guarantees at most one current config per subscription). The sanitized document itself is a file under `data/mihomo/configs/<uuid>.yaml`; this table stores only the relative `file_path` (relative to `data/mihomo/`, never absolute), its `sha256`, and `secret_ref` — the opaque vault reference of the config-level credential bundle extracted during sanitisation (empty when the document carried none). `security_report_json` is the Stage 6 findings array (`allow_lan`, `external_bind`, `external_controller`, `controller_no_secret`, `tun_enabled`, `dns_external_listen`); it records risks only — Stage 7 enforces the safe values at render time. `format_version` versions the artifact format (currently 1).
+
+### `mihomo_proxy_groups` (Stage 6, migration 0006)
+
+The **native Mihomo `proxy-groups`** of one imported config, preserved structurally (name, type, non-secret `options_json`, document order in `sort_order`). These are the config author's groups — not a DeBrowser grouping feature (that was removed in migration 0005). `(config_id, name)` is UNIQUE. Deleting the config cascades to its groups.
+
+### `mihomo_proxy_group_members` (Stage 6, migration 0006)
+
+One row per group member, in document order (`PRIMARY KEY (group_id, sort_order)`). `member_kind` is `proxy`, `group` or `builtin`, and CHECK constraints enforce that exactly the matching target column is set: `proxy_id` (a node of the SAME config — resolution never crosses config boundaries) for `proxy`, `target_group_id` for `group`, neither for `builtin` (DIRECT, REJECT, GLOBAL, …). Group references were validated acyclic at import time.
 
 ### `browser_instances`
 
@@ -89,12 +103,17 @@ Application-level key/value settings (Stage 1, migration 0001), accessed through
 | 3 | `0003_bookmarks.sql` | `bookmarks` (+ scoped-URL unique index) |
 | 4 | `0004_proxy_foundation.sql` | `proxy_groups`, `proxy_tags`, `subscriptions`; `proxies` group/source/dedup/test columns; `browser_instances.proxy_listen_port` |
 | 5 | `0005_remove_proxy_groups_tags.sql` | Stage 4A correction: removes DeBrowser's own proxy groups/tags — rebuilds `proxies` and `subscriptions` without `group_id` and drops `proxy_tags` and `proxy_groups` (see below) |
+| 6 | `0006_mihomo_config_import.sql` | Stage 6: `mihomo_configs`, `mihomo_proxy_groups`, `mihomo_proxy_group_members`; `proxies.config_id` / `proxies.source_node_name` (see below) |
 
 ### Migration 0005: removing groups and tags (Stage 4A correction)
 
 Product decision (2026-11-13): DeBrowser does not offer its own proxy grouping/tagging. Migration 0005 removes the structures migration 0004 had added for it. This is **not** related to Mihomo's native `proxy-groups`, which are part of imported airport configurations and arrive with subscription/config import in Stage 6.
 
 Because both `group_id` columns carry a foreign key to `proxy_groups` (and `proxies.group_id` an index), 0005 uses a table rebuild instead of `DROP COLUMN`. The rebuild works inside the migration runner's per-migration transaction with `foreign_keys=1`: on this SQLite build, foreign-key actions (`ON DELETE SET NULL` / `CASCADE`) fire immediately when a parent table is dropped, so the migration first rescues the incoming links (`browser_instances.proxy_id`, then `proxies.subscription_id`) into scratch tables and nulls them, swaps in the rebuilt tables under the same names, and then restores the links (the restores are themselves FK-checked). `proxies.sort_order` is kept — it is plain list ordering, not a group feature. The v4 → v5 upgrade test (`internal/database/stage5_test.go`) verifies data preservation, `PRAGMA foreign_key_check` and `PRAGMA integrity_check` over a populated v4 fixture.
+
+### Migration 0006: Mihomo config import (Stage 6)
+
+Purely additive: three new tables plus two new `proxies` columns with compatibility defaults (`config_id` NULL, `source_node_name` `''`), so existing Stage 4A/5A/5B rows, values and relationships are untouched. The v5 → v6 upgrade test (`internal/database/stage6_test.go`) verifies data preservation over a populated v5 fixture, the member CHECK constraints, `PRAGMA foreign_key_check` and `PRAGMA integrity_check`. The vault reference checks (`SecretRefInUse`, `AllSecretRefs`) cover `mihomo_configs.secret_ref` as well, so config credential bundles take part in guarded cleanup and garbage collection exactly like proxy and subscription references.
 
 ## Backup before migration
 

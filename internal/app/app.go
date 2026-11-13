@@ -36,7 +36,7 @@ type App struct {
 
 // New builds the Wails application around the given services. The
 // assets filesystem holds the embedded frontend build (frontend/dist).
-func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, proxyService *service.ProxyService, diagnosticsService *service.DiagnosticsService, log *slog.Logger, assets fs.FS) *App {
+func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, proxyService *service.ProxyService, diagnosticsService *service.DiagnosticsService, subscriptionService *service.SubscriptionService, log *slog.Logger, assets fs.FS) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{cancel: cancel, log: log}
 
@@ -51,6 +51,16 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 		return dlg.PromptForSingleSelection()
 	}
 
+	// Local config import reads exactly the one file the user
+	// picks in the native open-file dialog; the frontend can
+	// never hand the backend an arbitrary path.
+	subscriptionService.FilePicker = func() (string, error) {
+		dlg := application.Get().Dialog.OpenFile()
+		dlg.SetTitle("选择要导入的配置文件")
+		dlg.AddFilter("配置文件", "*.yaml;*.yml;*.txt")
+		return dlg.PromptForSingleSelection()
+	}
+
 	a.wails = application.New(application.Options{
 		Name:        version.Name,
 		Description: "Local-first multi-profile browser manager",
@@ -59,6 +69,7 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 			application.NewService(instanceService),
 			application.NewService(proxyService),
 			application.NewService(diagnosticsService),
+			application.NewService(subscriptionService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -90,6 +101,15 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 	// polling. The loop stops with the application context.
 	a.loops = append(a.loops, lifecycle.RunTicker(ctx, 10*time.Second, func() {
 		a.wails.Event.Emit(service.StatusEvent, appService.GetStatus())
+	}))
+
+	// Auto-refresh due subscriptions once a minute (Stage 6).
+	// The sweep itself is a no-op unless a subscription opted in
+	// (auto_update_minutes > 0) and its interval has elapsed; the
+	// loop stops with the application context and is drained on
+	// shutdown like the others.
+	a.loops = append(a.loops, lifecycle.RunTicker(ctx, time.Minute, func() {
+		subscriptionService.RefreshDueSubscriptions(ctx)
 	}))
 
 	// Watch for activation signals from second launches: bring the

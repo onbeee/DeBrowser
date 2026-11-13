@@ -64,11 +64,11 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 - Operation audit for instance/proxy changes, subscription imports, mode and rule changes, backup/restore and updates; no secrets in logs
 - In-app diagnostics view and one-click diagnostics/acceptance record export
 
-## Stage 6 — Subscription and full configuration import
+## Stage 6 — Subscription and full configuration import (implemented in the Stage 6 pull request, pending review)
 
 - Four import formats through one pipeline: full Clash/Mihomo YAML, proxies-only YAML, V2Ray/Base64 URI lists, local config files; unsupported content errors explicitly, never silently dropped
 - Native Mihomo `proxy-groups` parsed into structured storage; members resolve by stable node identity (rendered names unique per node), never silently rebound to a same-named node from another subscription
-- Full-config management: original artifacts stored with credentials stripped into the vault; security defaults enforced on render (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) with every adjustment reported to the user
+- Full-config management: original artifacts stored with credentials stripped into the vault; Stage 6 records a security report of risky settings (allow-lan, external listeners/controller, missing controller secret, TUN, external DNS listen) — the safe defaults themselves (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) are enforced when Stage 7 renders a runnable config, with every adjustment reported to the user
 
 ## Stage 7 — Mihomo core integration and run modes
 
