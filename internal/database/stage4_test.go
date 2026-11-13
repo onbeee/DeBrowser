@@ -57,7 +57,19 @@ func TestUpgradeFromV3ToV4PreservesData(t *testing.T) {
 	db := openV3Database(t, filepath.Join(dir, "test.db"))
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	if err := db.Migrate(ctx); err != nil {
+	// Apply only up to v4: this test pins the v3 -> v4 step itself.
+	// (The full chain now continues to v5, which has its own test.)
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	var upto4 []migration
+	for _, m := range migs {
+		if m.version <= 4 {
+			upto4 = append(upto4, m)
+		}
+	}
+	if err := db.applyMigrations(ctx, upto4); err != nil {
 		t.Fatalf("Migrate (v3 -> v4): %v", err)
 	}
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 4 {
@@ -97,11 +109,11 @@ func TestUpgradeFromV3ToV4PreservesData(t *testing.T) {
 		`SELECT name FROM bookmarks WHERE id='b1'`).Scan(&bm); err != nil || bm != "旧书签" {
 		t.Errorf("bookmark = %q (err %v), want 旧书签", bm, err)
 	}
-	// Idempotent: a second run changes nothing.
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("second Migrate: %v", err)
+	// Idempotent: re-applying the same set changes nothing.
+	if err := db.applyMigrations(ctx, upto4); err != nil {
+		t.Fatalf("second apply up to v4: %v", err)
 	}
 	if got := appliedVersions(t, db); len(got) != 4 {
-		t.Errorf("after second Migrate applied = %v, want 4 rows", got)
+		t.Errorf("after second apply applied = %v, want 4 rows", got)
 	}
 }
