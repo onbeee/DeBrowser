@@ -39,10 +39,6 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
-import * as store$0 from "../store/models.js";
-
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
 /**
@@ -55,13 +51,6 @@ export function CollectSecretGarbage(): $CancellablePromise<number> {
 }
 
 /**
- * CreateGroup creates a proxy group.
- */
-export function CreateGroup(input: $models.CreateGroupInput): $CancellablePromise<$models.ProxyGroupView> {
-    return $Call.ByID(3725477586, input);
-}
-
-/**
  * CreateProxy validates and creates a proxy. With secrets, the
  * vault write lands first and the database transaction second;
  * see the type comment for the full protocol.
@@ -71,29 +60,12 @@ export function CreateProxy(input: $models.CreateProxyInput): $CancellablePromis
 }
 
 /**
- * DeleteGroup removes a group; its proxies become ungrouped
- * (schema ON DELETE SET NULL).
- */
-export function DeleteGroup(id: string): $CancellablePromise<void> {
-    return $Call.ByID(2743727323, id);
-}
-
-/**
- * DeleteProxy removes a proxy: the database row (and, via schema
- * cascades, its tag rows; referencing instances get proxy_id NULL)
- * goes first, then the vault entry is cleaned under the
- * live-reference guard.
+ * DeleteProxy removes a proxy: the database row goes first
+ * (referencing instances get proxy_id NULL via the schema), then
+ * the vault entry is cleaned under the live-reference guard.
  */
 export function DeleteProxy(id: string): $CancellablePromise<void> {
     return $Call.ByID(234411560, id);
-}
-
-/**
- * DeleteTag removes a tag label from every proxy carrying it and
- * returns how many associations were removed.
- */
-export function DeleteTag(tag: string): $CancellablePromise<number> {
-    return $Call.ByID(3544870184, tag);
 }
 
 /**
@@ -113,32 +85,11 @@ export function GetProxyPortRange(): $CancellablePromise<$models.ProxyPortRange>
 }
 
 /**
- * ListGroups returns all groups with their proxy counts.
- */
-export function ListGroups(): $CancellablePromise<$models.ProxyGroupView[] | null> {
-    return $Call.ByID(2529634139);
-}
-
-/**
  * ListProxies returns every proxy as a credential-free view, in
  * display order.
  */
 export function ListProxies(): $CancellablePromise<$models.ProxyView[] | null> {
     return $Call.ByID(2441903169);
-}
-
-/**
- * ListTags returns every tag in use with its proxy count.
- */
-export function ListTags(): $CancellablePromise<store$0.TagCount[] | null> {
-    return $Call.ByID(1205197734);
-}
-
-/**
- * RenameTag renames a tag label on every proxy carrying it.
- */
-export function RenameTag(oldTag: string, newTag: string): $CancellablePromise<void> {
-    return $Call.ByID(1457098775, oldTag, newTag);
 }
 
 /**
@@ -155,13 +106,6 @@ export function SetProxyEnabled(id: string, enabled: boolean): $CancellablePromi
  */
 export function TestProxy(id: string): $CancellablePromise<$models.TestProxyResult> {
     return $Call.ByID(4284782473, id);
-}
-
-/**
- * UpdateGroup renames or reorders a group.
- */
-export function UpdateGroup(input: $models.UpdateGroupInput): $CancellablePromise<$models.ProxyGroupView> {
-    return $Call.ByID(3408127805, input);
 }
 
 /**
