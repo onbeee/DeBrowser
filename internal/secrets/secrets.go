@@ -153,6 +153,20 @@ var HookAfterReplace func(path string)
 // never reassigns it.
 var verifyRestrictions = VerifyFileRestrictions
 
+// File-operation seams for the backup snapshot inside
+// persistLocked. The production defaults are the real operations;
+// tests substitute them to inject low-level failures (permission
+// errors, I/O errors, failed temp writes, failed replaces) at
+// precise steps of the snapshot. Production code never reassigns
+// them, and the defaults are the genuine implementations — the
+// seams change nothing about production behavior.
+var (
+	readVaultFn   = readVaultFile
+	readFileFn    = os.ReadFile
+	writeTempFn   = writeTempSynced
+	replaceFileFn = replaceFile
+)
+
 // Store is the credential vault. All methods are safe for
 // concurrent use; mutations are serialized internally. The
 // single-instance lock guarantees one app process owns the file.
@@ -201,6 +215,19 @@ func openWithProtector(path string, prot Protector) (*Store, Recovery, error) {
 		if bakErr == nil {
 			s.entries = bak
 			rec.RecoveredFromBackup = true
+			// Preserve an unreadable main file under a quarantine
+			// name BEFORE restoring: routine persistence refuses
+			// to overwrite a vault it cannot read, and corrupt
+			// bytes are never silently discarded. With the main
+			// file moved aside, the restore below starts from the
+			// "no main file" case. (A merely missing main file
+			// needs no rename.)
+			if _, err := os.Stat(path); err == nil {
+				q := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+				if err := os.Rename(path, q); err == nil {
+					rec.Quarantined = append(rec.Quarantined, q)
+				}
+			}
 			// Restore the backup as the main file so the next
 			// mutation starts from a healthy base.
 			if err := s.persistLocked(s.entries); err != nil {
@@ -478,7 +505,7 @@ func (s *Store) persistLocked(entries map[string]entry) error {
 		return fmt.Errorf("secrets: encode vault: %w", err)
 	}
 	dir := filepath.Dir(s.path)
-	tmp, err := writeTempSynced(dir, filepath.Base(s.path)+".tmp-", raw)
+	tmp, err := writeTempFn(dir, filepath.Base(s.path)+".tmp-", raw)
 	if err != nil {
 		return err
 	}
@@ -489,27 +516,52 @@ func (s *Store) persistLocked(entries map[string]entry) error {
 	if err := verifyRestrictions(tmp); err != nil {
 		return fmt.Errorf("secrets: verify temp vault permissions: %w", err)
 	}
-	// Snapshot the current good vault as .bak before replacing it,
-	// so a later corruption of the new file can roll back one step.
-	if current, err := readVaultFile(s.path); err == nil && len(current) >= 0 {
-		if rawCur, err := os.ReadFile(s.path); err == nil {
-			bakTmp, err := writeTempSynced(dir, filepath.Base(s.path)+".bak.tmp-", rawCur)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = os.Remove(bakTmp) }()
-			if err := RestrictFile(bakTmp); err != nil {
-				return fmt.Errorf("secrets: restrict backup vault: %w", err)
-			}
-			if err := verifyRestrictions(bakTmp); err != nil {
-				return fmt.Errorf("secrets: verify backup vault permissions: %w", err)
-			}
-			if err := replaceFile(bakTmp, s.path+".bak"); err != nil {
-				return fmt.Errorf("secrets: snapshot backup vault: %w", err)
-			}
+	// Snapshot the current vault as .bak BEFORE replacing it, so
+	// a later corruption of the new file can roll back one step.
+	// This step FAILS CLOSED — silently skipping the backup and
+	// overwriting the only good copy is not an option:
+	//
+	//   - Main file absent (errors.Is(err, os.ErrNotExist), and
+	//     only that): first creation, no snapshot exists to make.
+	//   - Main file present and valid: it must be read and
+	//     parsed, its raw bytes snapshotted through a restricted,
+	//     verified temp file, atomically replaced into .bak, and
+	//     the final .bak verified — every step must succeed
+	//     before the main file may be replaced.
+	//   - Main file present but unreadable or unparsable
+	//     (permission error, I/O error, corrupt JSON,
+	//     unsupported version): abort. A corrupt main file is
+	//     handled by the explicit recovery protocol at Open,
+	//     never silently overwritten by a routine Put or
+	//     cleanup.
+	if _, err := readVaultFn(s.path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("secrets: current vault unreadable, refusing to overwrite it: %w", err)
+		}
+	} else {
+		rawCur, err := readFileFn(s.path)
+		if err != nil {
+			return fmt.Errorf("secrets: read current vault for backup: %w", err)
+		}
+		bakTmp, err := writeTempFn(dir, filepath.Base(s.path)+".bak.tmp-", rawCur)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.Remove(bakTmp) }()
+		if err := RestrictFile(bakTmp); err != nil {
+			return fmt.Errorf("secrets: restrict backup vault: %w", err)
+		}
+		if err := verifyRestrictions(bakTmp); err != nil {
+			return fmt.Errorf("secrets: verify backup vault permissions: %w", err)
+		}
+		if err := replaceFileFn(bakTmp, s.path+".bak"); err != nil {
+			return fmt.Errorf("secrets: snapshot backup vault: %w", err)
+		}
+		if err := verifyRestrictions(s.path + ".bak"); err != nil {
+			return fmt.Errorf("secrets: verify final backup permissions: %w", err)
 		}
 	}
-	if err := replaceFile(tmp, s.path); err != nil {
+	if err := replaceFileFn(tmp, s.path); err != nil {
 		return fmt.Errorf("secrets: replace vault: %w", err)
 	}
 	syncDir(dir)
