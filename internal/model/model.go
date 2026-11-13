@@ -27,7 +27,6 @@ type Proxy struct {
 	ConfigJSON     string  `json:"configJson"`
 	SecretRef      string  `json:"secretRef"`
 	Enabled        bool    `json:"enabled"`
-	GroupID        *string `json:"groupId,omitempty"`
 	SortOrder      int     `json:"sortOrder"`
 	Source         string  `json:"source"`
 	SubscriptionID *string `json:"subscriptionId,omitempty"`
@@ -39,17 +38,6 @@ type Proxy struct {
 	UpdatedAt      string  `json:"updatedAt"`
 }
 
-// ProxyGroup is a named, user-managed grouping for proxies.
-// Deleting a group never deletes its proxies (their group_id is
-// set to NULL by the schema).
-type ProxyGroup struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	SortOrder int    `json:"sortOrder"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
-}
-
 // Subscription is the metadata of a proxy subscription. The full
 // subscription URL may carry credentials and lives exclusively in
 // the credential vault; the database keeps only URLHint
@@ -59,7 +47,6 @@ type Subscription struct {
 	Name              string  `json:"name"`
 	URLHint           string  `json:"urlHint"`
 	SecretRef         string  `json:"secretRef"`
-	GroupID           *string `json:"groupId,omitempty"`
 	AllowLAN          bool    `json:"allowLan"`
 	AutoUpdateMinutes int     `json:"autoUpdateMinutes"`
 	LastUpdatedAt     *string `json:"lastUpdatedAt,omitempty"`
