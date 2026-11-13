@@ -9,7 +9,7 @@ import (
 )
 
 // Windows file permission discipline for credential-bearing files
-// (the vault, its backup, and — in Stage 4C — the Mihomo
+// (the vault, its backup, and — in Stage 7 — the Mihomo
 // controller secret and the generated runtime config).
 //
 // RestrictFile replaces the file's DACL with a PROTECTED one
