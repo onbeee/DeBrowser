@@ -102,12 +102,9 @@ type ProxyView struct {
 	Port             *int     `json:"port,omitempty"`
 	ConfigJSON       string   `json:"configJson"`
 	Enabled          bool     `json:"enabled"`
-	GroupID          *string  `json:"groupId,omitempty"`
-	GroupName        string   `json:"groupName"`
 	SortOrder        int      `json:"sortOrder"`
 	Source           string   `json:"source"`
 	SubscriptionID   *string  `json:"subscriptionId,omitempty"`
-	Tags             []string `json:"tags"`
 	HasSecrets       bool     `json:"hasSecrets"`
 	SecretFields     []string `json:"secretFields"`
 	CredentialStatus string   `json:"credentialStatus"`
@@ -129,9 +126,7 @@ type CreateProxyInput struct {
 	Address    string            `json:"address"`
 	Port       *int              `json:"port"`
 	ConfigJSON string            `json:"configJson"`
-	GroupID    *string           `json:"groupId"`
 	SortOrder  int               `json:"sortOrder"`
-	Tags       []string          `json:"tags"`
 	Secrets    map[string]string `json:"secrets"`
 }
 
@@ -147,36 +142,15 @@ type UpdateProxyInput struct {
 	Address      string            `json:"address"`
 	Port         *int              `json:"port"`
 	ConfigJSON   string            `json:"configJson"`
-	GroupID      *string           `json:"groupId"`
 	SortOrder    int               `json:"sortOrder"`
 	Enabled      bool              `json:"enabled"`
-	Tags         []string          `json:"tags"`
 	Secrets      map[string]string `json:"secrets"`
 	ClearSecrets bool              `json:"clearSecrets"`
 }
 
-// ProxyGroupView is a group plus its proxy count.
-type ProxyGroupView struct {
-	model.ProxyGroup
-	ProxyCount int `json:"proxyCount"`
-}
-
-// CreateGroupInput carries the editable fields of a group.
-type CreateGroupInput struct {
-	Name      string `json:"name"`
-	SortOrder int    `json:"sortOrder"`
-}
-
-// UpdateGroupInput carries the editable fields of one group.
-type UpdateGroupInput struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	SortOrder int    `json:"sortOrder"`
-}
-
 // TestProxyResult reports one connection test. The test is a TCP
 // reachability check against the node's server endpoint (the only
-// honest test available before the Mihomo core lands in Stage 4C;
+// honest test available before the Mihomo core lands (Stage 7);
 // protocol-level delay and exit-IP tests arrive there).
 type TestProxyResult struct {
 	Proxy     ProxyView `json:"proxy"`
@@ -185,7 +159,7 @@ type TestProxyResult struct {
 	Message   string    `json:"message"`
 }
 
-// ProxyPortRange is the instance listener port range (Stage 4C
+// ProxyPortRange is the instance listener port range (Stage 7
 // allocates from it). Stored in app_settings as 'proxy.port_range'
 // ("19000-19499"); the reviewed default applies when unset or
 // invalid.
@@ -230,21 +204,9 @@ func (s *ProxyService) ListProxies() ([]ProxyView, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(list))
-	for _, p := range list {
-		ids = append(ids, p.ID)
-	}
-	tags, err := s.store.TagsForProxies(c, ids)
-	if err != nil {
-		return nil, err
-	}
-	groups, err := s.groupNames(c)
-	if err != nil {
-		return nil, err
-	}
 	out := make([]ProxyView, 0, len(list))
 	for _, p := range list {
-		out = append(out, s.toView(p, tags[p.ID], groups))
+		out = append(out, s.toView(p))
 	}
 	return out, nil
 }
@@ -260,48 +222,22 @@ func (s *ProxyService) GetProxy(id string) (ProxyView, error) {
 		}
 		return ProxyView{}, err
 	}
-	tags, err := s.store.TagsForProxy(c, id)
-	if err != nil {
-		return ProxyView{}, err
-	}
-	groups, err := s.groupNames(c)
-	if err != nil {
-		return ProxyView{}, err
-	}
-	return s.toView(p, tags, groups), nil
-}
-
-func (s *ProxyService) groupNames(c context.Context) (map[string]string, error) {
-	groups, err := s.store.ListProxyGroups(c)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(groups))
-	for _, g := range groups {
-		out[g.ID] = g.Name
-	}
-	return out, nil
+	return s.toView(p), nil
 }
 
 // toView projects a stored proxy into its credential-free view,
 // resolving the credential status against the vault. A reference
 // that cannot be loaded yields CredentialUnavailable — never a
 // silent downgrade to "no credential".
-func (s *ProxyService) toView(p model.Proxy, tags []string, groupNames map[string]string) ProxyView {
+func (s *ProxyService) toView(p model.Proxy) ProxyView {
 	v := ProxyView{
 		ID: p.ID, Name: p.Name, Protocol: p.Protocol, Address: p.Address,
 		Port: p.Port, ConfigJSON: p.ConfigJSON, Enabled: p.Enabled,
-		GroupID: p.GroupID, SortOrder: p.SortOrder, Source: p.Source,
-		SubscriptionID: p.SubscriptionID, Tags: tags,
-		LastLatencyMs: p.LastLatencyMs, LastTestOK: p.LastTestOK,
+		SortOrder: p.SortOrder, Source: p.Source,
+		SubscriptionID: p.SubscriptionID,
+		LastLatencyMs:  p.LastLatencyMs, LastTestOK: p.LastTestOK,
 		LastTestedAt: p.LastTestedAt, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
 		SecretFields: []string{},
-	}
-	if v.Tags == nil {
-		v.Tags = []string{}
-	}
-	if p.GroupID != nil {
-		v.GroupName = groupNames[*p.GroupID]
 	}
 	if p.SecretRef == "" {
 		v.CredentialStatus = CredentialNone
@@ -340,10 +276,6 @@ func (s *ProxyService) CreateProxy(input CreateProxyInput) (ProxyView, error) {
 	if err != nil {
 		return ProxyView{}, err
 	}
-	tags, err := normalizeTags(input.Tags)
-	if err != nil {
-		return ProxyView{}, err
-	}
 	if err := validateSecrets(input.Secrets); err != nil {
 		return ProxyView{}, err
 	}
@@ -352,14 +284,6 @@ func (s *ProxyService) CreateProxy(input CreateProxyInput) (ProxyView, error) {
 	defer s.mu.Unlock()
 	c, cancel := ctx()
 	defer cancel()
-	if input.GroupID != nil {
-		if _, err := s.store.GetProxyGroup(c, *input.GroupID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return ProxyView{}, fmt.Errorf("所选分组不存在")
-			}
-			return ProxyView{}, err
-		}
-	}
 
 	ref := ""
 	if len(input.Secrets) > 0 {
@@ -371,17 +295,14 @@ func (s *ProxyService) CreateProxy(input CreateProxyInput) (ProxyView, error) {
 	row := model.Proxy{
 		Name: fields.name, Protocol: fields.protocol, Address: fields.address,
 		Port: fields.port, ConfigJSON: fields.configJSON, SecretRef: ref,
-		Enabled: true, GroupID: input.GroupID, SortOrder: input.SortOrder,
+		Enabled: true, SortOrder: input.SortOrder,
 		Source: "manual",
 	}
 	var created model.Proxy
 	txErr := s.withTx(c, func(tx *store.Store) error {
 		var err error
 		created, err = tx.CreateProxy(c, row)
-		if err != nil {
-			return err
-		}
-		return tx.SetProxyTags(c, created.ID, tags)
+		return err
 	})
 	if txErr != nil {
 		// The database never published the ref: compensate with
@@ -398,21 +319,13 @@ func (s *ProxyService) CreateProxy(input CreateProxyInput) (ProxyView, error) {
 	if ref != "" {
 		s.vault.MarkCommitted(ref)
 	}
-	groups, err := s.groupNames(c)
-	if err != nil {
-		return ProxyView{}, err
-	}
-	return s.toView(created, tags, groups), nil
+	return s.toView(created), nil
 }
 
 // UpdateProxy validates and updates a proxy, applying the secret
 // semantics documented on UpdateProxyInput.
 func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
 	fields, err := validateProxyFields(input.Name, input.Protocol, input.Address, input.Port, input.ConfigJSON)
-	if err != nil {
-		return ProxyView{}, err
-	}
-	tags, err := normalizeTags(input.Tags)
 	if err != nil {
 		return ProxyView{}, err
 	}
@@ -431,14 +344,6 @@ func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
 		}
 		return ProxyView{}, err
 	}
-	if input.GroupID != nil {
-		if _, err := s.store.GetProxyGroup(c, *input.GroupID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return ProxyView{}, fmt.Errorf("所选分组不存在")
-			}
-			return ProxyView{}, err
-		}
-	}
 
 	// Secret decision: replace (Put new first), clear, or keep.
 	newRef := ""
@@ -455,7 +360,6 @@ func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
 	row.Port = fields.port
 	row.ConfigJSON = fields.configJSON
 	row.Enabled = input.Enabled
-	row.GroupID = input.GroupID
 	row.SortOrder = input.SortOrder
 	switch {
 	case newRef != "":
@@ -467,10 +371,7 @@ func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
 	txErr := s.withTx(c, func(tx *store.Store) error {
 		var err error
 		updated, err = tx.UpdateProxy(c, row)
-		if err != nil {
-			return err
-		}
-		return tx.SetProxyTags(c, row.ID, tags)
+		return err
 	})
 	if txErr != nil {
 		if newRef != "" {
@@ -492,17 +393,12 @@ func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
 	if oldRef != "" && oldRef != row.SecretRef {
 		s.cleanupRef(oldRef, "update")
 	}
-	groups, err := s.groupNames(c)
-	if err != nil {
-		return ProxyView{}, err
-	}
-	return s.toView(updated, tags, groups), nil
+	return s.toView(updated), nil
 }
 
-// DeleteProxy removes a proxy: the database row (and, via schema
-// cascades, its tag rows; referencing instances get proxy_id NULL)
-// goes first, then the vault entry is cleaned under the
-// live-reference guard.
+// DeleteProxy removes a proxy: the database row goes first
+// (referencing instances get proxy_id NULL via the schema), then
+// the vault entry is cleaned under the live-reference guard.
 func (s *ProxyService) DeleteProxy(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -656,121 +552,7 @@ func (s *ProxyService) TestProxy(id string) (TestProxyResult, error) {
 }
 
 // ----------------------------------------------------------------
-// Groups and tags
-// ----------------------------------------------------------------
-
-// ListGroups returns all groups with their proxy counts.
-func (s *ProxyService) ListGroups() ([]ProxyGroupView, error) {
-	c, cancel := ctx()
-	defer cancel()
-	groups, err := s.store.ListProxyGroups(c)
-	if err != nil {
-		return nil, err
-	}
-	counts, err := s.store.ProxyGroupCounts(c)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ProxyGroupView, 0, len(groups))
-	for _, g := range groups {
-		out = append(out, ProxyGroupView{ProxyGroup: g, ProxyCount: counts[g.ID]})
-	}
-	return out, nil
-}
-
-// CreateGroup creates a proxy group.
-func (s *ProxyService) CreateGroup(input CreateGroupInput) (ProxyGroupView, error) {
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		return ProxyGroupView{}, fmt.Errorf("分组名称不能为空")
-	}
-	c, cancel := ctx()
-	defer cancel()
-	g, err := s.store.CreateProxyGroup(c, model.ProxyGroup{Name: name, SortOrder: input.SortOrder})
-	if err != nil {
-		return ProxyGroupView{}, mapProxyConstraintError(err)
-	}
-	return ProxyGroupView{ProxyGroup: g, ProxyCount: 0}, nil
-}
-
-// UpdateGroup renames or reorders a group.
-func (s *ProxyService) UpdateGroup(input UpdateGroupInput) (ProxyGroupView, error) {
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		return ProxyGroupView{}, fmt.Errorf("分组名称不能为空")
-	}
-	c, cancel := ctx()
-	defer cancel()
-	g, err := s.store.UpdateProxyGroup(c, model.ProxyGroup{ID: input.ID, Name: name, SortOrder: input.SortOrder})
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return ProxyGroupView{}, fmt.Errorf("分组不存在")
-		}
-		return ProxyGroupView{}, mapProxyConstraintError(err)
-	}
-	counts, err := s.store.ProxyGroupCounts(c)
-	if err != nil {
-		return ProxyGroupView{}, err
-	}
-	return ProxyGroupView{ProxyGroup: g, ProxyCount: counts[g.ID]}, nil
-}
-
-// DeleteGroup removes a group; its proxies become ungrouped
-// (schema ON DELETE SET NULL).
-func (s *ProxyService) DeleteGroup(id string) error {
-	c, cancel := ctx()
-	defer cancel()
-	if err := s.store.DeleteProxyGroup(c, id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("分组不存在")
-		}
-		return err
-	}
-	return nil
-}
-
-// ListTags returns every tag in use with its proxy count.
-func (s *ProxyService) ListTags() ([]store.TagCount, error) {
-	c, cancel := ctx()
-	defer cancel()
-	return s.store.ListTagCounts(c)
-}
-
-// DeleteTag removes a tag label from every proxy carrying it and
-// returns how many associations were removed.
-func (s *ProxyService) DeleteTag(tag string) (int, error) {
-	tag = strings.TrimSpace(tag)
-	if tag == "" {
-		return 0, fmt.Errorf("标签不能为空")
-	}
-	c, cancel := ctx()
-	defer cancel()
-	n, err := s.store.DeleteTagEverywhere(c, tag)
-	if err != nil {
-		return 0, err
-	}
-	return int(n), nil
-}
-
-// RenameTag renames a tag label on every proxy carrying it.
-func (s *ProxyService) RenameTag(oldTag, newTag string) error {
-	oldTag = strings.TrimSpace(oldTag)
-	newTag = strings.TrimSpace(newTag)
-	if oldTag == "" || newTag == "" {
-		return fmt.Errorf("标签不能为空")
-	}
-	if oldTag == newTag {
-		return fmt.Errorf("新标签与原标签相同")
-	}
-	c, cancel := ctx()
-	defer cancel()
-	return s.withTx(c, func(tx *store.Store) error {
-		return tx.RenameTagEverywhere(c, oldTag, newTag)
-	})
-}
-
-// ----------------------------------------------------------------
-// Port range (Stage 4C groundwork)
+// Port range (Stage 7 groundwork)
 // ----------------------------------------------------------------
 
 // GetProxyPortRange resolves the instance listener port range
@@ -891,28 +673,6 @@ func findSecretConfigKey(value any) (string, bool) {
 	return "", false
 }
 
-// normalizeTags trims, deduplicates and bounds a tag list.
-func normalizeTags(tags []string) ([]string, error) {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		if len([]rune(tag)) > 64 {
-			return nil, fmt.Errorf("标签 %q 过长（最多 64 个字符）", tag)
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	if len(out) > 20 {
-		return nil, fmt.Errorf("标签数量不能超过 20 个")
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
 // validateSecrets bounds a secrets map before it reaches the
 // vault: field names and values must both be non-empty.
 func validateSecrets(secrets map[string]string) error {
@@ -932,8 +692,6 @@ func validateSecrets(secrets map[string]string) error {
 func mapProxyConstraintError(err error) error {
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "UNIQUE constraint failed: proxy_groups.name"):
-		return fmt.Errorf("分组名称已存在，请换一个名称")
 	case strings.Contains(msg, "UNIQUE constraint failed: index 'idx_proxies_dedup'"),
 		strings.Contains(msg, "UNIQUE constraint failed: proxies.dedup_key"):
 		return fmt.Errorf("存在具有相同去重指纹的节点")
