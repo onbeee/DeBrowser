@@ -122,7 +122,6 @@ var specialUsePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("2001:2::/48"),    // benchmarking (RFC 5180)
 	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849)
 	netip.MustParsePrefix("2001:10::/28"),   // ORCHID, deprecated (RFC 4843)
-	netip.MustParsePrefix("2001:20::/28"),   // ORCHIDv2 (RFC 7343)
 	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637)
 	netip.MustParsePrefix("2002::/16"),      // 6to4 (RFC 3056): tunnels an embedded IPv4 target — refused wholesale so the tunnel spelling cannot bypass the IPv4 policy
 	netip.MustParsePrefix("5f00::/16"),      // SRv6 segment IDs (RFC 9603): locator space, not host targets
@@ -143,6 +142,20 @@ var specialUsePrefixes = []netip.Prefix{
 // The address is normalised with netip first: an IPv4-mapped IPv6
 // address is unmapped to its IPv4 form before any check, so the
 // IPv6 spelling of a forbidden IPv4 target cannot slip through.
+// globallyReachableExceptions are single addresses INSIDE a
+// denied special-use range that the IANA registry nevertheless
+// marks Globally Reachable=True; they are carved out of the
+// enclosing denial and treated as ordinary public addresses, in
+// line with the principle stated on specialUsePrefixes. Both sit
+// inside 192.0.0.0/24 (kept denied for every other address):
+//
+//   - 192.0.0.9  — Port Control Protocol anycast (RFC 7723)
+//   - 192.0.0.10 — Traversal Using Relays around NAT anycast (RFC 8155)
+var globallyReachableExceptions = []netip.Prefix{
+	netip.MustParsePrefix("192.0.0.9/32"),
+	netip.MustParsePrefix("192.0.0.10/32"),
+}
+
 func ipAllowedByPolicy(ip net.IP, allowLAN bool) bool {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
@@ -160,6 +173,11 @@ func ipAllowedByPolicy(ip net.IP, allowLAN bool) bool {
 	}
 	if addr.IsPrivate() {
 		return allowLAN
+	}
+	for _, exception := range globallyReachableExceptions {
+		if exception.Contains(addr) {
+			return true
+		}
 	}
 	for _, prefix := range specialUsePrefixes {
 		if prefix.Contains(addr) {

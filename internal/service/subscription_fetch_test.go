@@ -317,7 +317,7 @@ func TestIPAllowedByPolicySpecialRanges(t *testing.T) {
 // mixed public+special case.
 func TestFetchRejectsSpecialRangesWithoutDialing(t *testing.T) {
 	fx, _ := newFetchFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
-	specials := []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.9", "2001:db8::1",
+	specials := []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.9", "2001:db8::1", "192.0.0.1",
 		// Second SSRF fix round additions.
 		"64:ff9b:1::1", "100:0:0:1::1", "2001:10::1", "2002:0808:0808::1", "192.88.99.1"}
 	for _, raw := range specials {
@@ -347,5 +347,75 @@ func TestFetchRejectsSpecialRangesWithoutDialing(t *testing.T) {
 	}
 	if len(fx.dialedTo) != 0 {
 		t.Fatalf("dial attempted for mapped loopback: %v", fx.dialedTo)
+	}
+}
+
+// TestIPAllowedGloballyReachableExceptions pins the final-review
+// corrections: the two globally reachable /32 anycast addresses
+// inside the otherwise denied 192.0.0.0/24 (plain and
+// IPv4-mapped spellings) are allowed in both modes, the rest of
+// the /24 stays denied in both modes, and ORCHIDv2 — registered
+// globally reachable — is allowed while ORCHID (2001:10::/28)
+// stays denied.
+func TestIPAllowedGloballyReachableExceptions(t *testing.T) {
+	allowed := []string{"192.0.0.9", "192.0.0.10", "::ffff:192.0.0.9", "::ffff:192.0.0.10", "2001:20::1"}
+	for _, raw := range allowed {
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			t.Fatalf("bad test IP %q", raw)
+		}
+		if !ipAllowedByPolicy(ip, false) {
+			t.Errorf("%s refused with allowLAN=false, want allowed", raw)
+		}
+		if !ipAllowedByPolicy(ip, true) {
+			t.Errorf("%s refused with allowLAN=true, want allowed", raw)
+		}
+	}
+	denied := []string{"192.0.0.1", "192.0.0.8", "192.0.0.170", "192.0.0.171", "2001:10::1"}
+	for _, raw := range denied {
+		ip := net.ParseIP(raw)
+		if ipAllowedByPolicy(ip, false) {
+			t.Errorf("%s allowed with allowLAN=false, want refused", raw)
+		}
+		if ipAllowedByPolicy(ip, true) {
+			t.Errorf("%s allowed with allowLAN=true, want refused", raw)
+		}
+	}
+}
+
+// TestFetchGloballyReachableExceptions proves at the fetch
+// level that an excepted address actually reaches the dial stage
+// (against the fixture's local server through the injected
+// dialer — no external network), pinned to the validated IP.
+func TestFetchGloballyReachableExceptions(t *testing.T) {
+	const payload = "proxies: []\n"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	})
+	fx, _ := newFetchFixture(t, handler)
+	for _, raw := range []string{"192.0.0.9", "192.0.0.10", "::ffff:192.0.0.9", "2001:20::1"} {
+		fx.dialedTo = nil
+		fx.resolve["subs.example.com"] = []net.IP{net.ParseIP(raw)}
+		body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
+		if err != nil {
+			t.Errorf("%s: fetch failed: %v", raw, err)
+			continue
+		}
+		if string(body) != payload {
+			t.Errorf("%s: body mismatch", raw)
+		}
+		if len(fx.dialedTo) != 1 {
+			t.Errorf("%s: expected exactly one pinned dial, got %v", raw, fx.dialedTo)
+		}
+	}
+	// The pinned address for the plain IPv4 exception is the
+	// validated IP itself.
+	fx.dialedTo = nil
+	fx.resolve["subs.example.com"] = []net.IP{net.ParseIP("192.0.0.9")}
+	if _, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(fx.dialedTo) != 1 || fx.dialedTo[0] != "192.0.0.9:80" {
+		t.Fatalf("dialedTo = %v, want [192.0.0.9:80]", fx.dialedTo)
 	}
 }
