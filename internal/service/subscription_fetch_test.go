@@ -386,36 +386,42 @@ func TestIPAllowedGloballyReachableExceptions(t *testing.T) {
 // TestFetchGloballyReachableExceptions proves at the fetch
 // level that an excepted address actually reaches the dial stage
 // (against the fixture's local server through the injected
-// dialer — no external network), pinned to the validated IP.
+// dialer — no external network), and pins the EXACT dial target
+// per address: the dial must go to the validated IP itself,
+// including the normalised form of an IPv4-mapped spelling.
 func TestFetchGloballyReachableExceptions(t *testing.T) {
 	const payload = "proxies: []\n"
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(payload))
 	})
 	fx, _ := newFetchFixture(t, handler)
-	for _, raw := range []string{"192.0.0.9", "192.0.0.10", "::ffff:192.0.0.9", "2001:20::1"} {
+	cases := []struct {
+		resolved   string // the DNS answer under test
+		wantTarget string // the exact pinned dial target it must produce
+	}{
+		{"192.0.0.9", "192.0.0.9:80"},
+		{"192.0.0.10", "192.0.0.10:80"},
+		// An IPv4-mapped spelling dials its normalised IPv4 form.
+		{"::ffff:192.0.0.9", "192.0.0.9:80"},
+		{"2001:20::1", "[2001:20::1]:80"},
+	}
+	for _, tc := range cases {
 		fx.dialedTo = nil
-		fx.resolve["subs.example.com"] = []net.IP{net.ParseIP(raw)}
+		fx.resolve["subs.example.com"] = []net.IP{net.ParseIP(tc.resolved)}
 		body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
 		if err != nil {
-			t.Errorf("%s: fetch failed: %v", raw, err)
+			t.Errorf("%s: fetch failed: %v", tc.resolved, err)
 			continue
 		}
 		if string(body) != payload {
-			t.Errorf("%s: body mismatch", raw)
+			t.Errorf("%s: body mismatch: %q", tc.resolved, body)
 		}
 		if len(fx.dialedTo) != 1 {
-			t.Errorf("%s: expected exactly one pinned dial, got %v", raw, fx.dialedTo)
+			t.Errorf("%s: expected exactly one pinned dial, got %v", tc.resolved, fx.dialedTo)
+			continue
 		}
-	}
-	// The pinned address for the plain IPv4 exception is the
-	// validated IP itself.
-	fx.dialedTo = nil
-	fx.resolve["subs.example.com"] = []net.IP{net.ParseIP("192.0.0.9")}
-	if _, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false); err != nil {
-		t.Fatal(err)
-	}
-	if len(fx.dialedTo) != 1 || fx.dialedTo[0] != "192.0.0.9:80" {
-		t.Fatalf("dialedTo = %v, want [192.0.0.9:80]", fx.dialedTo)
+		if fx.dialedTo[0] != tc.wantTarget {
+			t.Errorf("%s: dial target = %s, want %s", tc.resolved, fx.dialedTo[0], tc.wantTarget)
+		}
 	}
 }
