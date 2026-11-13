@@ -15,6 +15,60 @@ export interface CreateInstanceInput {
 }
 
 /**
+ * CreateProxyInput carries the user-editable fields for creation.
+ * Secrets maps credential field names (for example "password",
+ * "uuid") to plaintext values; the values are written to the
+ * credential vault only and are never stored in the database,
+ * logged or returned.
+ */
+export interface CreateProxyInput {
+    "name": string;
+    "protocol": string;
+    "address": string;
+    "port": number | null;
+    "configJson": string;
+    "sortOrder": number;
+    "secrets": { [_ in string]?: string } | null;
+}
+
+/**
+ * ProxyPortRange is the instance listener port range (Stage 7
+ * allocates from it). Stored in app_settings as 'proxy.port_range'
+ * ("19000-19499"); the reviewed default applies when unset or
+ * invalid.
+ */
+export interface ProxyPortRange {
+    "start": number;
+    "end": number;
+}
+
+/**
+ * ProxyView is the credential-free projection of a proxy used by
+ * every read path of this service. It deliberately has no field
+ * that could carry a secret value or the vault reference itself.
+ */
+export interface ProxyView {
+    "id": string;
+    "name": string;
+    "protocol": string;
+    "address": string;
+    "port"?: number | null;
+    "configJson": string;
+    "enabled": boolean;
+    "sortOrder": number;
+    "source": string;
+    "subscriptionId"?: string | null;
+    "hasSecrets": boolean;
+    "secretFields": string[] | null;
+    "credentialStatus": string;
+    "lastLatencyMs"?: number | null;
+    "lastTestOk"?: boolean | null;
+    "lastTestedAt"?: string | null;
+    "createdAt": string;
+    "updatedAt": string;
+}
+
+/**
  * Status is a point-in-time snapshot of the running foundation. All
  * paths come from the portable layout (see internal/paths).
  */
@@ -39,6 +93,19 @@ export interface Status {
 }
 
 /**
+ * TestProxyResult reports one connection test. The test is a TCP
+ * reachability check against the node's server endpoint (the only
+ * honest test available before the Mihomo core lands (Stage 7);
+ * protocol-level delay and exit-IP tests arrive there).
+ */
+export interface TestProxyResult {
+    "proxy": ProxyView;
+    "ok": boolean;
+    "latencyMs"?: number | null;
+    "message": string;
+}
+
+/**
  * UpdateInstanceInput carries the editable fields of one instance.
  * The profile directory of an existing instance cannot be changed
  * here (moving live profile data is a separate, explicit operation).
@@ -51,4 +118,24 @@ export interface UpdateInstanceInput {
     "kernelName": string;
     "kernelVersion": string;
     "sortOrder": number;
+}
+
+/**
+ * UpdateProxyInput carries the editable fields of one proxy.
+ * Secret semantics (reviewed design): a nil or empty Secrets map
+ * keeps the stored credential untouched; a non-empty map replaces
+ * it wholesale; ClearSecrets explicitly removes it (and is ignored
+ * when Secrets is non-empty).
+ */
+export interface UpdateProxyInput {
+    "id": string;
+    "name": string;
+    "protocol": string;
+    "address": string;
+    "port": number | null;
+    "configJson": string;
+    "sortOrder": number;
+    "enabled": boolean;
+    "secrets": { [_ in string]?: string } | null;
+    "clearSecrets": boolean;
 }

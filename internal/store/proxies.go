@@ -9,16 +9,24 @@ import (
 	"github.com/onbeee/DeBrowser/internal/model"
 )
 
-const proxyColumns = `id, name, protocol, address, port, config_json, secret_ref, enabled, created_at, updated_at`
+const proxyColumns = `id, name, protocol, address, port, config_json, secret_ref, enabled,
+	sort_order, source, subscription_id, dedup_key,
+	last_latency_ms, last_test_ok, last_tested_at, created_at, updated_at`
 
 func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 	var (
-		p      model.Proxy
-		port   sql.NullInt64
-		enable int
+		p        model.Proxy
+		port     sql.NullInt64
+		enable   int
+		subID    sql.NullString
+		latency  sql.NullInt64
+		testOK   sql.NullInt64
+		testedAt sql.NullString
 	)
 	if err := row.Scan(&p.ID, &p.Name, &p.Protocol, &p.Address, &port,
-		&p.ConfigJSON, &p.SecretRef, &enable, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.ConfigJSON, &p.SecretRef, &enable,
+		&p.SortOrder, &p.Source, &subID, &p.DedupKey,
+		&latency, &testOK, &testedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return model.Proxy{}, err
 	}
 	if port.Valid {
@@ -26,7 +34,35 @@ func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
 		p.Port = &v
 	}
 	p.Enabled = enable != 0
+	if subID.Valid {
+		p.SubscriptionID = &subID.String
+	}
+	if latency.Valid {
+		v := int(latency.Int64)
+		p.LastLatencyMs = &v
+	}
+	if testOK.Valid {
+		v := testOK.Int64 != 0
+		p.LastTestOK = &v
+	}
+	if testedAt.Valid {
+		p.LastTestedAt = &testedAt.String
+	}
 	return p, nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func nullBool(p *bool) sql.NullInt64 {
+	if p == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(boolInt(*p)), Valid: true}
 }
 
 // CreateProxy inserts a new proxy node, generating its ID when empty.
@@ -41,15 +77,18 @@ func (s *Store) CreateProxy(ctx context.Context, p model.Proxy) (model.Proxy, er
 	if p.ConfigJSON == "" {
 		p.ConfigJSON = "{}"
 	}
-	enabled := 0
-	if p.Enabled {
-		enabled = 1
+	if p.Source == "" {
+		p.Source = "manual"
 	}
 	if _, err := s.q.ExecContext(ctx, `INSERT INTO proxies
-		(id, name, protocol, address, port, config_json, secret_ref, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, name, protocol, address, port, config_json, secret_ref, enabled,
+		 sort_order, source, subscription_id, dedup_key,
+		 last_latency_ms, last_test_ok, last_tested_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.Protocol, p.Address, nullInt(p.Port),
-		p.ConfigJSON, p.SecretRef, enabled); err != nil {
+		p.ConfigJSON, p.SecretRef, boolInt(p.Enabled),
+		p.SortOrder, p.Source, nullStr(p.SubscriptionID), p.DedupKey,
+		nullInt(p.LastLatencyMs), nullBool(p.LastTestOK), nullStr(p.LastTestedAt)); err != nil {
 		return model.Proxy{}, fmt.Errorf("store: create proxy: %w", err)
 	}
 	return s.GetProxy(ctx, p.ID)
@@ -68,9 +107,10 @@ func (s *Store) GetProxy(ctx context.Context, id string) (model.Proxy, error) {
 	return p, nil
 }
 
-// ListProxies returns all proxies ordered by name.
+// ListProxies returns all proxies in display order (sort_order,
+// then name).
 func (s *Store) ListProxies(ctx context.Context) ([]model.Proxy, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT `+proxyColumns+` FROM proxies ORDER BY name, id`)
+	rows, err := s.q.QueryContext(ctx, `SELECT `+proxyColumns+` FROM proxies ORDER BY sort_order, name, id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list proxies: %w", err)
 	}
@@ -90,18 +130,18 @@ func (s *Store) ListProxies(ctx context.Context) ([]model.Proxy, error) {
 }
 
 // UpdateProxy replaces the editable fields of a proxy and refreshes
-// its updated_at timestamp.
+// its updated_at timestamp. The last-test fields are managed
+// separately (UpdateProxyTestResult) and are not touched here.
 func (s *Store) UpdateProxy(ctx context.Context, p model.Proxy) (model.Proxy, error) {
-	enabled := 0
-	if p.Enabled {
-		enabled = 1
-	}
 	res, err := s.q.ExecContext(ctx, `UPDATE proxies SET
 		name = ?, protocol = ?, address = ?, port = ?, config_json = ?,
-		secret_ref = ?, enabled = ?, updated_at = datetime('now')
+		secret_ref = ?, enabled = ?, sort_order = ?,
+		source = ?, subscription_id = ?, dedup_key = ?,
+		updated_at = datetime('now')
 		WHERE id = ?`,
 		p.Name, p.Protocol, p.Address, nullInt(p.Port), p.ConfigJSON,
-		p.SecretRef, enabled, p.ID)
+		p.SecretRef, boolInt(p.Enabled), p.SortOrder,
+		p.Source, nullStr(p.SubscriptionID), p.DedupKey, p.ID)
 	if err != nil {
 		return model.Proxy{}, fmt.Errorf("store: update proxy: %w", err)
 	}
@@ -111,6 +151,26 @@ func (s *Store) UpdateProxy(ctx context.Context, p model.Proxy) (model.Proxy, er
 		return model.Proxy{}, ErrNotFound
 	}
 	return s.GetProxy(ctx, p.ID)
+}
+
+// UpdateProxyTestResult records the outcome of one connection test.
+// A failed test clears the latency (nil) rather than keeping a
+// stale success value.
+func (s *Store) UpdateProxyTestResult(ctx context.Context, id string, latencyMs *int, ok bool, testedAt string) error {
+	res, err := s.q.ExecContext(ctx, `UPDATE proxies SET
+		last_latency_ms = ?, last_test_ok = ?, last_tested_at = ?,
+		updated_at = datetime('now')
+		WHERE id = ?`,
+		nullInt(latencyMs), boolInt(ok), testedAt, id)
+	if err != nil {
+		return fmt.Errorf("store: update proxy test result: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: update proxy test result: %w", err)
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteProxy removes a proxy. Instances that referenced it keep
@@ -126,4 +186,48 @@ func (s *Store) DeleteProxy(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SecretRefInUse reports whether any database row (proxy or
+// subscription) currently references the given credential ref. It
+// backs the vault's guarded cleanup: a ref that is still in use
+// must never be deleted from the vault.
+func (s *Store) SecretRefInUse(ctx context.Context, ref string) (bool, error) {
+	if ref == "" {
+		return false, nil
+	}
+	var n int
+	if err := s.q.QueryRowContext(ctx,
+		`SELECT (SELECT COUNT(1) FROM proxies WHERE secret_ref = ?) +
+		        (SELECT COUNT(1) FROM subscriptions WHERE secret_ref = ?)`,
+		ref, ref).Scan(&n); err != nil {
+		return false, fmt.Errorf("store: secret ref in use: %w", err)
+	}
+	return n > 0, nil
+}
+
+// AllSecretRefs returns the set of credential refs currently
+// referenced by any proxy or subscription row — the live set for
+// vault garbage collection.
+func (s *Store) AllSecretRefs(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.q.QueryContext(ctx,
+		`SELECT secret_ref FROM proxies WHERE secret_ref <> ''
+		 UNION
+		 SELECT secret_ref FROM subscriptions WHERE secret_ref <> ''`)
+	if err != nil {
+		return nil, fmt.Errorf("store: all secret refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]bool{}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("store: all secret refs: %w", err)
+		}
+		out[ref] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: all secret refs: %w", err)
+	}
+	return out, nil
 }

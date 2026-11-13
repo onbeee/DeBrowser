@@ -43,6 +43,10 @@ type Layout struct {
 	// ActivationFile is how a second launch asks the running instance
 	// to focus its window (see internal/singleinstance).
 	ActivationFile string // <root>/data/activate.request
+	// SecretsFile is the credential vault (internal/secrets): every
+	// proxy credential and subscription URL lives there, encrypted;
+	// SQLite holds only opaque references to its entries.
+	SecretsFile string // <root>/data/secrets.vault
 }
 
 // Resolve builds the portable layout for an application root directory.
@@ -73,6 +77,7 @@ func Resolve(root string) (Layout, error) {
 		SettingsFile:   filepath.Join(cfg, "settings.json"),
 		InstanceLock:   filepath.Join(data, "app.lock"),
 		ActivationFile: filepath.Join(data, "activate.request"),
+		SecretsFile:    filepath.Join(data, "secrets.vault"),
 	}, nil
 }
 

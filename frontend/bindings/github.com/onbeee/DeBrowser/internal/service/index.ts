@@ -3,13 +3,20 @@
 
 import * as AppService from "./appservice.js";
 import * as InstanceService from "./instanceservice.js";
+import * as ProxyService from "./proxyservice.js";
 export {
     AppService,
-    InstanceService
+    InstanceService,
+    ProxyService
 };
 
 export type {
     CreateInstanceInput,
+    CreateProxyInput,
+    ProxyPortRange,
+    ProxyView,
     Status,
-    UpdateInstanceInput
+    TestProxyResult,
+    UpdateInstanceInput,
+    UpdateProxyInput
 } from "./models.js";

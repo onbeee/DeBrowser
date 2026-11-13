@@ -14,6 +14,7 @@ export interface Instance {
     "kernelVersion": string;
     "userDataDir": string;
     "proxyId"?: string | null;
+    "proxyListenPort"?: number | null;
     "status": InstanceStatus;
     "startUrl": string;
     "sortOrder": number;
@@ -40,7 +41,8 @@ export enum InstanceStatus {
 /**
  * Proxy is a proxy node definition. Credential material is never part
  * of this struct: non-secret parameters live in ConfigJSON, and
- * SecretRef is an opaque reference to a future secure store.
+ * SecretRef is an opaque reference into the credential vault
+ * (internal/secrets).
  */
 export interface Proxy {
     "id": string;
@@ -51,6 +53,13 @@ export interface Proxy {
     "configJson": string;
     "secretRef": string;
     "enabled": boolean;
+    "sortOrder": number;
+    "source": string;
+    "subscriptionId"?: string | null;
+    "dedupKey": string;
+    "lastLatencyMs"?: number | null;
+    "lastTestOk"?: boolean | null;
+    "lastTestedAt"?: string | null;
     "createdAt": string;
     "updatedAt": string;
 }
