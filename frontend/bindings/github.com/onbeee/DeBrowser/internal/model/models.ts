@@ -53,7 +53,6 @@ export interface Proxy {
     "configJson": string;
     "secretRef": string;
     "enabled": boolean;
-    "groupId"?: string | null;
     "sortOrder": number;
     "source": string;
     "subscriptionId"?: string | null;
