@@ -58,17 +58,21 @@ func run() error {
 		return fmt.Errorf("configuration: %w", err)
 	}
 
-	logger, closeLog, err := logging.New(cfg)
+	// The logging system (Stage 5B: run/operation/error categories)
+	// is initialized before the database and services, and closed
+	// last — this deferred close runs after the explicit database
+	// close below, preserving the drain → database → log order.
+	logSystem, err := logging.NewSystem(cfg)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = closeLog() }()
+	logger := logSystem.Logger()
+	defer func() { _ = logSystem.Close() }()
 
-	logger.Info("starting debrowser",
-		"root", cfg.Layout.Root,
-		"dataDir", cfg.Layout.Data,
-		"database", cfg.Layout.DatabaseFile,
-	)
+	// The startup record deliberately carries no filesystem paths:
+	// log files leave the machine in diagnostic exports, and
+	// absolute paths disclose the user's directory layout.
+	logger.Info("starting debrowser")
 
 	// Single-instance protection, scoped to this portable folder.
 	// A second launch never touches the database: it asks the
@@ -156,7 +160,15 @@ func run() error {
 		return err
 	}
 
-	wailsApp := app.New(cfg, appService, instanceService, proxyService, logger, assets)
+	// Operation audit (Stage 5B): user-initiated mutations in these
+	// services record whitelist entries in the operation log.
+	appService.Auditor = logSystem
+	instanceService.Auditor = logSystem
+	proxyService.Auditor = logSystem
+
+	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
+
+	wailsApp := app.New(cfg, appService, instanceService, proxyService, diagnosticsService, logger, assets)
 	runErr := wailsApp.Run()
 
 	// The app has fully stopped and its background loops are drained:

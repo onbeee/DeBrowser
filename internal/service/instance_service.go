@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/paths"
 	"github.com/onbeee/DeBrowser/internal/pfiles"
@@ -32,6 +33,9 @@ type InstanceService struct {
 	store  *store.Store
 	layout paths.Layout
 	log    *slog.Logger
+	// auditor, when set, receives one operation-audit record per
+	// user-initiated mutation (Stage 5B).
+	Auditor *logging.System
 	// deleteRecord removes an instance row. It is a field so tests
 	// can inject a failure into the middle of
 	// DeleteInstanceAndProfile and verify the profile restore.
@@ -136,7 +140,15 @@ func (s *InstanceService) ListProxies() ([]model.Proxy, error) {
 // CreateInstance validates and creates an instance. The default
 // profile directory is profiles/<id>; an explicit directory must be
 // a relative path inside profiles/.
+// CreateInstance creates an instance (audited, Stage 5B).
 func (s *InstanceService) CreateInstance(input CreateInstanceInput) (model.Instance, error) {
+	start := time.Now()
+	inst, err := s.createInstance(input)
+	auditOp(s.Auditor, "instance.create", "instance", inst.ID, start, err)
+	return inst, err
+}
+
+func (s *InstanceService) createInstance(input CreateInstanceInput) (model.Instance, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return model.Instance{}, fmt.Errorf("实例名称不能为空")
@@ -183,7 +195,15 @@ func (s *InstanceService) CreateInstance(input CreateInstanceInput) (model.Insta
 }
 
 // UpdateInstance validates and updates an instance's editable fields.
+// UpdateInstance updates an instance (audited, Stage 5B).
 func (s *InstanceService) UpdateInstance(input UpdateInstanceInput) (model.Instance, error) {
+	start := time.Now()
+	inst, err := s.updateInstance(input)
+	auditOp(s.Auditor, "instance.update", "instance", input.ID, start, err)
+	return inst, err
+}
+
+func (s *InstanceService) updateInstance(input UpdateInstanceInput) (model.Instance, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return model.Instance{}, fmt.Errorf("实例名称不能为空")
@@ -222,7 +242,15 @@ func (s *InstanceService) UpdateInstance(input UpdateInstanceInput) (model.Insta
 // schema cascade, its bookmarks). The profile directory on disk is
 // deliberately left untouched: browser data is never deleted as a
 // side effect of removing a record.
+// DeleteInstance deletes instance metadata only (audited, Stage 5B).
 func (s *InstanceService) DeleteInstance(id string) error {
+	start := time.Now()
+	err := s.deleteInstance(id)
+	auditOp(s.Auditor, "instance.delete", "instance", id, start, err)
+	return err
+}
+
+func (s *InstanceService) deleteInstance(id string) error {
 	c, cancel := ctx()
 	defer cancel()
 	if err := s.store.DeleteInstance(c, id); err != nil {
@@ -260,7 +288,16 @@ func (s *InstanceService) DeleteInstance(id string) error {
 //     error, never silently lost.
 //
 // A persisted "running" instance is refused before any of this.
+// DeleteInstanceAndProfile deletes an instance and its profile
+// directory (audited, Stage 5B).
 func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
+	start := time.Now()
+	err := s.deleteInstanceAndProfile(id)
+	auditOp(s.Auditor, "instance.delete_with_profile", "instance", id, start, err)
+	return err
+}
+
+func (s *InstanceService) deleteInstanceAndProfile(id string) error {
 	c, cancel := ctx()
 	defer cancel()
 	in, err := s.store.GetInstance(c, id)

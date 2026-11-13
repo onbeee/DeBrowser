@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/store"
@@ -51,7 +52,10 @@ type ProxyService struct {
 	store *store.Store
 	vault *secrets.Store
 	log   *slog.Logger
-	mu    sync.Mutex
+	// auditor, when set, receives one operation-audit record per
+	// user-initiated mutation (Stage 5B).
+	Auditor *logging.System
+	mu      sync.Mutex
 	// dialContext performs the TCP dial for TestProxy. It is a
 	// field so the default dialer is explicit; production never
 	// replaces it.
@@ -271,7 +275,15 @@ func (s *ProxyService) toView(p model.Proxy) ProxyView {
 // CreateProxy validates and creates a proxy. With secrets, the
 // vault write lands first and the database transaction second;
 // see the type comment for the full protocol.
+// CreateProxy creates a proxy node (audited, Stage 5B).
 func (s *ProxyService) CreateProxy(input CreateProxyInput) (ProxyView, error) {
+	start := time.Now()
+	view, err := s.createProxy(input)
+	auditOp(s.Auditor, "proxy.create", "proxy", view.ID, start, err)
+	return view, err
+}
+
+func (s *ProxyService) createProxy(input CreateProxyInput) (ProxyView, error) {
 	fields, err := validateProxyFields(input.Name, input.Protocol, input.Address, input.Port, input.ConfigJSON)
 	if err != nil {
 		return ProxyView{}, err
@@ -324,7 +336,15 @@ func (s *ProxyService) CreateProxy(input CreateProxyInput) (ProxyView, error) {
 
 // UpdateProxy validates and updates a proxy, applying the secret
 // semantics documented on UpdateProxyInput.
+// UpdateProxy updates a proxy node (audited, Stage 5B).
 func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
+	start := time.Now()
+	view, err := s.updateProxy(input)
+	auditOp(s.Auditor, "proxy.update", "proxy", input.ID, start, err)
+	return view, err
+}
+
+func (s *ProxyService) updateProxy(input UpdateProxyInput) (ProxyView, error) {
 	fields, err := validateProxyFields(input.Name, input.Protocol, input.Address, input.Port, input.ConfigJSON)
 	if err != nil {
 		return ProxyView{}, err
@@ -399,7 +419,15 @@ func (s *ProxyService) UpdateProxy(input UpdateProxyInput) (ProxyView, error) {
 // DeleteProxy removes a proxy: the database row goes first
 // (referencing instances get proxy_id NULL via the schema), then
 // the vault entry is cleaned under the live-reference guard.
+// DeleteProxy deletes a proxy node (audited, Stage 5B).
 func (s *ProxyService) DeleteProxy(id string) error {
+	start := time.Now()
+	err := s.deleteProxy(id)
+	auditOp(s.Auditor, "proxy.delete", "proxy", id, start, err)
+	return err
+}
+
+func (s *ProxyService) deleteProxy(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, cancel := ctx()
@@ -423,7 +451,15 @@ func (s *ProxyService) DeleteProxy(id string) error {
 
 // SetProxyEnabled toggles a proxy's enabled flag. It touches no
 // credential reference, so it needs no vault coordination.
+// SetProxyEnabled enables or disables a proxy node (audited, Stage 5B).
 func (s *ProxyService) SetProxyEnabled(id string, enabled bool) (ProxyView, error) {
+	start := time.Now()
+	view, err := s.setProxyEnabled(id, enabled)
+	auditOp(s.Auditor, "proxy.set_enabled", "proxy", id, start, err)
+	return view, err
+}
+
+func (s *ProxyService) setProxyEnabled(id string, enabled bool) (ProxyView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, cancel := ctx()
@@ -502,7 +538,15 @@ func (s *ProxyService) CollectSecretGarbage() (int, error) {
 
 // TestProxy runs the TCP reachability test described on
 // TestProxyResult and records the outcome on the proxy row.
+// TestProxy runs the reachability test for a node (audited, Stage 5B).
 func (s *ProxyService) TestProxy(id string) (TestProxyResult, error) {
+	start := time.Now()
+	result, err := s.testProxy(id)
+	auditOp(s.Auditor, "proxy.test", "proxy", id, start, err)
+	return result, err
+}
+
+func (s *ProxyService) testProxy(id string) (TestProxyResult, error) {
 	c, cancel := ctx()
 	defer cancel()
 	p, err := s.store.GetProxy(c, id)

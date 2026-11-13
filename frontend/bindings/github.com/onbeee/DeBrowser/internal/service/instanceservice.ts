@@ -32,6 +32,7 @@ import * as $models from "./models.js";
  * CreateInstance validates and creates an instance. The default
  * profile directory is profiles/<id>; an explicit directory must be
  * a relative path inside profiles/.
+ * CreateInstance creates an instance (audited, Stage 5B).
  */
 export function CreateInstance(input: $models.CreateInstanceInput): $CancellablePromise<model$0.Instance> {
     return $Call.ByID(1021165291, input);
@@ -42,6 +43,7 @@ export function CreateInstance(input: $models.CreateInstanceInput): $Cancellable
  * schema cascade, its bookmarks). The profile directory on disk is
  * deliberately left untouched: browser data is never deleted as a
  * side effect of removing a record.
+ * DeleteInstance deletes instance metadata only (audited, Stage 5B).
  */
 export function DeleteInstance(id: string): $CancellablePromise<void> {
     return $Call.ByID(3072793292, id);
@@ -73,6 +75,8 @@ export function DeleteInstance(id: string): $CancellablePromise<void> {
  *     error, never silently lost.
  * 
  * A persisted "running" instance is refused before any of this.
+ * DeleteInstanceAndProfile deletes an instance and its profile
+ * directory (audited, Stage 5B).
  */
 export function DeleteInstanceAndProfile(id: string): $CancellablePromise<void> {
     return $Call.ByID(1852242710, id);
@@ -102,6 +106,7 @@ export function ListProxies(): $CancellablePromise<model$0.Proxy[] | null> {
 
 /**
  * UpdateInstance validates and updates an instance's editable fields.
+ * UpdateInstance updates an instance (audited, Stage 5B).
  */
 export function UpdateInstance(input: $models.UpdateInstanceInput): $CancellablePromise<model$0.Instance> {
     return $Call.ByID(1861349874, input);

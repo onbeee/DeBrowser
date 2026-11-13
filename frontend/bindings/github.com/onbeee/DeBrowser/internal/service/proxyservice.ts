@@ -54,6 +54,7 @@ export function CollectSecretGarbage(): $CancellablePromise<number> {
  * CreateProxy validates and creates a proxy. With secrets, the
  * vault write lands first and the database transaction second;
  * see the type comment for the full protocol.
+ * CreateProxy creates a proxy node (audited, Stage 5B).
  */
 export function CreateProxy(input: $models.CreateProxyInput): $CancellablePromise<$models.ProxyView> {
     return $Call.ByID(1834296885, input);
@@ -63,6 +64,7 @@ export function CreateProxy(input: $models.CreateProxyInput): $CancellablePromis
  * DeleteProxy removes a proxy: the database row goes first
  * (referencing instances get proxy_id NULL via the schema), then
  * the vault entry is cleaned under the live-reference guard.
+ * DeleteProxy deletes a proxy node (audited, Stage 5B).
  */
 export function DeleteProxy(id: string): $CancellablePromise<void> {
     return $Call.ByID(234411560, id);
@@ -95,6 +97,7 @@ export function ListProxies(): $CancellablePromise<$models.ProxyView[] | null> {
 /**
  * SetProxyEnabled toggles a proxy's enabled flag. It touches no
  * credential reference, so it needs no vault coordination.
+ * SetProxyEnabled enables or disables a proxy node (audited, Stage 5B).
  */
 export function SetProxyEnabled(id: string, enabled: boolean): $CancellablePromise<$models.ProxyView> {
     return $Call.ByID(80788180, id, enabled);
@@ -103,6 +106,7 @@ export function SetProxyEnabled(id: string, enabled: boolean): $CancellablePromi
 /**
  * TestProxy runs the TCP reachability test described on
  * TestProxyResult and records the outcome on the proxy row.
+ * TestProxy runs the reachability test for a node (audited, Stage 5B).
  */
 export function TestProxy(id: string): $CancellablePromise<$models.TestProxyResult> {
     return $Call.ByID(4284782473, id);
@@ -111,6 +115,7 @@ export function TestProxy(id: string): $CancellablePromise<$models.TestProxyResu
 /**
  * UpdateProxy validates and updates a proxy, applying the secret
  * semantics documented on UpdateProxyInput.
+ * UpdateProxy updates a proxy node (audited, Stage 5B).
  */
 export function UpdateProxy(input: $models.UpdateProxyInput): $CancellablePromise<$models.ProxyView> {
     return $Call.ByID(2869898086, input);

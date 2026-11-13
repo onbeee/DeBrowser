@@ -1,14 +1,15 @@
-// Package logging sets up DeBrowser's structured logger. Logs are written
-// as JSON to a file inside the configured logs directory and mirrored to
-// stderr for development. Log files never contain browser cookies,
-// credentials or proxy subscription URLs.
+// Package logging sets up DeBrowser's structured logging. Since
+// Stage 5B there are three categorized JSON Lines streams under
+// data/logs/ — run, operation and error — each with its own
+// retention and capacity policy (see system.go); run records are
+// mirrored to stderr for development. Log files never contain
+// browser cookies, credentials or proxy subscription URLs: audit
+// records are a fixed field whitelist by construction, and every
+// other record passes through a sanitizing guard handler.
 package logging
 
 import (
-	"fmt"
-	"io"
 	"log/slog"
-	"os"
 
 	"github.com/onbeee/DeBrowser/internal/config"
 )
@@ -28,17 +29,14 @@ func ParseLevel(value string) slog.Level {
 	}
 }
 
-// New creates a logger for the given configuration and returns it together
-// with a close function that flushes and closes the log file.
+// New creates the logging system for the given configuration and
+// returns its application logger together with a close function.
+// NewSystem is the fuller entry point (audit, statistics, export);
+// New is kept for callers that only need the logger.
 func New(cfg config.Config) (*slog.Logger, func() error, error) {
-	logPath := cfg.Layout.LogFile
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	sys, err := NewSystem(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("logging: open log file %q: %w", logPath, err)
+		return nil, nil, err
 	}
-
-	handler := slog.NewJSONHandler(io.MultiWriter(file, os.Stderr), &slog.HandlerOptions{
-		Level: ParseLevel(cfg.LogLevel),
-	})
-	return slog.New(handler), file.Close, nil
+	return sys.Logger(), sys.Close, nil
 }

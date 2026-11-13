@@ -6,6 +6,7 @@ import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import StatusBar from "./components/layout/StatusBar";
 import ConsolePanel from "./components/ConsolePanel";
+import DiagnosticsPage from "./pages/DiagnosticsPage";
 import InstancesPage from "./pages/InstancesPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
@@ -71,6 +72,8 @@ export default function App() {
             <InstancesPage />
           ) : page === "proxies" ? (
             <ProxiesPage />
+          ) : page === "diagnostics" ? (
+            <DiagnosticsPage />
           ) : (
             <PlannedPage page={page} />
           )}

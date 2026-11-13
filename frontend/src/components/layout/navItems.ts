@@ -1,4 +1,5 @@
 import {
+  Activity,
   AppWindow,
   Archive,
   Bookmark,
@@ -27,5 +28,6 @@ export const NAV_ITEMS: NavItem[] = [
   { key: "bookmarks", label: "书签", icon: Bookmark, stage: "阶段 5" },
   { key: "sync", label: "同步", icon: RefreshCw, stage: "阶段 6" },
   { key: "backup", label: "备份与恢复", icon: Archive, stage: "阶段 7" },
+  { key: "diagnostics", label: "诊断", icon: Activity, stage: "阶段 5B" },
   { key: "settings", label: "系统设置", icon: Settings, stage: "基础设置" },
 ];

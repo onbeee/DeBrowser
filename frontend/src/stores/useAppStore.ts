@@ -9,6 +9,7 @@ export type PageKey =
   | "bookmarks"
   | "sync"
   | "backup"
+  | "diagnostics"
   | "settings";
 
 export type Theme = "dark" | "light" | "warm";

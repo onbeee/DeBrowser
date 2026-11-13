@@ -39,7 +39,7 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 `main.go` is the entry point. Startup order is fixed:
 
 1. `internal/config` + `internal/paths` resolve the portable layout from the executable's directory (never the working directory), create all directories and probe that the application root is writable - a read-only location aborts startup with a clear error; there is no fallback to `%APPDATA%`. Startup is direct: a first launch creates and initializes the same directories and files an existing installation already has — there is no welcome or choice page.
-2. `internal/logging` opens the structured (JSON) log file under `data/logs`.
+2. `internal/logging` opens the categorized structured logs under `data/logs` (Stage 5B, see "Logging and diagnostics" below) — before the database and services, and it is closed last on shutdown.
 2b. `internal/singleinstance` takes the per-installation lock `data/app.lock` (Stage 3) as an operating-system file lock — `flock` on Unix, `LockFileEx` on Windows. The OS is the only arbiter: exactly one process can hold it, contenders never delete or recreate each other's lock file (no check-then-delete race), and the lock is released by the OS itself when the holder exits for any reason (clean exit, crash, force kill, power loss), so stale locks cannot exist. The file records the holder's PID for information only. A second launch of the same portable folder gets AlreadyRunning, writes an activation signal (`data/activate.request`) asking the running instance to focus its window, and exits without touching the database. Other portable folders use other lock files and are unaffected.
 3. There is no external data migration step: DeBrowser never scans, detects or imports data from `%APPDATA%`, `%LOCALAPPDATA%` or any other location. The Stage 1 Roaming auto-migration (`internal/migration`) was removed in Stage 5A; the only migrations that exist are the in-database SQLite schema migrations of step 4.
 4. `internal/database` opens SQLite (WAL mode, `synchronous=FULL`, foreign keys on) and applies pending migrations transactionally, taking a verified `VACUUM INTO` backup into `data\backups\` first when upgrading an existing database. Core data access goes through `internal/store` repositories over `internal/model` types (Stage 2).
@@ -83,6 +83,18 @@ All proxy credentials and subscription URLs live in one encrypted vault file, `d
 ## Instance readiness verification (Mihomo-integration constraint, recorded in 4A)
 
 A proxied instance is "ready" only when the Mihomo core itself confirms it through the external controller — a successful TCP connection to the listener port is NOT sufficient evidence, because any other process could be occupying that port. Readiness (Stage 7's `VerifyInstanceReady`, in the Mihomo integration stage) must establish, via the controller: (1) the running core is the expected version and healthy; (2) the instance's listener exists in the core's applied configuration; (3) its bind address, port and bound outbound match the intended assignment; (4) the applied configuration corresponds to the current database state. Any mismatch means not ready, and a not-ready proxied instance must fail closed (Stage 9, the browser-launch stage, must not launch it, and must never fall back to a direct connection).
+
+## Logging and diagnostics (Stage 5B, internal/logging)
+
+Three categorized JSON Lines streams live in `data/logs/`, each in dated files (`<category>-YYYY-MM-DD.log`, rolling to `.002`, `.003`, … volumes at 5 MB):
+
+- **run** — application lifecycle and runtime state (the existing `*slog.Logger`, through a sanitizing guard handler); retention 30 days, 20 MB total.
+- **operation** — the audit trail of user-initiated business mutations (instance/proxy create, update, delete, enable/disable, proxy test, theme change, diagnostic export). Records are a fixed field whitelist by construction (operation, target type/ID, result, duration, safe error class) — no request data, credentials or free-form user text can enter them; services attach the logging system through an exported `Auditor` field wired once in `main`.
+- **error** — error-level records, tee'd from the run stream by the same guard handler; retention 90 days, 50 MB total (operation logs: also 90 days / 50 MB).
+
+The guard handler drops credential-named attributes outright and scrubs error values (URL userinfo, key=value secrets, long token-like runs), so the safety does not depend on call sites remembering what not to log. Retention/capacity enforcement runs at startup, on roll-over and periodically; it only ever touches the category's own files, never the file currently being written, and a cleanup failure is recorded for diagnostics instead of failing startup.
+
+The diagnostics page (sidebar) shows the app version, database schema version, run status and per-category log statistics, and offers a one-click export (`DiagnosticsService`): a ZIP with `manifest.json` (per-file SHA-256, format version), `acceptance-record.json` (version/schema/platform/status/retention state) and the three log streams — nothing else. Every exported file passes a sensitivity scan first; a hit aborts the export. The destination is chosen through the native save dialog (wired in `internal/app`, keeping the service layer GUI-free), the archive is written to a temp file and renamed into place, and no absolute machine paths are recorded in the export metadata.
 
 ## Security notes
 
