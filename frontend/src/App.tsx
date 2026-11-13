@@ -9,6 +9,7 @@ import ConsolePanel from "./components/ConsolePanel";
 import InstancesPage from "./pages/InstancesPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
+import ProxiesPage from "./pages/ProxiesPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
 
@@ -68,6 +69,8 @@ export default function App() {
             <SettingsPage />
           ) : page === "instances" ? (
             <InstancesPage />
+          ) : page === "proxies" ? (
+            <ProxiesPage />
           ) : (
             <PlannedPage page={page} />
           )}
