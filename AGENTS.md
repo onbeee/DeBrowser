@@ -144,13 +144,17 @@ Stage 5: Bookmarks and kernel management.
 Stage 6: Multi-window synchronization.
 Stage 7: Backup, recovery, performance and release testing.
 
+> Historical note (2026-11-13): the seven lines above are the ORIGINAL stage plan recorded when this file was written (2026-11-10) and are kept as a historical record only — the project no longer follows these numbers (Stages 3 and 4, for example, were delivered with different scopes). The authoritative current roadmap, with the final stage numbering fixed by the product owner on 2026-11-13 (Stage 5A direct startup … Stage 12 full backup & restore, last), is `docs/ROADMAP.md`.
+
 Do not implement all stages in one change.
 
-Before each implementation:
-1. Inspect the existing repository.
-2. Understand current architecture.
-3. Identify affected files.
-4. Propose a small implementation plan.
+Working agreement (project-owner decision, 2026-11-13) — how implementation work is assigned and executed:
+
+1. 产品范围、架构设计、技术选型、实施方案和具体任务由项目负责人制定并提供。
+2. Muse 必须按照项目负责人提供的具体指令执行，不得自行提出替代产品方案、技术方案或重新设计任务范围。
+3. 执行前核对指定基线、当前分支、工作树和指令约束。
+4. 如果指令存在缺失、矛盾或无法执行的关键条件，停止相关操作并报告具体阻塞点，不得擅自补充设计或扩大范围。
+5. 执行后按指令完成测试、检查、提交和汇报。
 
 After implementation:
 1. Run relevant automated checks.

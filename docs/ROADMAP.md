@@ -2,23 +2,23 @@
 
 Development follows AGENTS.md section 9: small, testable stages, one Pull Request per stage, merged only after project-owner approval.
 
-Stage numbering was revised on 2026-11-13 after the product-requirements review: the former Stage 4B/4C work moved to Stages 6/7, the former Stage 5 split and moved later, and first-launch / backup / logging foundations were pulled forward as Stages 5A/5B/5C. Historical stage numbers 1–3 and 4A are unchanged.
+Stage numbering evolved during 2026-11-13 as the product definition was revised several times (delivered Stages 1–3 and 4A were never renumbered). The FINAL order, fixed by product-owner decision on 2026-11-13, is the table below: the first-launch welcome page was cancelled (Stage 5A is direct startup), and full backup & restore is the LAST functional stage (Stage 12), implemented only after every other data-producing feature exists. Earlier intermediate numberings mentioned in dated historical notes are superseded by this table.
 
 | Stage | Scope | Status |
 | --- | --- | --- |
 | 1 | Repository foundation and application shell | Delivered (PR #1, #2) |
 | 2 | SQLite database and migrations | Delivered (PR #3) |
 | 3 | App lifecycle and instance management foundation | Delivered (PR #4) |
-| 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Implemented in PR #5 (with the group/tag correction below); pending review and Windows 11 acceptance |
-| 5A | First launch: welcome page (import backup / new user), no automatic legacy-data migration | Planned |
-| 5B | Backup and restore (portable backup package, independent backup password) | Planned |
-| 5C | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Planned |
-| 6 | Subscription and full Mihomo config import (incl. native proxy-groups) | Planned |
+| 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Delivered (PR #5, merged 2026-11-13) |
+| 5A | Direct startup and portable data directory stability | Implemented in the Stage 5A pull request; pending project-owner review |
+| 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Planned |
+| 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Planned |
 | 7 | Mihomo core integration and run modes (Rule / Global / Direct) | Planned |
 | 8 | Rule management (airport / custom / mixed rule sources) | Planned |
 | 9 | Browser kernels, instance launch and per-instance proxy wiring; bookmarks | Planned |
 | 10 | Multi-window synchronization | Planned |
 | 11 | In-app update (after a code-signing / trusted-release solution) and release | Planned |
+| 12 | Full backup and restore (portable backup package, independent backup password) — final stage | Planned |
 
 ## Stage 1 — Repository foundation and application shell
 
@@ -52,19 +52,13 @@ Stage numbering was revised on 2026-11-13 after the product-requirements review:
 - `ProxyService` and the proxy management page: manual node CRUD, credential handling that never round-trips plaintext to the UI, TCP reachability test recorded per node
 - **Correction (2026-11-13)**: DeBrowser's own proxy groups and tags were removed again by migration 0005 (product decision — the feature is out of scope). This is unrelated to Mihomo's native `proxy-groups`, which are part of imported airport configurations and are kept for Stage 6.
 
-## Stage 5A — First launch and data initialisation
+## Stage 5A — Direct startup and stable data directory
 
-- Two-phase startup: before the user chooses, no business data directories, database or vault are created
-- Welcome page with exactly two choices: 导入数据 (restore a previously exported DeBrowser backup, verified before anything is written) or 新用户 (create a fresh portable data environment)
-- No scanning, detection or automatic migration of legacy data anywhere (removes `internal/migration` and the automatic Roaming migration)
+- Direct startup with automatic initialization: double-clicking `DeBrowser.exe` resolves the portable layout, creates any missing directories, opens (creating when needed) the SQLite database and applies pending schema migrations, opens the credential vault, loads settings and services, and opens the main window. There is NO first-launch welcome or choice page — no 「新用户 / 导入数据」 selection; backup import is not a startup feature (it belongs to the backup & restore stage, Stage 12)
+- The formal portable layout is unchanged (same `data/`, `config/`, `webview2-data/` paths); existing Stage 4A installations start exactly as before, with their data untouched, and replacing the executable never touches user data
+- No scanning, detection or automatic migration of legacy data anywhere (`internal/migration` and the automatic Roaming migration are removed); the SQLite schema migration mechanism is retained unchanged
 
-## Stage 5B — Backup and restore
-
-- User-created `.dbak` backup packages (manifest + per-file SHA-256), saveable outside the application folder
-- Independent backup password (PBKDF2-HMAC-SHA256 from the Go standard library + AES-256-GCM) so backups restore on other machines/users — DPAPI alone is not the cross-machine mechanism
-- Restore validates fully in a staging area before touching current data; a failed restore leaves current data untouched
-
-## Stage 5C — Logging and diagnostics
+## Stage 5B — Logging and diagnostics
 
 - Run / operation / error log separation with retention (30 / 90 / 90 days) and size caps
 - Operation audit for instance/proxy changes, subscription imports, mode and rule changes, backup/restore and updates; no secrets in logs
@@ -78,9 +72,9 @@ Stage numbering was revised on 2026-11-13 after the product-requirements review:
 
 ## Stage 7 — Mihomo core integration and run modes
 
-- Pinned, SHA-256-verified Mihomo core download/install; single core process with per-instance listeners on 127.0.0.1
+- Pinned, SHA-256-verified Mihomo core download/install and version management; single core process with per-instance listeners on 127.0.0.1
 - Render → `mihomo -t` validate → atomic swap → controller hot-reload; failures keep the previous working config
-- Core-level run modes Rule / Global / Direct; per-instance readiness verification (`VerifyInstanceReady`) and fail-closed behaviour
+- Core-level run modes Rule / Global / Direct; core process lifecycle management; per-instance readiness verification (`VerifyInstanceReady`) and fail-closed behaviour
 
 ## Stage 8 — Rule management
 
@@ -95,8 +89,18 @@ Stage numbering was revised on 2026-11-13 after the product-requirements review:
 
 ## Stage 10 — Multi-window synchronization
 
-- Synchronized actions across multiple running instances
+- Synchronized actions across multiple running instances, with an explicit synchronization scope, failure handling and instance-isolation boundaries
 
 ## Stage 11 — In-app update and release
 
 - In-app update via GitHub Releases only after a code-signing / trusted release-signing solution exists (until then, manual downloads from GitHub Releases); updates verify downloads, preserve all portable data directories, and roll back on failure
+
+## Stage 12 — Full backup and restore (final stage)
+
+Backup & restore is deliberately the last functional stage: it must cover the complete user-data system in its final form (subscriptions, proxy configurations, native proxy-groups, rules, instances, kernels, bookmarks, multi-window state, update state). Fixing a full backup format before those exist would force constant format extensions, so this stage starts with an inventory of everything the finished application persists.
+
+- User-created `.dbak` backup packages (manifest + per-file SHA-256), saveable outside the application folder; the backup format carries its OWN format version, independent of the application version, with compatibility/conversion for historical backup formats
+- Independent backup password (PBKDF2-HMAC-SHA256 from the Go standard library + AES-256-GCM) so backups restore across machines, Windows users and application versions — DPAPI alone is not the cross-machine mechanism
+- An explicit inventory decides what is backed up versus what is re-downloaded or rebuilt — never a blind copy of the whole program folder
+- Restore validates the complete backup in a staging area before any current data is replaced; a failed restore leaves current data untouched
+- Backup export, import and restore live here as a standalone feature — they are not part of the startup flow, and no backup/restore user feature is added in Stages 5A–11. (The pre-migration `VACUUM INTO` snapshots, integrity checks and vault mechanisms in the data layer are low-level safety facilities, not this feature.)

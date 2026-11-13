@@ -20,11 +20,6 @@ import (
 // EnvAppRoot overrides the executable directory (development/tests).
 const EnvAppRoot = "DEBROWSER_APP_ROOT"
 
-// LegacyDirName is the folder Stage 1 used under the OS config
-// directory (%APPDATA%\DeBrowser on Windows). It is kept only so the
-// migration can find the old data; new data never goes there.
-const LegacyDirName = "DeBrowser"
-
 // Config is the resolved startup configuration.
 type Config struct {
 	Layout   paths.Layout

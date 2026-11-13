@@ -20,7 +20,7 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 │  (instance / proxy / bookmark services in later stages)│
 ├────────────────────────────────────────────────────────┤
 │ Foundation (internal/)                                 │
-│  paths · config · settings · migration · logging       │
+│  paths · config · settings · logging                   │
 │  database (SQLite + migrations + backups) · version    │
 │  model · store (repositories, Stage 2)                 │
 │  version                                               │
@@ -29,8 +29,8 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 │  <root>\data\debrowser.db (portable layout)      │
 │  <root>\data\profiles\<instance-id>\  (Stage 3)│
 │  <root>\webview2-data\  (app window WebView2 data)    │
-│  Chromium processes over CDP                  (Stage 3)│
-│  Mihomo proxy engine                          (Stage 4)│
+│  Chromium processes over CDP                  (Stage 9)│
+│  Mihomo proxy engine                          (Stage 7)│
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -38,10 +38,10 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 
 `main.go` is the entry point. Startup order is fixed:
 
-1. `internal/config` + `internal/paths` resolve the portable layout from the executable's directory (never the working directory), create all directories and probe that the application root is writable - a read-only location aborts startup with a clear error; there is no fallback to `%APPDATA%`.
+1. `internal/config` + `internal/paths` resolve the portable layout from the executable's directory (never the working directory), create all directories and probe that the application root is writable - a read-only location aborts startup with a clear error; there is no fallback to `%APPDATA%`. Startup is direct: a first launch creates and initializes the same directories and files an existing installation already has — there is no welcome or choice page.
 2. `internal/logging` opens the structured (JSON) log file under `data/logs`.
 2b. `internal/singleinstance` takes the per-installation lock `data/app.lock` (Stage 3) as an operating-system file lock — `flock` on Unix, `LockFileEx` on Windows. The OS is the only arbiter: exactly one process can hold it, contenders never delete or recreate each other's lock file (no check-then-delete race), and the lock is released by the OS itself when the holder exits for any reason (clean exit, crash, force kill, power loss), so stale locks cannot exist. The file records the holder's PID for information only. A second launch of the same portable folder gets AlreadyRunning, writes an activation signal (`data/activate.request`) asking the running instance to focus its window, and exits without touching the database. Other portable folders use other lock files and are unaffected.
-3. `internal/migration` performs the one-time, idempotent migration of Stage 1 roaming data (`%AppData%\DeBrowser`): the database is snapshotted with `VACUUM INTO` from a read-only connection (WAL-consistent) and verified; auxiliary files are copied with hash verification; existing files are never overwritten, the legacy folder is kept as a backup, and a failure aborts startup instead of creating an empty replacement database. Legacy WebView2 data is never migrated - the portable build re-initializes it under `<root>\webview2-data`.
+3. There is no external data migration step: DeBrowser never scans, detects or imports data from `%APPDATA%`, `%LOCALAPPDATA%` or any other location. The Stage 1 Roaming auto-migration (`internal/migration`) was removed in Stage 5A; the only migrations that exist are the in-database SQLite schema migrations of step 4.
 4. `internal/database` opens SQLite (WAL mode, `synchronous=FULL`, foreign keys on) and applies pending migrations transactionally, taking a verified `VACUUM INTO` backup into `data\backups\` first when upgrading an existing database. Core data access goes through `internal/store` repositories over `internal/model` types (Stage 2).
 5. `internal/service` constructs the Wails services (including persisted user settings from `config/settings.json`, managed by `internal/settings`).
 6. `internal/app` assembles the Wails application (services, main window with `Windows.WebviewUserDataPath` set to the portable WebView2 directory) and `main` runs it. Background loops (10s status events, 500ms activation watcher) run under an application context via `internal/lifecycle`; shutdown cancels the context and `App.Run` waits for the loops to drain before returning — the wait is unbounded by design (a warning is logged every 5s), because cancelling a context cannot interrupt a callback already running, and returning early would let `main` close the database underneath a live reader. Only once every loop has provably exited does `main` close the database, release the instance lock and close the log — in that order. `main` is a thin wrapper over `run() error`; nothing calls `log.Fatalf` mid-startup, so deferred cleanup always runs.
@@ -63,9 +63,11 @@ Ownership rules from AGENTS.md: Go owns browser process management, instance lif
 - `src/stores/` — Zustand store for UI state (current page, console visibility, backend status, session console lines).
 - Styling is Tailwind CSS v4 through the `@tailwindcss/vite` plugin (`src/index.css`).
 
-## Browser isolation (from Stage 3)
+## Browser isolation (foundations in Stage 3, runtime in Stage 9)
 
-Every browser instance will have a unique ID, an independent user data directory under `profiles/`, an independent configuration, its own managed Chromium process and an optional independent proxy. A user data directory is never shared between running instances, and a live profile is never copied while Chromium is using it. DeBrowser does not claim fingerprint isolation unless it is explicitly implemented and tested.
+Stage 3 delivered the foundations only: instance metadata management, the independent profile directory layout under `profiles/` (one directory per instance ID), and the profile-deletion safety mechanism described above. Stage 3 does NOT implement Chromium process management or actually launching a browser — there is no process manager yet.
+
+Stage 9 adds the runtime: browser kernel management, managed Chromium processes, instance start/stop, CDP wiring, independent browser configuration and runtime isolation. In that final form, every browser instance has a unique ID, an independent user data directory under `profiles/`, an independent configuration, its own managed Chromium process and an optional independent proxy. A user data directory is never shared between running instances, and a live profile is never copied while Chromium is using it. DeBrowser does not claim fingerprint isolation unless it is explicitly implemented and tested.
 
 ## Credential storage (Stage 4A, internal/secrets)
 
@@ -80,11 +82,11 @@ All proxy credentials and subscription URLs live in one encrypted vault file, `d
 
 ## Instance readiness verification (Mihomo-integration constraint, recorded in 4A)
 
-A proxied instance is "ready" only when the Mihomo core itself confirms it through the external controller — a successful TCP connection to the listener port is NOT sufficient evidence, because any other process could be occupying that port. Readiness (the Mihomo integration stage's `VerifyInstanceReady`) must establish, via the controller: (1) the running core is the expected version and healthy; (2) the instance's listener exists in the core's applied configuration; (3) its bind address, port and bound outbound match the intended assignment; (4) the applied configuration corresponds to the current database state. Any mismatch means not ready, and a not-ready proxied instance must fail closed (the browser-launch stage must not launch it, and must never fall back to a direct connection).
+A proxied instance is "ready" only when the Mihomo core itself confirms it through the external controller — a successful TCP connection to the listener port is NOT sufficient evidence, because any other process could be occupying that port. Readiness (Stage 7's `VerifyInstanceReady`, in the Mihomo integration stage) must establish, via the controller: (1) the running core is the expected version and healthy; (2) the instance's listener exists in the core's applied configuration; (3) its bind address, port and bound outbound match the intended assignment; (4) the applied configuration corresponds to the current database state. Any mismatch means not ready, and a not-ready proxied instance must fail closed (Stage 9, the browser-launch stage, must not launch it, and must never fall back to a direct connection).
 
 ## Security notes
 
-- CDP debugging ports are never exposed publicly; they bind to localhost only (Stage 3).
+- CDP debugging ports are never exposed publicly; they bind to localhost only (Stage 9).
 - The frontend cannot execute arbitrary commands; it can only call the explicitly registered service methods.
 - Secrets (credentials, subscription URLs, private proxy configuration) are never stored in SQLite in plain committed files and never enter this repository — see `docs/DATABASE.md` and `.gitignore`.
 

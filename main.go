@@ -1,15 +1,19 @@
 // Command debrowser starts the DeBrowser desktop application.
 //
 // DeBrowser is portable-first: every persistent file lives under the
-// directory that contains the executable (see internal/paths). Startup
-// order: resolve configuration and directories, set up logging, take
-// the single-instance lock, migrate any Stage 1 roaming data, open
-// and migrate the SQLite database, load settings and services, then
-// run the Wails application. Shutdown is the mirror image: the app
-// drains its background loops, then the database, the instance lock
-// and the log are closed in that order. Any failure before the window
-// opens aborts startup with a clear error — the app never falls back
-// to writing data into %APPDATA% or %LOCALAPPDATA%.
+// directory that contains the executable (see internal/paths).
+// Startup is direct: resolve the configuration and create the
+// portable directories (first launch creates and initializes them),
+// set up logging, take the single-instance lock, open and migrate
+// the SQLite database, open the credential vault, load settings and
+// services, then run the Wails application. There is no first-launch
+// choice and no scanning or migration of data from any external
+// location — the Stage 1 Roaming auto-migration was removed in
+// Stage 5A. Shutdown is the mirror image: the app drains its
+// background loops, then the database, the instance lock and the log
+// are closed in that order. Any failure before the window opens
+// aborts startup with a clear error — the app never falls back to
+// writing data into %APPDATA% or %LOCALAPPDATA%.
 //
 // main is a thin wrapper over run: run returns errors instead of
 // calling log.Fatalf, so every deferred cleanup always executes.
@@ -21,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -30,7 +33,6 @@ import (
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
-	"github.com/onbeee/DeBrowser/internal/migration"
 	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/service"
 	"github.com/onbeee/DeBrowser/internal/singleinstance"
@@ -91,31 +93,6 @@ func run() error {
 			logger.Warn("release instance lock failed", "error", rerr)
 		}
 	}()
-
-	// One-time migration of Stage 1 roaming data. Runs before the
-	// database is opened; a failure aborts startup so the user never
-	// sees a silently created empty database while their real data
-	// still sits in the legacy location.
-	legacyRoot, err := migration.DefaultLegacyRoot()
-	if err != nil {
-		logger.Error("legacy data detection failed", "error", err)
-		return err
-	}
-	if filepath.Clean(legacyRoot) != filepath.Clean(cfg.Layout.Root) {
-		report, err := migration.Run(cfg.Layout, legacyRoot)
-		if err != nil {
-			logger.Error("legacy data migration failed", "error", err)
-			return fmt.Errorf("legacy data migration failed: %w", err)
-		}
-		if report.Needed {
-			logger.Info("legacy data migrated",
-				"databaseCopied", report.DatabaseCopied,
-				"filesCopied", report.FilesCopied,
-				"filesSkipped", report.FilesSkipped,
-				"legacyRoot", report.LegacyRoot,
-			)
-		}
-	}
 
 	db, err := database.OpenWithOptions(cfg.Layout.DatabaseFile, database.Options{
 		BackupDir: cfg.Layout.Backups,

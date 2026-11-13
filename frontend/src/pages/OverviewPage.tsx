@@ -18,8 +18,10 @@ export default function OverviewPage() {
       <div>
         <h2 className="text-xl font-semibold">基础架构运行中</h2>
         <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-(--text-dim)">
-          当前版本提供应用基础架构：便携式目录、结构化日志、SQLite
-          基础设施，以及界面与 Go 后端之间的实时连接。业务模块（浏览器实例、代理、内核、书签）将在后续阶段交付，这里不展示任何占位数据。
+          当前版本已交付：应用基础架构与便携式目录、SQLite 数据层、实例元数据管理与 profile
+          管理基础（Stage 3）、代理数据管理与凭据 Vault（Stage 4A），以及结构化日志与应用状态实时连接。后续阶段将交付
+          Mihomo 核心集成（Stage 7），以及浏览器内核管理、实例实际启动与停止、CDP
+          接线、代理接线与书签（Stage 9）；尚未交付的功能这里不展示任何占位数据。
         </p>
       </div>
 
@@ -90,8 +92,10 @@ export default function OverviewPage() {
             前端位于 <code className="text-(--text-main)">frontend/</code>
           </li>
           <li>便携式目录架构：全部数据跟随可执行文件所在目录，不写入 %APPDATA%</li>
-          <li>配置与目录统一管理、结构化 JSON 日志、旧版 Roaming 数据安全迁移</li>
-          <li>带迁移机制的 SQLite 基础设施（业务表按阶段交付）</li>
+          <li>配置与目录统一管理、结构化 JSON 日志</li>
+          <li>带迁移机制的 SQLite 数据层（实例、代理、订阅、书签等业务表）</li>
+          <li>实例元数据管理与 profile 管理基础（Stage 3）</li>
+          <li>代理数据管理、凭据 Vault、ProxyService 与代理管理界面（Stage 4A）</li>
           <li>
             类型化的 Wails 绑定与 <code className="text-(--text-main)">app:status</code> 事件通道
           </li>

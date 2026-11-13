@@ -3,7 +3,7 @@
 ## Engine
 
 - SQLite, accessed through the pure-Go driver `modernc.org/sqlite` (no CGO required, which keeps Windows x64 builds simple).
-- The database file is `debrowser.db` inside the portable data directory (`<application root>\data\debrowser.db`; the root follows the executable — see `internal/paths`). Stage 1 databases left in `%AppData%\DeBrowser` are migrated automatically on first launch (see ARCHITECTURE.md).
+- The database file is `debrowser.db` inside the portable data directory (`<application root>\data\debrowser.db`; the root follows the executable — see `internal/paths`). It is created by the normal startup when missing (first launch) and opened as-is afterwards; no data is ever imported automatically from `%AppData%` or any other external location (see ARCHITECTURE.md).
 - The path always comes from `internal/paths`; no code outside that package constructs storage locations, and there is no AppData fallback.
 
 ## Open-time pragmas
@@ -104,10 +104,10 @@ Schema changes are the riskiest moment for a local database, so upgrades protect
 - The backup uses **`VACUUM INTO`**, which produces a transactionally consistent snapshot including data that still lives in the WAL. Copying the `.db` file directly is never used — it would silently miss uncheckpointed transactions.
 - The snapshot is verified with `PRAGMA integrity_check` before migration proceeds. **If the backup fails, the migration is aborted** with an explicit error; the existing database is left untouched.
 - A brand-new database (nothing applied yet) skips the backup — there is nothing to protect.
-- `DB.BackupNow` exposes the same verified snapshot mechanism for manual backups (used by Stage 7's full backup/restore feature).
-- The Stage 1.5 roaming→portable data migration (`internal/migration`) is a separate, file-level one-time migration that runs before the database is opened; it is unchanged and composes with this mechanism (a migrated Stage 1 database arrives at schema v1 and is then backed up and upgraded by the normal path).
+- `DB.BackupNow` exposes the same verified snapshot mechanism for manual backups (a low-level safety facility; the full user backup/restore feature is Stage 12 work).
+- The external Stage 1 Roaming data migration that once ran before the database was opened was removed in Stage 5A (no automatic legacy-data migration exists); this in-database schema migration mechanism is unaffected and remains the long-term compatibility path.
 
-Full backup/restore UX ships in Stage 7.
+Full backup/restore UX ships in Stage 12.
 
 ## Stage 3 note
 

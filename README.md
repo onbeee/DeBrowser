@@ -4,7 +4,7 @@ A lightweight, local-first desktop application for managing multiple isolated br
 
 DeBrowser is built for **Windows 11 x64**. Each browser instance gets its own user data directory, configuration, process and optional proxy — profiles are never shared between running instances.
 
-> **Status: Stage 1 — project foundation.** The repository currently contains the runnable application shell (Go backend, React frontend, SQLite foundation, CI). Business features (browser instances, proxies, kernels, bookmarks, synchronization, backup) are delivered in later stages; see [docs/ROADMAP.md](docs/ROADMAP.md). No placeholder data stands in for those features.
+> **Status: Stages 1–4A delivered; Stage 5A in review (PR #6).** The repository contains the application shell, the SQLite data layer, instance management foundations and the proxy data foundation (credential vault, ProxyService, proxy UI). Remaining business features (Mihomo integration, kernels, instance launch, bookmarks, synchronization, backup & restore) are delivered in later stages; see [docs/ROADMAP.md](docs/ROADMAP.md). No placeholder data stands in for those features.
 
 ## Tech stack
 
@@ -18,8 +18,8 @@ DeBrowser is built for **Windows 11 x64**. Each browser instance gets its own us
 | Icons | lucide-react | 0.469.0 |
 | State management | Zustand | 5.1.0 |
 | Database | SQLite via modernc.org/sqlite | 1.62.0 |
-| Proxy engine | Mihomo | arrives in Stage 4 |
-| Browser control | Chrome DevTools Protocol | arrives in Stage 3 |
+| Proxy engine | Mihomo | arrives in Stage 7 |
+| Browser control | Chrome DevTools Protocol | arrives in Stage 9 |
 
 All dependency versions are pinned (Go: `go.mod`/`go.sum`, frontend: `package.json`/`package-lock.json`). Read [AGENTS.md](AGENTS.md) before contributing — it defines the project's engineering rules.
 
@@ -55,7 +55,7 @@ DeBrowser is portable-first and local-first. Everything lives next to the execut
   config\          settings.json (language, theme)
 ```
 
-Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch, Stage 1 data found in the legacy `%AppData%\DeBrowser` location is migrated safely (copy + verify, legacy folder kept as a backup; WebView2 data is re-initialized, never mixed with business data). The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
+Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch the app directly creates its portable data directory and initializes the database and credential vault automatically — no setup choices are required, and no data is scanned, detected or migrated from `%AppData%` or any other location. The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
 
 ## License
 
