@@ -81,6 +81,20 @@ import (
 // silently treated as "no credential configured".
 var ErrNotFound = errors.New("secrets: reference not found")
 
+// ErrCorruptVault marks a vault FILE whose bytes were read
+// successfully but are not a usable vault: invalid JSON or an
+// unsupported format version. It is deliberately distinct from
+// file-access failures (permission denied, I/O errors), which
+// readVaultFile returns unwrapped: content corruption may enter
+// the recovery protocol, while an access failure is an
+// environmental problem that must fail Open closed — never
+// quarantine, never restore over, never start empty. Classify
+// with errors.Is; never match on error strings.
+var ErrCorruptVault = errors.New("secrets: vault file content is corrupt")
+
+func isMissingErr(err error) bool { return errors.Is(err, os.ErrNotExist) }
+func isCorruptErr(err error) bool { return errors.Is(err, ErrCorruptVault) }
+
 // ErrCorrupt reports that one entry exists but cannot be decrypted
 // (wrong Windows user/machine for DPAPI, or damaged ciphertext).
 // Corruption is per-entry: every other entry stays usable.
@@ -204,52 +218,100 @@ func openWithProtector(path string, prot Protector) (*Store, Recovery, error) {
 
 	cleanStaleTemps(path)
 
-	main, mainErr := readVaultFile(path)
+	// Recovery decisions are driven by the ERROR CLASS of each
+	// file, never by "any error means corrupt":
+	//
+	//   - missing (os.ErrNotExist): the file simply is not there.
+	//   - corrupt (ErrCorruptVault): bytes were read but are not
+	//     a usable vault — recovery and quarantine may apply.
+	//   - access failure (anything else: permission denied, I/O
+	//     errors, other OS errors): environmental, NOT data
+	//     corruption. Open fails closed and touches nothing —
+	//     no quarantine, no restore over the file, no empty
+	//     start — because the data may be perfectly intact.
+	bakPath := path + ".bak"
+	quarantine := func(p string) {
+		if _, err := os.Stat(p); err == nil {
+			q := fmt.Sprintf("%s.corrupt-%d", p, time.Now().Unix())
+			if err := os.Rename(p, q); err == nil {
+				rec.Quarantined = append(rec.Quarantined, q)
+			}
+		}
+	}
+	restoreFromBackup := func(bak map[string]entry) error {
+		s.entries = bak
+		rec.RecoveredFromBackup = true
+		// Restore the backup as the main file so the next
+		// mutation starts from a healthy base.
+		if err := s.persistLocked(s.entries); err != nil {
+			return fmt.Errorf("secrets: restore backup vault: %w", err)
+		}
+		return nil
+	}
+
+	main, mainErr := readVaultFn(path)
 	switch {
 	case mainErr == nil:
 		s.entries = main
-	default:
-		// Main file missing or corrupt: try the backup snapshot.
-		bakPath := path + ".bak"
-		bak, bakErr := readVaultFile(bakPath)
-		if bakErr == nil {
-			s.entries = bak
-			rec.RecoveredFromBackup = true
-			// Preserve an unreadable main file under a quarantine
-			// name BEFORE restoring: routine persistence refuses
-			// to overwrite a vault it cannot read, and corrupt
-			// bytes are never silently discarded. With the main
-			// file moved aside, the restore below starts from the
-			// "no main file" case. (A merely missing main file
-			// needs no rename.)
-			if _, err := os.Stat(path); err == nil {
-				q := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
-				if err := os.Rename(path, q); err == nil {
-					rec.Quarantined = append(rec.Quarantined, q)
-				}
-			}
-			// Restore the backup as the main file so the next
-			// mutation starts from a healthy base.
-			if err := s.persistLocked(s.entries); err != nil {
-				return nil, rec, fmt.Errorf("secrets: restore backup vault: %w", err)
-			}
-		} else if errors.Is(mainErr, os.ErrNotExist) && errors.Is(bakErr, os.ErrNotExist) {
-			// Fresh vault: nothing on disk yet. Not an error.
-		} else {
-			// Both unreadable for a reason other than "never
-			// existed": quarantine the corrupt files (rename, never
-			// delete) and start empty; every database reference
-			// will resolve to ErrNotFound and be flagged.
-			for _, p := range []string{path, bakPath} {
-				if _, err := os.Stat(p); err == nil {
-					q := fmt.Sprintf("%s.corrupt-%d", p, time.Now().Unix())
-					if err := os.Rename(p, q); err == nil {
-						rec.Quarantined = append(rec.Quarantined, q)
-					}
-				}
-			}
-			rec.Unrecoverable = true
+		// A present backup must at least be READABLE: an access
+		// failure on it fails Open closed even though the main
+		// file is healthy, because a silently unreadable backup
+		// would defeat recovery exactly when it is needed. A
+		// missing backup is normal (before the second write);
+		// a corrupt one is not fatal here — the healthy main is
+		// authoritative and the next persist replaces the
+		// snapshot.
+		if _, berr := readVaultFn(bakPath); berr != nil && !isMissingErr(berr) && !isCorruptErr(berr) {
+			return nil, rec, fmt.Errorf("secrets: read vault backup: %w", berr)
 		}
+	case isMissingErr(mainErr):
+		bak, bakErr := readVaultFn(bakPath)
+		switch {
+		case bakErr == nil:
+			if err := restoreFromBackup(bak); err != nil {
+				return nil, rec, err
+			}
+		case isMissingErr(bakErr):
+			// Fresh vault: nothing on disk yet. Not an error.
+		case isCorruptErr(bakErr):
+			// The only copy is provably corrupt content:
+			// quarantine it and start empty, references flagged.
+			quarantine(bakPath)
+			rec.Unrecoverable = true
+		default:
+			return nil, rec, fmt.Errorf("secrets: read vault backup: %w", bakErr)
+		}
+	case isCorruptErr(mainErr):
+		bak, bakErr := readVaultFn(bakPath)
+		switch {
+		case bakErr == nil:
+			// Only now — backup confirmed valid — may the
+			// corrupt main be quarantined and restored over.
+			quarantine(path)
+			if err := restoreFromBackup(bak); err != nil {
+				return nil, rec, err
+			}
+		case isMissingErr(bakErr):
+			quarantine(path)
+			rec.Unrecoverable = true
+		case isCorruptErr(bakErr):
+			// Both files provably corrupt: quarantine both
+			// (rename, never delete) and start empty; every
+			// database reference resolves to ErrNotFound and
+			// is flagged credential-unavailable.
+			quarantine(path)
+			quarantine(bakPath)
+			rec.Unrecoverable = true
+		default:
+			// Backup unreadable for an environmental reason:
+			// recovery cannot be trusted, so nothing is
+			// quarantined or overwritten.
+			return nil, rec, fmt.Errorf("secrets: read vault backup: %w", bakErr)
+		}
+	default:
+		// Main file exists but could not be read (permission
+		// denied, I/O error, ...). Fail closed.
+		return nil, rec, fmt.Errorf("secrets: read vault: %w", mainErr)
 	}
 
 	// Permission discipline: an existing vault file must be
@@ -629,14 +691,17 @@ func verifyWrittenVault(path string, want map[string]entry) error {
 func readVaultFile(path string) (map[string]entry, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		// File-access failure (missing, permission, I/O):
+		// returned unwrapped so callers can classify it with
+		// errors.Is against os.ErrNotExist / fs.ErrPermission.
 		return nil, err
 	}
 	var vf vaultFile
 	if err := json.Unmarshal(raw, &vf); err != nil {
-		return nil, fmt.Errorf("secrets: parse vault: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrCorruptVault, err)
 	}
 	if vf.Version != vaultVersion {
-		return nil, fmt.Errorf("secrets: unsupported vault version %d", vf.Version)
+		return nil, fmt.Errorf("%w: unsupported vault version %d", ErrCorruptVault, vf.Version)
 	}
 	if vf.Entries == nil {
 		vf.Entries = map[string]entry{}
