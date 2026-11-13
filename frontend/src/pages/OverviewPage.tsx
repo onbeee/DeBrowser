@@ -90,7 +90,7 @@ export default function OverviewPage() {
             前端位于 <code className="text-(--text-main)">frontend/</code>
           </li>
           <li>便携式目录架构：全部数据跟随可执行文件所在目录，不写入 %APPDATA%</li>
-          <li>配置与目录统一管理、结构化 JSON 日志、旧版 Roaming 数据安全迁移</li>
+          <li>配置与目录统一管理、结构化 JSON 日志、首次启动引导（新用户初始化）</li>
           <li>带迁移机制的 SQLite 基础设施（业务表按阶段交付）</li>
           <li>
             类型化的 Wails 绑定与 <code className="text-(--text-main)">app:status</code> 事件通道

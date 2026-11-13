@@ -9,8 +9,8 @@ Stage numbering was revised on 2026-11-13 after the product-requirements review:
 | 1 | Repository foundation and application shell | Delivered (PR #1, #2) |
 | 2 | SQLite database and migrations | Delivered (PR #3) |
 | 3 | App lifecycle and instance management foundation | Delivered (PR #4) |
-| 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Implemented in PR #5 (with the group/tag correction below); pending review and Windows 11 acceptance |
-| 5A | First launch: welcome page (import backup / new user), no automatic legacy-data migration | Planned |
+| 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Delivered (PR #5, merged 2026-11-13) |
+| 5A | First launch: welcome page (import backup / new user), no automatic legacy-data migration | Implemented in the Stage 5A pull request; pending project-owner review and Windows 11 acceptance |
 | 5B | Backup and restore (portable backup package, independent backup password) | Planned |
 | 5C | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Planned |
 | 6 | Subscription and full Mihomo config import (incl. native proxy-groups) | Planned |
@@ -54,9 +54,12 @@ Stage numbering was revised on 2026-11-13 after the product-requirements review:
 
 ## Stage 5A — First launch and data initialisation
 
-- Two-phase startup: before the user chooses, no business data directories, database or vault are created
-- Welcome page with exactly two choices: 导入数据 (restore a previously exported DeBrowser backup, verified before anything is written) or 新用户 (create a fresh portable data environment)
-- No scanning, detection or automatic migration of legacy data anywhere (removes `internal/migration` and the automatic Roaming migration)
+- Two-phase startup: before the user chooses, no business data directories, database or vault are created; the welcome window's WebView2 data, log and single-instance coordination files live in a per-installation workspace under the OS temp directory and are removed when it exits
+- Welcome page with exactly two choices: 新用户 (initialize a fresh portable data environment) or 导入数据 (in this stage only a notice that backup import arrives in Stage 5B — no file picker, nothing created)
+- New-user initialization under an explicit marker protocol (`data/install.json`, data-layout version 1, versioned separately from the application version): `initializing` marker → directories → database + schema migrations → vault → default settings → integrity/structure verification → `complete` marker, then the app restarts into the normal startup. Any failure closes what was opened and removes exactly what the run created (back to exe-only); an interrupted initialization is detected by its marker at the next launch and cleaned up before the welcome page is shown again
+- Single-instance protection kept in both modes: the formal `data/app.lock` for the initialized app, the temp-workspace lock for the welcome window
+- The formal portable layout is unchanged (same `data/`, `config/`, `webview2-data/` paths); installations created before 5A are recognized by their formal database and record the marker on their next successful startup
+- No scanning, detection or automatic migration of legacy data anywhere (`internal/migration` and the automatic Roaming migration are removed)
 
 ## Stage 5B — Backup and restore
 

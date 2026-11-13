@@ -92,8 +92,8 @@ func OpenWithOptions(path string, opts Options) (*DB, error) {
 
 // FileURI builds a SQLite file URI for path with the path
 // percent-encoded. It is the single URI constructor for every SQLite
-// open in the application (the database package itself and the legacy
-// data migration), so path encoding can never drift between callers. Concatenating "file:" + path directly would let
+// open in the application, so path encoding can never drift between
+// callers. Concatenating "file:" + path directly would let
 // URI-special characters in a directory name corrupt the target: a
 // '#' would start a fragment and silently open a different (truncated)
 // file, a '?' would start a query, and a '%' would be misread as an

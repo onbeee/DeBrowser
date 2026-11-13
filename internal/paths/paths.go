@@ -47,6 +47,11 @@ type Layout struct {
 	// proxy credential and subscription URL lives there, encrypted;
 	// SQLite holds only opaque references to its entries.
 	SecretsFile string // <root>/data/secrets.vault
+	// InstallFile is the lightweight initialization marker written by
+	// the Stage 5A first-launch flow (see internal/installstate): it
+	// records the initialization state and the data-layout version,
+	// which is versioned separately from the application version.
+	InstallFile string // <root>/data/install.json
 }
 
 // Resolve builds the portable layout for an application root directory.
@@ -78,6 +83,7 @@ func Resolve(root string) (Layout, error) {
 		InstanceLock:   filepath.Join(data, "app.lock"),
 		ActivationFile: filepath.Join(data, "activate.request"),
 		SecretsFile:    filepath.Join(data, "secrets.vault"),
+		InstallFile:    filepath.Join(data, "install.json"),
 	}, nil
 }
 
