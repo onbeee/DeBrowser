@@ -27,7 +27,7 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 
 ## Schema (current state)
 
-Current state, as landed by Stage 2 (migrations 0001-0003, all applied at startup): the tables `app_settings`, `proxies`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 5 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
+Current state (migrations 0001-0004, all applied at startup): the tables `app_settings`, `proxies`, `proxy_groups`, `proxy_tags`, `subscriptions`, `browser_instances` and `bookmarks` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 5 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 
@@ -35,7 +35,21 @@ IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('
 
 Proxy nodes. `protocol` is constrained to `http, https, socks5, vmess, vless, trojan, shadowsocks, hysteria2, tuic, wireguard, direct`; `port` must be 0-65535 when present; `enabled` is 0/1.
 
-**Credential policy**: passwords, keys and tokens are never stored in this table (or in logs). Non-secret connection parameters may live in `config_json`; `secret_ref` is only an opaque reference to a future secure credential store — the mechanism is decided in Stage 4.
+**Credential policy**: passwords, keys and tokens are never stored in this table (or in logs). Non-secret connection parameters may live in `config_json`; `secret_ref` is an opaque reference into the credential vault (`internal/secrets`, Stage 4A).
+
+Stage 4A (migration 0004) adds: `group_id` (FK → `proxy_groups`, `ON DELETE SET NULL`), `sort_order`, `source` (`manual` / `file_import` / `subscription`), `subscription_id` (FK → `subscriptions`, `ON DELETE CASCADE`), `dedup_key` (import fingerprint; partial UNIQUE index `WHERE dedup_key <> ''`, so empty keys never collide), and the connection-test record `last_latency_ms` / `last_test_ok` / `last_tested_at`.
+
+### `proxy_groups`
+
+Named proxy groups (`name` UNIQUE, `sort_order`). Deleting a group ungroups its proxies and subscriptions (`ON DELETE SET NULL`), never deletes them.
+
+### `proxy_tags`
+
+Tag associations `(proxy_id, tag)` with a composite primary key; `proxy_id` FK `ON DELETE CASCADE`. Tag filtering is index-backed (index on `tag`) rather than a JSON column.
+
+### `subscriptions`
+
+Subscription metadata for Stage 4B. The **full subscription URL is never stored here** — it may carry credentials and lives exclusively in the vault under `secret_ref`; this table keeps only `url_hint` (scheme+host), the target `group_id`, the fetch policy (`allow_lan` default 0, `auto_update_minutes` default 0 = off) and a sanitised refresh record (`last_updated_at`, `last_status`, `last_error` — status class only, never a URL).
 
 ### `browser_instances`
 
@@ -47,6 +61,7 @@ One row per browser instance (isolated Chromium profile).
 | `kernel_id`, `kernel_name`, `kernel_version` | Kernel identity recorded as data. The `kernels` table and its foreign key arrive in Stage 5. |
 | `user_data_dir` | UNIQUE. Profile path **relative** to the portable data directory (e.g. `profiles\<id>`), so the whole application folder stays movable. Profile contents are browser data and are never stored in SQLite. |
 | `proxy_id` | FK → `proxies(id)`, `ON DELETE SET NULL`: deleting a proxy detaches instances instead of breaking them. |
+| `proxy_listen_port` | Stage 4A (migration 0004): the instance's Mihomo listener port, allocated in Stage 4C from the `app_settings` range `proxy.port_range` (default `19000-19499`). Unique via a unique index (SQLite cannot add a UNIQUE column by ALTER); NULL ports never collide. |
 | `status` | `stopped` / `running` / `error` (CHECK). The persisted lifecycle record; live runtime state is owned by the Stage 3 instance manager. |
 | `start_url`, `sort_order` | Optional start page; display ordering. |
 
@@ -58,7 +73,7 @@ Indexes: `proxy_id`, `status`.
 
 ### `app_settings`
 
-Application-level key/value settings (Stage 1, migration 0001). The user-facing `config/settings.json` file (language/theme) is separate and unrelated.
+Application-level key/value settings (Stage 1, migration 0001), accessed through the repository's `GetSetting`/`SetSetting`/`DeleteSetting`. One reviewed key: `proxy.port_range` (for example `19000-19499`), the instance listener range consumed in Stage 4C; an unset or malformed value falls back to the default in code. The user-facing `config/settings.json` file (language/theme) is separate and unrelated.
 
 ## Rules (AGENTS.md section 5)
 
@@ -80,6 +95,7 @@ Application-level key/value settings (Stage 1, migration 0001). The user-facing 
 | 1 | `0001_foundation.sql` | `app_settings` |
 | 2 | `0002_proxies_and_instances.sql` | `proxies`, `browser_instances` (+ indexes) |
 | 3 | `0003_bookmarks.sql` | `bookmarks` (+ scoped-URL unique index) |
+| 4 | `0004_proxy_foundation.sql` | `proxy_groups`, `proxy_tags`, `subscriptions`; `proxies` group/source/dedup/test columns; `browser_instances.proxy_listen_port` |
 
 ## Backup before migration
 
