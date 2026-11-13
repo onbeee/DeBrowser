@@ -161,8 +161,8 @@ func RestrictFile(path string) error {
 //
 //   - the DACL control has SE_DACL_PROTECTED set (inheritance from
 //     the parent directory is severed — this is THE invariant);
-//   - exactly three ACEs, all ACCESS_ALLOWED, each granting
-//     FILE_ALL_ACCESS;
+//   - exactly three ACEs, all ACCESS_ALLOWED with zero AceFlags,
+//     each granting FILE_ALL_ACCESS;
 //   - the three trustees are precisely Local SYSTEM, the local
 //     Administrators group and the current user (compared as
 //     numeric SID strings, never SDDL aliases).
@@ -234,6 +234,17 @@ func VerifyFileRestrictions(path string) error {
 		aceType := *(*byte)(acePtr)
 		if aceType != accessAllowedAceType {
 			return fmt.Errorf("secrets: ACE %d has type %d, expected ACCESS_ALLOWED", i, aceType)
+		}
+		// AceFlags must be exactly zero. Every flag changes the
+		// ACE's meaning: INHERIT_ONLY would make it not apply to
+		// the file itself, INHERITED_ACE would mark it as coming
+		// from a parent (impossible in a protected DACL we set),
+		// and OBJECT/CONTAINER inherit bits have no meaning for a
+		// file and are never set by RestrictFile. Any flag is
+		// therefore an anomaly, not a presentation difference.
+		aceFlags := *(*byte)(unsafe.Add(acePtr, 1))
+		if aceFlags != 0 {
+			return fmt.Errorf("secrets: ACE %d has unexpected flags %#x, expected 0", i, aceFlags)
 		}
 		mask := *(*uint32)(unsafe.Add(acePtr, 4))
 		if mask != fileAllAccess {
