@@ -40,6 +40,7 @@ export function GetStatus(): $CancellablePromise<$models.Status> {
  * "warm") and returns the full settings. The change is stored in
  * <root>/config/settings.json so it survives restarts and travels
  * with the portable folder.
+ * SaveTheme persists a new appearance theme (audited, Stage 5B).
  */
 export function SaveTheme(theme: string): $CancellablePromise<settings$0.Settings> {
     return $Call.ByID(577347262, theme);

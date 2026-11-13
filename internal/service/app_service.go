@@ -14,6 +14,7 @@ import (
 
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/settings"
 	"github.com/onbeee/DeBrowser/internal/version"
 )
@@ -45,6 +46,8 @@ type AppService struct {
 	db        *database.DB
 	log       *slog.Logger
 	startedAt time.Time
+	// auditor, when set, receives operation-audit records (Stage 5B).
+	Auditor *logging.System
 
 	mu       sync.Mutex
 	settings settings.Settings
@@ -104,7 +107,15 @@ func (s *AppService) GetSettings() settings.Settings {
 // "warm") and returns the full settings. The change is stored in
 // <root>/config/settings.json so it survives restarts and travels
 // with the portable folder.
+// SaveTheme persists a new appearance theme (audited, Stage 5B).
 func (s *AppService) SaveTheme(theme string) (settings.Settings, error) {
+	start := time.Now()
+	out, err := s.saveTheme(theme)
+	auditOp(s.Auditor, "settings.update_theme", "settings", "", start, err)
+	return out, err
+}
+
+func (s *AppService) saveTheme(theme string) (settings.Settings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := s.settings

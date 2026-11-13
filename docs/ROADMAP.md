@@ -11,7 +11,7 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 | 3 | App lifecycle and instance management foundation | Delivered (PR #4) |
 | 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Delivered (PR #5, merged 2026-11-13) |
 | 5A | Direct startup and portable data directory stability | Implemented in the Stage 5A pull request; pending project-owner review |
-| 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Planned |
+| 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Implemented in the Stage 5B pull request; pending project-owner review |
 | 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Planned |
 | 7 | Mihomo core integration and run modes (Rule / Global / Direct) | Planned |
 | 8 | Rule management (airport / custom / mixed rule sources) | Planned |
@@ -58,7 +58,7 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 - The formal portable layout is unchanged (same `data/`, `config/`, `webview2-data/` paths); existing Stage 4A installations start exactly as before, with their data untouched, and replacing the executable never touches user data
 - No scanning, detection or automatic migration of legacy data anywhere (`internal/migration` and the automatic Roaming migration are removed); the SQLite schema migration mechanism is retained unchanged
 
-## Stage 5B — Logging and diagnostics
+## Stage 5B — Logging and diagnostics (implemented in the Stage 5B pull request, pending review)
 
 - Run / operation / error log separation with retention (30 / 90 / 90 days) and size caps
 - Operation audit for instance/proxy changes, subscription imports, mode and rule changes, backup/restore and updates; no secrets in logs

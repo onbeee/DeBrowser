@@ -3,6 +3,7 @@ package logging
 import (
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/onbeee/DeBrowser/internal/config"
@@ -42,7 +43,26 @@ func TestNewWritesToLogFile(t *testing.T) {
 	if err := closeFn(); err != nil {
 		t.Fatalf("close() error = %v", err)
 	}
-	if _, err := os.Stat(layout.LogFile); err != nil {
-		t.Fatalf("expected log file at %s: %v", layout.LogFile, err)
+	// Stage 5B: run records live in the dated run-category file
+	// inside the logs directory.
+	entries, err := os.ReadDir(layout.Logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range entries {
+		if len(e.Name()) > 4 && e.Name()[:4] == "run-" {
+			found = true
+			data, err := os.ReadFile(layout.Logs + "/" + e.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "test message") {
+				t.Fatalf("run log %s does not contain the test message", e.Name())
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no run-* log file in %s", layout.Logs)
 	}
 }
