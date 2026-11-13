@@ -842,17 +842,53 @@ func validateProxyFields(name, protocol, address string, port *int, configJSON s
 	if cfg == "" {
 		cfg = "{}"
 	}
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(cfg), &obj); err != nil {
+	// The config must be a JSON OBJECT: arrays, strings, numbers,
+	// booleans and null are all rejected. (Decoding into a map
+	// directly would silently accept "null", so decode into any
+	// and assert the shape.)
+	var decoded any
+	if err := json.Unmarshal([]byte(cfg), &decoded); err != nil {
 		return out, fmt.Errorf("高级配置必须是有效的 JSON 对象")
 	}
-	for key := range obj {
-		if secretConfigKeys[strings.ToLower(key)] {
-			return out, fmt.Errorf("高级配置不能包含凭据字段 %q，请使用凭据输入框", key)
-		}
+	obj, ok := decoded.(map[string]any)
+	if !ok {
+		return out, fmt.Errorf("高级配置必须是有效的 JSON 对象")
+	}
+	// Credential fields are rejected ANYWHERE in the value tree:
+	// a nested {"auth":{"password":…}} or an array element
+	// {"servers":[{"uuid":…}]} would otherwise smuggle plaintext
+	// credentials into SQLite, bypassing the vault.
+	if key, found := findSecretConfigKey(obj); found {
+		return out, fmt.Errorf("高级配置不能包含凭据字段 %q（包括嵌套对象与数组中的字段），请使用凭据输入框", key)
 	}
 	out.configJSON = cfg
 	return out, nil
+}
+
+// findSecretConfigKey walks a decoded JSON value tree and returns
+// the first object key — at any depth, inside nested objects and
+// array elements alike — that names a credential field. Key
+// comparison is case-insensitive, matching how the top-level check
+// has always behaved.
+func findSecretConfigKey(value any) (string, bool) {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			if secretConfigKeys[strings.ToLower(key)] {
+				return key, true
+			}
+			if found, ok := findSecretConfigKey(child); ok {
+				return found, true
+			}
+		}
+	case []any:
+		for _, child := range node {
+			if found, ok := findSecretConfigKey(child); ok {
+				return found, true
+			}
+		}
+	}
+	return "", false
 }
 
 // normalizeTags trims, deduplicates and bounds a tag list.
