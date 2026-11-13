@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Eye,
-  FolderCog,
   Gauge,
   Pencil,
   Plus,
@@ -12,11 +11,9 @@ import {
 } from "lucide-react";
 import { ProxyService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type {
-  ProxyGroupView,
   ProxyPortRange,
   ProxyView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
-import type { TagCount } from "../../bindings/github.com/onbeee/DeBrowser/internal/store";
 import { useAppStore } from "../stores/useAppStore";
 
 const PROTOCOLS = [
@@ -76,9 +73,7 @@ interface ProxyForm {
   protocol: string;
   address: string;
   port: string;
-  groupId: string;
   sortOrder: string;
-  tagsText: string;
   enabled: boolean;
   hasSecrets: boolean;
   secretFields: string[];
@@ -94,9 +89,7 @@ const EMPTY_FORM: ProxyForm = {
   protocol: "socks5",
   address: "",
   port: "",
-  groupId: "",
   sortOrder: "0",
-  tagsText: "",
   enabled: true,
   hasSecrets: false,
   secretFields: [],
@@ -136,9 +129,7 @@ function formFromProxy(p: ProxyView): ProxyForm {
     protocol: p.protocol,
     address: p.address,
     port: p.port != null ? String(p.port) : "",
-    groupId: p.groupId ?? "",
     sortOrder: String(p.sortOrder),
-    tagsText: (p.tags ?? []).join("，"),
     enabled: p.enabled,
     hasSecrets: p.hasSecrets,
     secretFields: p.secretFields ?? [],
@@ -151,42 +142,33 @@ function formFromProxy(p: ProxyView): ProxyForm {
 }
 
 /**
- * 代理管理（Stage 4A 基础能力）：代理节点的增删改查、分组与标签
- * 管理、连接测试与延迟状态。凭据只在表单提交瞬间以明文经
+ * 代理管理（Stage 4A 基础能力）：代理节点的增删改查、
+ * 连接测试与延迟状态。凭据只在表单提交瞬间以明文经
  * bindings 直达后端凭据库：页面不回显、不持久化任何凭据明文。
  * 订阅导入与 Mihomo 核心管理属于后续阶段，本页不提供入口。
  */
 export default function ProxiesPage() {
   const log = useAppStore((state) => state.log);
   const [proxies, setProxies] = useState<ProxyView[]>([]);
-  const [groups, setGroups] = useState<ProxyGroupView[]>([]);
-  const [tags, setTags] = useState<TagCount[]>([]);
   const [portRange, setPortRange] = useState<ProxyPortRange | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [groupFilter, setGroupFilter] = useState("");
-  const [tagFilter, setTagFilter] = useState("");
   const [form, setForm] = useState<ProxyForm | null>(null);
   const [detail, setDetail] = useState<ProxyView | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProxyView | null>(null);
-  const [manageOpen, setManageOpen] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [list, groupList, tagList, range] = await Promise.all([
+      const [list, range] = await Promise.all([
         ProxyService.ListProxies(),
-        ProxyService.ListGroups(),
-        ProxyService.ListTags(),
         ProxyService.GetProxyPortRange(),
       ]);
       setProxies(list ?? []);
-      setGroups(groupList ?? []);
-      setTags(tagList ?? []);
       setPortRange(range);
       setError(null);
     } catch (err) {
@@ -205,9 +187,6 @@ export default function ProxiesPage() {
   const visible = useMemo(() => {
     const kw = search.trim().toLowerCase();
     return proxies.filter((p) => {
-      if (groupFilter === "none" && p.groupId) return false;
-      if (groupFilter && groupFilter !== "none" && p.groupId !== groupFilter) return false;
-      if (tagFilter && !(p.tags ?? []).includes(tagFilter)) return false;
       if (
         kw &&
         !`${p.name} ${p.protocol} ${p.address}`.toLowerCase().includes(kw)
@@ -215,7 +194,7 @@ export default function ProxiesPage() {
         return false;
       return true;
     });
-  }, [proxies, search, groupFilter, tagFilter]);
+  }, [proxies, search]);
 
   const submitForm = async () => {
     if (!form) return;
@@ -246,19 +225,13 @@ export default function ProxiesPage() {
         if (v) secrets[field.key] = v;
       }
       const portNum = form.port.trim() === "" ? null : Number(form.port);
-      const tagList = form.tagsText
-        .split(/[,，、\s]+/)
-        .map((t) => t.trim())
-        .filter(Boolean);
       const base = {
         name: form.name,
         protocol: form.protocol,
         address: form.address,
         port: portNum,
         configJson: JSON.stringify(restObj),
-        groupId: form.groupId === "" ? null : form.groupId,
         sortOrder: Number(form.sortOrder) || 0,
-        tags: tagList,
         secrets: Object.keys(secrets).length > 0 ? secrets : null,
       };
       if (form.id) {
@@ -372,15 +345,12 @@ export default function ProxiesPage() {
         <div>
           <h2 className="text-lg font-semibold">代理管理</h2>
           <p className="mt-0.5 text-sm text-(--text-dim)">
-            管理代理节点、分组与标签。凭据保存在本地凭据库中，页面不回显明文。
+            管理代理节点。凭据保存在本地凭据库中，页面不回显明文。
           </p>
         </div>
         <div className="flex gap-2">
           <button type="button" onClick={() => void load()} className={btnCls}>
             <RefreshCw size={14} /> 刷新
-          </button>
-          <button type="button" onClick={() => setManageOpen(true)} className={btnCls}>
-            <FolderCog size={14} /> 分组与标签
           </button>
           <button
             type="button"
@@ -411,31 +381,6 @@ export default function ProxiesPage() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="搜索名称、协议或地址"
         />
-        <select
-          className="rounded-md border border-(--border) bg-(--panel-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none"
-          value={groupFilter}
-          onChange={(e) => setGroupFilter(e.target.value)}
-        >
-          <option value="">全部分组</option>
-          <option value="none">未分组</option>
-          {groups.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name}
-            </option>
-          ))}
-        </select>
-        <select
-          className="rounded-md border border-(--border) bg-(--panel-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none"
-          value={tagFilter}
-          onChange={(e) => setTagFilter(e.target.value)}
-        >
-          <option value="">全部标签</option>
-          {tags.map((t) => (
-            <option key={t.tag} value={t.tag}>
-              {t.tag}（{t.count}）
-            </option>
-          ))}
-        </select>
         <span className="text-xs text-(--text-faint)">
           连接测试为 TCP 连通性测试；经 Mihomo 核心的协议级测速将在核心集成阶段提供。
           {portRange && ` 实例监听端口范围：${portRange.start}–${portRange.end}。`}
@@ -462,8 +407,6 @@ export default function ProxiesPage() {
                 <th className="px-4 py-2.5 font-medium">名称</th>
                 <th className="px-4 py-2.5 font-medium">协议</th>
                 <th className="px-4 py-2.5 font-medium">地址</th>
-                <th className="px-4 py-2.5 font-medium">分组</th>
-                <th className="px-4 py-2.5 font-medium">标签</th>
                 <th className="px-4 py-2.5 font-medium">来源</th>
                 <th className="px-4 py-2.5 font-medium">延迟</th>
                 <th className="px-4 py-2.5 font-medium">凭据</th>
@@ -480,19 +423,6 @@ export default function ProxiesPage() {
                   </td>
                   <td className="px-4 py-2.5 font-mono text-xs text-(--text-dim)">
                     {p.protocol === "direct" ? "—" : `${p.address}${p.port != null ? `:${p.port}` : ""}`}
-                  </td>
-                  <td className="px-4 py-2.5 text-(--text-dim)">{p.groupName || "未分组"}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex flex-wrap gap-1">
-                      {(p.tags ?? []).map((t) => (
-                        <span
-                          key={t}
-                          className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)"
-                        >
-                          {t}
-                        </span>
-                      ))}
-                    </div>
                   </td>
                   <td className="px-4 py-2.5 text-(--text-dim)">{SOURCE_LABEL[p.source] ?? p.source}</td>
                   <td className="px-4 py-2.5">{latencyCell(p)}</td>
@@ -557,7 +487,6 @@ export default function ProxiesPage() {
       {form && (
         <ProxyFormModal
           form={form}
-          groups={groups}
           busy={busy}
           inputCls={inputCls}
           labelCls={labelCls}
@@ -578,8 +507,6 @@ export default function ProxiesPage() {
                 label="地址"
                 value={detail.protocol === "direct" ? "—" : `${detail.address}${detail.port != null ? `:${detail.port}` : ""}`}
               />
-              <DetailRow label="分组" value={detail.groupName || "未分组"} />
-              <DetailRow label="标签" value={(detail.tags ?? []).join("、") || "无"} />
               <DetailRow label="来源" value={SOURCE_LABEL[detail.source] ?? detail.source} />
               <DetailRow label="状态" value={detail.enabled ? "已启用" : "已停用"} />
               <DetailRow
@@ -645,7 +572,7 @@ export default function ProxiesPage() {
           <div className="w-full max-w-md rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
             <h3 className="text-base font-semibold">删除代理「{pendingDelete.name}」</h3>
             <p className="mt-2 text-sm leading-relaxed text-(--text-dim)">
-              将删除该代理节点及其标签关联；引用它的浏览器实例将变为未绑定代理。
+              将删除该代理节点；引用它的浏览器实例将变为未绑定代理。
               {pendingDelete.hasSecrets &&
                 "该节点的凭据将在确认没有其他记录引用后从凭据库中清理。"}
               此操作不可恢复。
@@ -671,17 +598,6 @@ export default function ProxiesPage() {
         </div>
       )}
 
-      {manageOpen && (
-        <ManageModal
-          groups={groups}
-          tags={tags}
-          inputCls={inputCls}
-          onClose={() => setManageOpen(false)}
-          onChanged={() => void load()}
-          log={log}
-          setError={setError}
-        />
-      )}
     </div>
   );
 }
@@ -697,7 +613,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 function ProxyFormModal({
   form,
-  groups,
   busy,
   inputCls,
   labelCls,
@@ -706,7 +621,6 @@ function ProxyFormModal({
   onSubmit,
 }: {
   form: ProxyForm;
-  groups: ProxyGroupView[];
   busy: boolean;
   inputCls: string;
   labelCls: string;
@@ -753,36 +667,19 @@ function ProxyFormModal({
               placeholder="例如：香港节点 01"
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>协议</label>
-              <select
-                className={inputCls}
-                value={form.protocol}
-                onChange={(e) => changeProtocol(e.target.value)}
-              >
-                {PROTOCOLS.map((p) => (
-                  <option key={p} value={p}>
-                    {p === "direct" ? "直连" : p}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>分组</label>
-              <select
-                className={inputCls}
-                value={form.groupId}
-                onChange={(e) => set({ groupId: e.target.value })}
-              >
-                <option value="">未分组</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div>
+            <label className={labelCls}>协议</label>
+            <select
+              className={inputCls}
+              value={form.protocol}
+              onChange={(e) => changeProtocol(e.target.value)}
+            >
+              {PROTOCOLS.map((p) => (
+                <option key={p} value={p}>
+                  {p === "direct" ? "直连" : p}
+                </option>
+              ))}
+            </select>
           </div>
           {!isDirect && (
             <div className="grid grid-cols-3 gap-3">
@@ -862,15 +759,6 @@ function ProxyFormModal({
               )}
             </fieldset>
           )}
-          <div>
-            <label className={labelCls}>标签（用逗号分隔）</label>
-            <input
-              className={inputCls}
-              value={form.tagsText}
-              onChange={(e) => set({ tagsText: e.target.value })}
-              placeholder="例如：高速，香港"
-            />
-          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelCls}>排序（数字小者靠前）</label>
@@ -924,219 +812,6 @@ function ProxyFormModal({
             className="rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
           >
             保存
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ManageModal({
-  groups,
-  tags,
-  inputCls,
-  onClose,
-  onChanged,
-  log,
-  setError,
-}: {
-  groups: ProxyGroupView[];
-  tags: TagCount[];
-  inputCls: string;
-  onClose: () => void;
-  onChanged: () => void;
-  log: (level: "info" | "error", message: string) => void;
-  setError: (e: string | null) => void;
-}) {
-  const [newGroup, setNewGroup] = useState("");
-  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
-  const [renamingTag, setRenamingTag] = useState<{ old: string; name: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const act = async (fn: () => Promise<void>, okMessage: string) => {
-    setBusy(true);
-    try {
-      await fn();
-      log("info", okMessage);
-      onChanged();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      log("error", message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
-      <div className="max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
-        <h3 className="text-base font-semibold">分组与标签管理</h3>
-
-        <h4 className="mt-4 text-sm font-medium">分组</h4>
-        <div className="mt-2 flex gap-2">
-          <input
-            className={inputCls}
-            value={newGroup}
-            onChange={(e) => setNewGroup(e.target.value)}
-            placeholder="新分组名称"
-          />
-          <button
-            type="button"
-            disabled={busy || newGroup.trim() === ""}
-            onClick={() =>
-              void act(async () => {
-                await ProxyService.CreateGroup({ name: newGroup, sortOrder: 0 });
-                setNewGroup("");
-              }, `分组已创建：${newGroup}`)
-            }
-            className="shrink-0 rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
-          >
-            新建分组
-          </button>
-        </div>
-        <ul className="mt-2 divide-y divide-(--border) rounded-lg border border-(--border)">
-          {groups.length === 0 && (
-            <li className="px-3 py-2.5 text-sm text-(--text-faint)">暂无分组</li>
-          )}
-          {groups.map((g) => (
-            <li key={g.id} className="flex items-center gap-2 px-3 py-2 text-sm">
-              {renaming?.id === g.id ? (
-                <>
-                  <input
-                    className={inputCls}
-                    value={renaming.name}
-                    onChange={(e) => setRenaming({ id: g.id, name: e.target.value })}
-                  />
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        await ProxyService.UpdateGroup({
-                          id: g.id,
-                          name: renaming.name,
-                          sortOrder: g.sortOrder,
-                        });
-                        setRenaming(null);
-                      }, `分组已重命名：${renaming.name}`)
-                    }
-                    className="shrink-0 text-(--accent)"
-                  >
-                    保存
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRenaming(null)}
-                    className="shrink-0 text-(--text-dim)"
-                  >
-                    取消
-                  </button>
-                </>
-              ) : (
-                <>
-                  <span className="flex-1">
-                    {g.name}
-                    <span className="ml-2 text-xs text-(--text-faint)">{g.proxyCount} 个代理</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setRenaming({ id: g.id, name: g.name })}
-                    className="text-(--text-dim) hover:text-(--text-main)"
-                  >
-                    <Pencil size={13} />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        await ProxyService.DeleteGroup(g.id);
-                      }, `分组已删除：${g.name}（组内代理变为未分组）`)
-                    }
-                    className="text-(--text-dim) hover:text-(--danger)"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
-
-        <h4 className="mt-5 text-sm font-medium">标签</h4>
-        <ul className="mt-2 divide-y divide-(--border) rounded-lg border border-(--border)">
-          {tags.length === 0 && (
-            <li className="px-3 py-2.5 text-sm text-(--text-faint)">暂无标签</li>
-          )}
-          {tags.map((t) => (
-            <li key={t.tag} className="flex items-center gap-2 px-3 py-2 text-sm">
-              {renamingTag?.old === t.tag ? (
-                <>
-                  <input
-                    className={inputCls}
-                    value={renamingTag.name}
-                    onChange={(e) => setRenamingTag({ old: t.tag, name: e.target.value })}
-                  />
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        await ProxyService.RenameTag(t.tag, renamingTag.name);
-                        setRenamingTag(null);
-                      }, `标签已重命名：${renamingTag.name}`)
-                    }
-                    className="shrink-0 text-(--accent)"
-                  >
-                    保存
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRenamingTag(null)}
-                    className="shrink-0 text-(--text-dim)"
-                  >
-                    取消
-                  </button>
-                </>
-              ) : (
-                <>
-                  <span className="flex-1">
-                    {t.tag}
-                    <span className="ml-2 text-xs text-(--text-faint)">{t.count} 个代理</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setRenamingTag({ old: t.tag, name: t.tag })}
-                    className="text-(--text-dim) hover:text-(--text-main)"
-                  >
-                    <Pencil size={13} />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        await ProxyService.DeleteTag(t.tag);
-                      }, `标签已删除：${t.tag}`)
-                    }
-                    className="text-(--text-dim) hover:text-(--danger)"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
-
-        <div className="mt-5 flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
-          >
-            完成
           </button>
         </div>
       </div>
