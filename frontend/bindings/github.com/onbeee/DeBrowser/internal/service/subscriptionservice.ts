@@ -19,6 +19,18 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * AddCustomGroupMember attaches one custom node to one native
+ * group of one config. All legitimacy checks and the write run
+ * in one transaction under the shared service mutex: the config
+ * and the group must exist, the node must exist and be a custom
+ * node (source = 'custom'), and the node must not already be a
+ * member of that group.
+ */
+export function AddCustomGroupMember(configID: string, groupName: string, proxyID: string): $CancellablePromise<void> {
+    return $Call.ByID(1097928495, configID, groupName, proxyID);
+}
+
+/**
  * CreateSubscription validates the URL, stores it in the vault
  * FIRST, and only then writes the metadata row; a failed insert
  * is compensated by deleting the pending vault entry.
@@ -71,6 +83,35 @@ export function ListConfigs(): $CancellablePromise<$models.MihomoConfigView[] | 
 }
 
 /**
+ * ListCustomCandidates returns the custom nodes that can still
+ * be added to the given group: every source='custom' node except
+ * the ones already attached to it.
+ */
+export function ListCustomCandidates(configID: string, groupName: string): $CancellablePromise<$models.ProxyView[] | null> {
+    return $Call.ByID(2353574679, configID, groupName);
+}
+
+/**
+ * ListCustomMemberships returns every group attachment of one
+ * node across all configs, marking attachments whose group has
+ * meanwhile disappeared from the config's document.
+ */
+export function ListCustomMemberships(proxyID: string): $CancellablePromise<$models.CustomMembershipView[] | null> {
+    return $Call.ByID(2333422570, proxyID);
+}
+
+/**
+ * ListOrphanedCustomMembers returns, per group name, the overlay
+ * members of one config whose group no longer exists in the
+ * config's current document — kept, not silently deleted, so the
+ * user can review and remove them (and they reappear if the
+ * group returns in a later refresh).
+ */
+export function ListOrphanedCustomMembers(configID: string): $CancellablePromise<$models.OrphanedCustomGroupView[] | null> {
+    return $Call.ByID(2754134505, configID);
+}
+
+/**
  * ListSubscriptions returns every subscription in display form.
  */
 export function ListSubscriptions(): $CancellablePromise<$models.SubscriptionView[] | null> {
@@ -91,6 +132,15 @@ export function RefreshDueSubscriptions(): $CancellablePromise<void> {
  */
 export function RefreshSubscription(id: string): $CancellablePromise<$models.ImportSummary> {
     return $Call.ByID(878555772, id);
+}
+
+/**
+ * RemoveCustomGroupMember detaches one user-added member. The
+ * node itself, its credentials and the imported members are
+ * never touched.
+ */
+export function RemoveCustomGroupMember(configID: string, groupName: string, proxyID: string): $CancellablePromise<void> {
+    return $Call.ByID(1112251858, configID, groupName, proxyID);
 }
 
 /**

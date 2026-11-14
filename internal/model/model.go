@@ -115,6 +115,24 @@ type MihomoProxyGroup struct {
 	UpdatedAt   string                   `json:"updatedAt"`
 }
 
+// CustomGroupMember is a user-added membership overlay row
+// (Stage 6C): the user attached one of their custom nodes
+// (proxies.source = 'custom') to a native proxy-group of an
+// imported config. The group is addressed by NAME because a
+// subscription refresh deletes and recreates the group rows; the
+// overlay is keyed by (config, group name, proxy) so it survives
+// refreshes, and it is kept strictly separate from the imported
+// members in mihomo_proxy_group_members. It never modifies the
+// imported document.
+type CustomGroupMember struct {
+	ConfigID  string `json:"configId"`
+	GroupName string `json:"groupName"`
+	ProxyID   string `json:"proxyId"`
+	SortOrder int    `json:"sortOrder"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
 // MihomoProxyGroupMember is one member of a native proxy-group, in
 // document order. Exactly one target is set, per Kind: ProxyID for
 // "proxy", TargetGroupID for "group", neither for "builtin".

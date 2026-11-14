@@ -83,6 +83,26 @@ func openV6Database(t *testing.T, path string) *DB {
 	return db
 }
 
+// applyUptoVersion applies only the migrations up to version n,
+// so a stage test can pin its own upgrade step even after later
+// migrations land.
+func applyUptoVersion(t *testing.T, db *DB, n int) {
+	t.Helper()
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	var upto []migration
+	for _, m := range migs {
+		if m.version <= n {
+			upto = append(upto, m)
+		}
+	}
+	if err := db.applyMigrations(context.Background(), upto); err != nil {
+		t.Fatalf("apply up to v%d: %v", n, err)
+	}
+}
+
 // TestUpgradeFromV6ToV7SourceVocabulary: migration 0007 renames
 // the proxy source vocabulary (manual -> custom,
 // file_import -> file) while preserving every row, ID, vault
@@ -97,9 +117,7 @@ func TestUpgradeFromV6ToV7SourceVocabulary(t *testing.T) {
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 6 {
 		t.Fatalf("pre-upgrade AppliedVersion = %d (err %v), want 6", v, err)
 	}
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate (v6 -> v7): %v", err)
-	}
+	applyUptoVersion(t, db, 7)
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 7 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 7", v, err)
 	}
@@ -202,9 +220,7 @@ func TestFreshDatabaseReachesV7(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	applyUptoVersion(t, db, 7)
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 7 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 7", v, err)
 	}

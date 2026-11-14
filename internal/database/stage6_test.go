@@ -73,7 +73,7 @@ func TestUpgradeFromV5ToV6PreservesData(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate (v5 -> v6): %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 7 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 8 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 6", v, err)
 	}
 
@@ -148,13 +148,13 @@ func TestFreshDatabaseReachesV6(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 7 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 8 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 6", v, err)
 	}
 	var n int
 	if err := db.SQL().QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'mihomo%'`).Scan(&n); err != nil || n != 3 {
-		t.Fatalf("mihomo tables = %d (err %v), want 3", n, err)
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'mihomo%'`).Scan(&n); err != nil || n != 4 {
+		t.Fatalf("mihomo tables = %d (err %v), want 4 (3 from Stage 6 + the Stage 6C custom-member overlay)", n, err)
 	}
 	assertFKAndIntegrity(t, db)
 }

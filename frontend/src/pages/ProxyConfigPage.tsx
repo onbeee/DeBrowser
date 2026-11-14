@@ -16,9 +16,11 @@ import {
 import {
   ProxyService,
   SubscriptionService,
+  type CustomMembershipView,
   type GroupMemberView,
   type ImportSummary,
   type MihomoConfigView,
+  type OrphanedCustomGroupView,
   type ProxyGroupView,
   type ProxyPortRange,
   type ProxyView,
@@ -225,6 +227,11 @@ export default function ProxyConfigPage() {
   // 选中配置的原生代理组。
   const [groups, setGroups] = useState<ProxyGroupView[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
+  const [orphans, setOrphans] = useState<OrphanedCustomGroupView[]>([]);
+  const [pickerGroup, setPickerGroup] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<ProxyView[]>([]);
+  const [detailMemberships, setDetailMemberships] = useState<CustomMembershipView[]>([]);
+  const [deleteMembershipCount, setDeleteMembershipCount] = useState(0);
 
   // 自定义节点表单/详情/删除/测试。
   const [search, setSearch] = useState("");
@@ -273,22 +280,33 @@ export default function ProxyConfigPage() {
         ? selectedFile
         : undefined;
 
-  // 选中带配置的来源时加载其原生代理组。
+  // 选中带配置的来源时加载其原生代理组（含用户添加成员与失效组）。
+  const reloadGroups = useCallback(
+    async (configID: string) => {
+      const [g, o] = await Promise.all([
+        SubscriptionService.GetConfigGroups(configID),
+        SubscriptionService.ListOrphanedCustomMembers(configID),
+      ]);
+      setGroups(g ?? []);
+      setOrphans(o ?? []);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!selectedConfig) {
       setGroups([]);
+      setOrphans([]);
       return;
     }
     let alive = true;
     setGroupsLoading(true);
-    SubscriptionService.GetConfigGroups(selectedConfig.id)
-      .then((g) => {
-        if (alive) setGroups(g ?? []);
-      })
+    reloadGroups(selectedConfig.id)
       .catch((err: unknown) => {
         if (alive) {
           setError(err instanceof Error ? err.message : String(err));
           setGroups([]);
+          setOrphans([]);
         }
       })
       .finally(() => {
@@ -297,7 +315,79 @@ export default function ProxyConfigPage() {
     return () => {
       alive = false;
     };
-  }, [selectedConfig]);
+  }, [selectedConfig, reloadGroups]);
+
+  const openPicker = useCallback(
+    async (groupName: string) => {
+      if (!selectedConfig) return;
+      setPickerGroup(groupName);
+      try {
+        setCandidates((await SubscriptionService.ListCustomCandidates(selectedConfig.id, groupName)) ?? []);
+      } catch {
+        setCandidates([]);
+      }
+    },
+    [selectedConfig],
+  );
+
+  const addToGroup = async (proxyID: string) => {
+    if (!selectedConfig || !pickerGroup) return;
+    try {
+      await SubscriptionService.AddCustomGroupMember(selectedConfig.id, pickerGroup, proxyID);
+      setPickerGroup(null);
+      await reloadGroups(selectedConfig.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const removeFromGroup = async (groupName: string, proxyID: string) => {
+    if (!selectedConfig) return;
+    try {
+      await SubscriptionService.RemoveCustomGroupMember(selectedConfig.id, groupName, proxyID);
+      await reloadGroups(selectedConfig.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // 节点详情（自定义节点）加载其代理组成员关系。
+  useEffect(() => {
+    if (!detail || detail.source !== "custom") {
+      setDetailMemberships([]);
+      return;
+    }
+    let alive = true;
+    SubscriptionService.ListCustomMemberships(detail.id)
+      .then((m) => {
+        if (alive) setDetailMemberships(m ?? []);
+      })
+      .catch(() => {
+        if (alive) setDetailMemberships([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [detail]);
+
+  // 删除自定义节点前统计其成员关系数量，用于确认提示。
+  useEffect(() => {
+    if (!pendingDeleteProxy) {
+      setDeleteMembershipCount(0);
+      return;
+    }
+    let alive = true;
+    SubscriptionService.ListCustomMemberships(pendingDeleteProxy.id)
+      .then((m) => {
+        if (alive) setDeleteMembershipCount((m ?? []).length);
+      })
+      .catch(() => {
+        if (alive) setDeleteMembershipCount(0);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [pendingDeleteProxy]);
 
   const visibleNodes = useMemo(() => {
     let list: ProxyView[];
@@ -936,12 +1026,38 @@ export default function ProxyConfigPage() {
                   <div className="space-y-2">
                     {groups.map((g) => (
                       <div key={g.id} className="rounded-md bg-(--app-bg) px-3 py-2">
-                        <p className="text-xs font-medium">
-                          {g.name} <span className="text-(--text-faint)">（{g.type}）</span>
-                        </p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-medium">
+                            {g.name} <span className="text-(--text-faint)">（{g.type}）</span>
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => void openPicker(g.name)}
+                            className="flex shrink-0 items-center gap-1 rounded border border-(--border) px-1.5 py-0.5 text-[11px] text-(--text-dim) hover:bg-(--hover-bg)"
+                          >
+                            <Plus size={11} />
+                            添加自定义节点
+                          </button>
+                        </div>
                         <ul className="mt-1 space-y-0.5 text-xs text-(--text-dim)">
                           {(g.members ?? []).map((m, i) => (
-                            <li key={`${g.id}-${i}`}>{memberLine(m)}</li>
+                            <li key={`${g.id}-${i}`} className="flex items-center gap-1.5">
+                              <span>{memberLine(m)}</span>
+                              {m.origin === "custom" ? (
+                                <>
+                                  <span className="rounded bg-(--accent) px-1 text-[10px] leading-4 text-(--accent-contrast)">自定义</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => void removeFromGroup(g.name, m.proxyId ?? "")}
+                                    className="text-[11px] text-(--danger) hover:underline"
+                                  >
+                                    移除
+                                  </button>
+                                </>
+                              ) : (
+                                <span className="rounded border border-(--border) px-1 text-[10px] leading-4 text-(--text-faint)">导入</span>
+                              )}
+                            </li>
                           ))}
                         </ul>
                       </div>
@@ -949,6 +1065,38 @@ export default function ProxyConfigPage() {
                   </div>
                 )}
               </div>
+              {selectedConfig && orphans.length > 0 && (
+                <div className="mt-3 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-4 py-3">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-(--danger)">
+                    <TriangleAlert size={13} />
+                    以下代理组已在来源的最新配置中不存在，你添加的成员关系仍保留；组恢复后会自动重新显示，也可以现在移除。
+                  </p>
+                  <div className="mt-2 space-y-2">
+                    {orphans.map((o) => (
+                      <div key={o.groupName} className="rounded-md bg-(--panel-bg) px-3 py-2">
+                        <p className="text-xs font-medium">
+                          {o.groupName} <span className="text-(--danger)">（原代理组已不存在）</span>
+                        </p>
+                        <ul className="mt-1 space-y-0.5 text-xs text-(--text-dim)">
+                          {(o.members ?? []).map((m) => (
+                            <li key={m.proxyId} className="flex items-center gap-1.5">
+                              <span>{m.proxyName ?? m.name}</span>
+                              <span className="rounded bg-(--accent) px-1 text-[10px] leading-4 text-(--accent-contrast)">自定义</span>
+                              <button
+                                type="button"
+                                onClick={() => void removeFromGroup(o.groupName, m.proxyId ?? "")}
+                                className="text-[11px] text-(--danger) hover:underline"
+                              >
+                                移除关系
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </section>
@@ -1103,6 +1251,46 @@ export default function ProxyConfigPage() {
         />
       )}
 
+      {pickerGroup && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-md rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
+            <h3 className="text-base font-semibold">添加自定义节点到「{pickerGroup}」</h3>
+            <p className="mt-1 text-xs text-(--text-faint)">
+              仅加入成员关系，不复制节点或凭据；订阅刷新后仍会保留。
+            </p>
+            <div className="mt-4 max-h-64 space-y-1 overflow-y-auto">
+              {candidates.length === 0 ? (
+                <p className="text-sm text-(--text-faint)">没有可添加的自定义节点（可能已全部加入该组）。</p>
+              ) : (
+                candidates.map((cand) => (
+                  <button
+                    key={cand.id}
+                    type="button"
+                    onClick={() => void addToGroup(cand.id)}
+                    className="flex w-full items-center justify-between rounded-md border border-(--border) px-3 py-2 text-left text-sm hover:bg-(--hover-bg)"
+                  >
+                    <span>{cand.name}</span>
+                    <span className="text-xs text-(--text-faint)">
+                      {cand.protocol} · {cand.address}
+                      {cand.port != null ? `:${cand.port}` : ""}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPickerGroup(null)}
+                className="rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {detail && (
         <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
           <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
@@ -1151,6 +1339,29 @@ export default function ProxyConfigPage() {
                   {detail.configJson}
                 </dd>
               </div>
+              {detail.source === "custom" && (
+                <div>
+                  <dt className="text-xs text-(--text-dim)">已加入的代理组</dt>
+                  <dd className="mt-1 text-sm">
+                    {detailMemberships.length === 0 ? (
+                      <span className="text-(--text-faint)">尚未加入任何配置的代理组</span>
+                    ) : (
+                      <ul className="space-y-1">
+                        {detailMemberships.map((m) => (
+                          <li key={`${m.configId}-${m.groupName}`} className="flex items-center gap-1.5">
+                            <span>
+                              {m.configName} · {m.groupName}
+                            </span>
+                            {!m.groupExists && (
+                              <span className="rounded border border-(--danger-border) px-1 text-[10px] leading-4 text-(--danger)">原代理组已不存在</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </dd>
+                </div>
+              )}
               <DetailRow label="创建时间" value={detail.createdAt} />
               <DetailRow label="更新时间" value={detail.updatedAt} />
             </dl>
@@ -1185,6 +1396,8 @@ export default function ProxyConfigPage() {
             <h3 className="text-base font-semibold">删除节点「{pendingDeleteProxy.name}」</h3>
             <p className="mt-2 text-sm leading-relaxed text-(--text-dim)">
               将删除该自定义节点；引用它的浏览器实例将变为未绑定代理。
+              {deleteMembershipCount > 0 &&
+                `该节点已加入 ${deleteMembershipCount} 个配置的代理组，删除后将同时移除这些自定义成员关系。`}
               {pendingDeleteProxy.hasSecrets &&
                 "该节点的凭据将在确认没有其他记录引用后从凭据库中清理。"}
               此操作不可恢复。

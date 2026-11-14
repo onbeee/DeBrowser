@@ -66,7 +66,7 @@ func TestGetDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDiagnostics: %v", err)
 	}
-	if view.AppVersion == "" || view.SchemaVersion != 7 {
+	if view.AppVersion == "" || view.SchemaVersion != 8 {
 		t.Fatalf("view = %+v, want version set and schema 5", view)
 	}
 	if len(view.Categories) != 3 {
@@ -121,7 +121,7 @@ func TestExportDiagnosticsZipStructureAndHashes(t *testing.T) {
 	if err := json.Unmarshal(mf, &manifest); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
-	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 7 {
+	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 8 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	if len(manifest.Files) == 0 {
