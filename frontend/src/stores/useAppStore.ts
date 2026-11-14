@@ -4,8 +4,7 @@ import type { Status } from "../../bindings/github.com/onbeee/DeBrowser/internal
 export type PageKey =
   | "overview"
   | "instances"
-  | "proxies"
-  | "subscriptions"
+  | "proxyconfig"
   | "kernels"
   | "bookmarks"
   | "sync"

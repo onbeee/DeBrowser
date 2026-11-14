@@ -10,8 +10,7 @@ import DiagnosticsPage from "./pages/DiagnosticsPage";
 import InstancesPage from "./pages/InstancesPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
-import ProxiesPage from "./pages/ProxiesPage";
-import SubscriptionsPage from "./pages/SubscriptionsPage";
+import ProxyConfigPage from "./pages/ProxyConfigPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
 
@@ -71,10 +70,8 @@ export default function App() {
             <SettingsPage />
           ) : page === "instances" ? (
             <InstancesPage />
-          ) : page === "proxies" ? (
-            <ProxiesPage />
-          ) : page === "subscriptions" ? (
-            <SubscriptionsPage />
+          ) : page === "proxyconfig" ? (
+            <ProxyConfigPage />
           ) : page === "diagnostics" ? (
             <DiagnosticsPage />
           ) : (
