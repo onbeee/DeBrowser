@@ -105,7 +105,8 @@ Application-level key/value settings (Stage 1, migration 0001), accessed through
 | 5 | `0005_remove_proxy_groups_tags.sql` | Stage 4A correction: removes DeBrowser's own proxy groups/tags — rebuilds `proxies` and `subscriptions` without `group_id` and drops `proxy_tags` and `proxy_groups` (see below) |
 | 6 | `0006_mihomo_config_import.sql` | Stage 6: `mihomo_configs`, `mihomo_proxy_groups`, `mihomo_proxy_group_members`; `proxies.config_id` / `proxies.source_node_name` (see below) |
 | 7 | `0007_proxy_source_vocabulary.sql` | Stage 6C: rebuilds `proxies` with the unified source vocabulary `custom` / `file` / `subscription` (values mapped `manual` → `custom`, `file_import` → `file`); link rescue preserves instance bindings and group members (see below) |
-| 8 | `0008_proxy_group_custom_members.sql` | Stage 6C review fix: user custom-member overlay for native proxy-groups (see below) |
+| 8 | `0008_proxy_group_custom_members.sql` | Stage 6C review fix: user custom-member overlay for native proxy-groups (superseded the same day — see 0009) |
+| 9 | `0009_drop_custom_members_overlay.sql` | Stage 6C redo: drops the 0008 overlay table; the custom-member feature was withdrawn before release (see below) |
 
 ### Migration 0005: removing groups and tags (Stage 4A correction)
 
@@ -122,6 +123,8 @@ Purely additive: three new tables plus two new `proxies` columns with compatibil
 The unified 「代理配置」 module manages three sources — subscription, local file and custom (manual) nodes. Migration 0007 renames the Stage 4A `proxies.source` values to that vocabulary (`manual` → `custom`, `file_import` → `file`, `subscription` unchanged) and changes the column CHECK/default accordingly, so the values match `mihomo_configs.source_type` and the UI. Changing a CHECK constraint takes a table rebuild; the rebuild reuses migration 0005's link-rescue pattern inside the runner's transaction (FK actions fire immediately with `foreign_keys=1`): `browser_instances.proxy_id` links are copied aside and restored, and proxy-kind `mihomo_proxy_group_members` rows (whose CHECK forbids detaching them) are copied aside in full, deleted, and re-inserted against the rebuilt table with group, order and names intact. No row, ID, `secret_ref`, config/subscription link or member relation changes. The v6 → v7 upgrade test (`internal/database/stage7_test.go`) verifies the mapping and preservation over a populated v6 fixture (manual node bound to an instance, subscription + file configs with groups and members), plus `PRAGMA foreign_key_check` / `integrity_check`, rejection of the retired vocabulary, and the partial unique dedup index.
 
 ### Migration 0008: custom proxy-group members overlay (Stage 6C review fix)
+
+> Superseded by migration 0009 (Stage 6C redo, 2026-11-14): the custom-node / custom-member feature was withdrawn by product decision before PR #9 merged. The 0008 file remains in the migration history untouched — databases from the PR #9 acceptance builds already applied it — and 0009 drops the table. The overlay never owned user data (it only referenced configs and custom nodes), so the drop loses nothing; existing `source='custom'` node records and their vault credentials are unaffected.
 
 `mihomo_proxy_group_custom_members` stores **user-added** memberships: a `source = 'custom'` node attached to a native proxy-group of an imported config. It is strictly separate from the imported members (`mihomo_proxy_group_members`, which mirror the source document):
 
