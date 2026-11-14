@@ -4,8 +4,7 @@ import type { Status } from "../../bindings/github.com/onbeee/DeBrowser/internal
 export type PageKey =
   | "overview"
   | "instances"
-  | "proxies"
-  | "subscriptions"
+  | "proxyconfig"
   | "kernels"
   | "bookmarks"
   | "sync"
@@ -24,14 +23,11 @@ export interface LogLine {
 
 interface AppState {
   page: PageKey;
-  consoleOpen: boolean;
   status: Status | null;
   statusError: string | null;
   logs: LogLine[];
   theme: Theme;
   setPage: (page: PageKey) => void;
-  toggleConsole: () => void;
-  setConsoleOpen: (open: boolean) => void;
   setStatus: (status: Status) => void;
   setStatusError: (message: string | null) => void;
   log: (level: "info" | "error", message: string) => void;
@@ -48,14 +44,11 @@ export function applyTheme(theme: Theme) {
 
 export const useAppStore = create<AppState>((set) => ({
   page: "overview",
-  consoleOpen: false,
   status: null,
   statusError: null,
   logs: [],
   theme: "dark",
   setPage: (page) => set({ page }),
-  toggleConsole: () => set((state) => ({ consoleOpen: !state.consoleOpen })),
-  setConsoleOpen: (open) => set({ consoleOpen: open }),
   setStatus: (status) => set({ status, statusError: null }),
   setStatusError: (message) => set({ statusError: message }),
   log: (level, message) =>

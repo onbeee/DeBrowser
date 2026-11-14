@@ -18,6 +18,48 @@ export interface CategoryView {
 }
 
 /**
+ * CoreFaultInfo is the core's contribution to the diagnostics
+ * fault report (§10): versions and lifecycle state only — never
+ * the controller secret or any user data.
+ */
+export interface CoreFaultInfo {
+    "Installed": boolean;
+    "Version": string;
+    "Running": boolean;
+    "LastExit": string;
+    "UpdateStatus": string;
+    "LatestVersion": string;
+    "LastUpdateError": string;
+}
+
+/**
+ * CoreStatusView is the settings page's core status.
+ */
+export interface CoreStatusView {
+    "installed": boolean;
+    "version": string;
+    "running": boolean;
+    "pid": number;
+    "startedAt": string;
+    "lastExit": string;
+}
+
+/**
+ * CoreUpdateView is the settings page's update state.
+ */
+export interface CoreUpdateView {
+    "currentVersion": string;
+    "latestVersion": string;
+
+    /**
+     * unchecked | up-to-date | update-available | check-failed
+     */
+    "status": string;
+    "checkedAt": string;
+    "error": string;
+}
+
+/**
  * CreateInstanceInput carries the user-editable fields for creation.
  * UserDataDir is optional: empty means the default profiles/<id>.
  */
@@ -161,6 +203,12 @@ export interface ProxyView {
     "sortOrder": number;
     "source": string;
     "subscriptionId"?: string | null;
+
+    /**
+     * ConfigID identifies the imported Mihomo config a node came
+     * from (Stage 6C: the unified page groups nodes by source).
+     */
+    "configId"?: string | null;
     "hasSecrets": boolean;
     "secretFields": string[] | null;
     "credentialStatus": string;

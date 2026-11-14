@@ -36,7 +36,7 @@ type App struct {
 
 // New builds the Wails application around the given services. The
 // assets filesystem holds the embedded frontend build (frontend/dist).
-func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, proxyService *service.ProxyService, diagnosticsService *service.DiagnosticsService, subscriptionService *service.SubscriptionService, log *slog.Logger, assets fs.FS) *App {
+func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, proxyService *service.ProxyService, diagnosticsService *service.DiagnosticsService, subscriptionService *service.SubscriptionService, coreService *service.CoreService, log *slog.Logger, assets fs.FS) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{cancel: cancel, log: log}
 
@@ -70,6 +70,7 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 			application.NewService(proxyService),
 			application.NewService(diagnosticsService),
 			application.NewService(subscriptionService),
+			application.NewService(coreService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

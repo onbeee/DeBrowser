@@ -154,6 +154,12 @@ func (s *Store) ReplaceProxyGroups(ctx context.Context, configID string, groups 
 	if _, err := s.q.ExecContext(ctx, `DELETE FROM mihomo_proxy_groups WHERE config_id = ?`, configID); err != nil {
 		return fmt.Errorf("store: clear proxy groups: %w", err)
 	}
+	// Two phases: insert ALL group rows first, then all member
+	// rows. A member may reference a group that appears LATER in
+	// the document (real-world configs list their main select
+	// group first and the auto groups it references afterwards);
+	// inserting members group-by-group would violate the
+	// target_group_id foreign key for such forward references.
 	for _, g := range groups {
 		if g.OptionsJSON == "" {
 			g.OptionsJSON = "{}"
@@ -164,6 +170,8 @@ func (s *Store) ReplaceProxyGroups(ctx context.Context, configID string, groups 
 			g.ID, configID, g.Name, g.Type, g.OptionsJSON, g.SortOrder); err != nil {
 			return fmt.Errorf("store: create proxy group: %w", err)
 		}
+	}
+	for _, g := range groups {
 		for _, m := range g.Members {
 			if _, err := s.q.ExecContext(ctx, `INSERT INTO mihomo_proxy_group_members
 				(group_id, sort_order, member_name, member_kind, proxy_id, target_group_id)

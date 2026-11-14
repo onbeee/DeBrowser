@@ -19,7 +19,9 @@ export default function OverviewPage() {
         <h2 className="text-xl font-semibold">基础架构运行中</h2>
         <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-(--text-dim)">
           当前版本已交付：应用基础架构与便携式目录、SQLite 数据层、实例元数据管理与 profile
-          管理基础（Stage 3）、代理数据管理与凭据 Vault（Stage 4A），以及结构化日志与应用状态实时连接。后续阶段将交付
+          管理基础（Stage 3）、代理数据管理与凭据 Vault（Stage 4A）、结构化日志与诊断导出（Stage
+          5B）、订阅管理与完整 Mihomo 配置导入（Stage 6），以及统一的「代理配置」模块（Stage
+          6C：订阅、本地配置、自定义节点三种来源在同一界面管理），以及应用状态实时连接。后续阶段将交付
           Mihomo 核心集成（Stage 7），以及浏览器内核管理、实例实际启动与停止、CDP
           接线、代理接线与书签（Stage 9）；尚未交付的功能这里不展示任何占位数据。
         </p>
@@ -95,7 +97,9 @@ export default function OverviewPage() {
           <li>配置与目录统一管理、结构化 JSON 日志</li>
           <li>带迁移机制的 SQLite 数据层（实例、代理、订阅、书签等业务表）</li>
           <li>实例元数据管理与 profile 管理基础（Stage 3）</li>
-          <li>代理数据管理、凭据 Vault、ProxyService 与代理管理界面（Stage 4A）</li>
+          <li>代理数据管理、凭据 Vault 与 ProxyService（Stage 4A）</li>
+          <li>订阅管理、完整 Mihomo 配置导入与原生代理组（Stage 6）</li>
+          <li>统一「代理配置」界面：订阅、本地配置、自定义节点三种来源（Stage 6C）</li>
           <li>
             类型化的 Wails 绑定与 <code className="text-(--text-main)">app:status</code> 事件通道
           </li>

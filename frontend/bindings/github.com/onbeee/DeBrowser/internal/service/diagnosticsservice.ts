@@ -33,6 +33,21 @@ export function ExportDiagnostics(): $CancellablePromise<$models.ExportResult> {
 }
 
 /**
+ * ExportFaultReport builds the extended ZIP a user can hand
+ * straight to support/ChatGPT: everything the diagnostics
+ * export carries, plus fault-report.json (app/build/OS info,
+ * migration version, per-subscription and per-config operation
+ * state with their already-sanitized last errors, and the
+ * Mihomo core's state) and the core's own log tail. All content
+ * passes the same path redaction and fail-closed sensitivity
+ * scan as the log streams; the database, the vault, browser
+ * data and raw user configs are never included.
+ */
+export function ExportFaultReport(): $CancellablePromise<$models.ExportResult> {
+    return $Call.ByID(1661260969);
+}
+
+/**
  * GetDiagnostics returns the current diagnostics snapshot.
  */
 export function GetDiagnostics(): $CancellablePromise<$models.DiagnosticsView> {

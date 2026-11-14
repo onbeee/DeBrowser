@@ -5,39 +5,33 @@ import { AppStatus } from "../bindings/events";
 import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import StatusBar from "./components/layout/StatusBar";
-import ConsolePanel from "./components/ConsolePanel";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
 import InstancesPage from "./pages/InstancesPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
-import ProxiesPage from "./pages/ProxiesPage";
-import SubscriptionsPage from "./pages/SubscriptionsPage";
+import ProxyConfigPage from "./pages/ProxyConfigPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
 
 export default function App() {
   const page = useAppStore((state) => state.page);
-  const consoleOpen = useAppStore((state) => state.consoleOpen);
   const setStatus = useAppStore((state) => state.setStatus);
   const setStatusError = useAppStore((state) => state.setStatusError);
   const setTheme = useAppStore((state) => state.setTheme);
   const log = useAppStore((state) => state.log);
 
+  // 静默加载一次后端状态（供底部状态栏显示连接状态）；不再提
+  // 供右上角常驻刷新入口，也不把状态刷新写进控制台（§9）。
   const refreshStatus = useCallback(() => {
     AppService.GetStatus()
       .then((status) => {
         setStatus(status);
-        log(
-          "info",
-          `状态已更新：${status.name} v${status.version}，数据库${status.database === "ok" ? "正常" : "异常"}`,
-        );
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         setStatusError(message);
-        log("error", `获取状态失败：${message}`);
       });
-  }, [log, setStatus, setStatusError]);
+  }, [setStatus, setStatusError]);
 
   useEffect(() => {
     refreshStatus();
@@ -63,7 +57,7 @@ export default function App() {
     <div className="flex h-full">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar onRefreshStatus={refreshStatus} />
+        <TopBar />
         <main className="min-h-0 flex-1 overflow-y-auto bg-(--app-bg)">
           {page === "overview" ? (
             <OverviewPage />
@@ -71,17 +65,14 @@ export default function App() {
             <SettingsPage />
           ) : page === "instances" ? (
             <InstancesPage />
-          ) : page === "proxies" ? (
-            <ProxiesPage />
-          ) : page === "subscriptions" ? (
-            <SubscriptionsPage />
+          ) : page === "proxyconfig" ? (
+            <ProxyConfigPage />
           ) : page === "diagnostics" ? (
             <DiagnosticsPage />
           ) : (
             <PlannedPage page={page} />
           )}
         </main>
-        {consoleOpen && <ConsolePanel />}
         <StatusBar />
       </div>
     </div>

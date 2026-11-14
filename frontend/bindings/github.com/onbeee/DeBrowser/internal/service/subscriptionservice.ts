@@ -64,6 +64,14 @@ export function ImportLocalConfig(name: string): $CancellablePromise<$models.Imp
 }
 
 /**
+ * ImportPickedLocalConfig imports the file chosen through
+ * SelectLocalConfigFile under the given display name.
+ */
+export function ImportPickedLocalConfig(name: string): $CancellablePromise<$models.ImportSummary> {
+    return $Call.ByID(3993794248, name);
+}
+
+/**
  * ListConfigs returns summaries of all imported configs.
  */
 export function ListConfigs(): $CancellablePromise<$models.MihomoConfigView[] | null> {
@@ -91,6 +99,16 @@ export function RefreshDueSubscriptions(): $CancellablePromise<void> {
  */
 export function RefreshSubscription(id: string): $CancellablePromise<$models.ImportSummary> {
     return $Call.ByID(878555772, id);
+}
+
+/**
+ * SelectLocalConfigFile opens the native picker and remembers
+ * the chosen file inside the service (the frontend never holds
+ * a path — it receives only the file's display name). It backs
+ * the two-step create dialog: pick first, create afterwards.
+ */
+export function SelectLocalConfigFile(): $CancellablePromise<string> {
+    return $Call.ByID(1134635705);
 }
 
 /**

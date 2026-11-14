@@ -10,10 +10,11 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 | 2 | SQLite database and migrations | Delivered (PR #3) |
 | 3 | App lifecycle and instance management foundation | Delivered (PR #4) |
 | 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Delivered (PR #5, merged 2026-11-13) |
-| 5A | Direct startup and portable data directory stability | Implemented in the Stage 5A pull request; pending project-owner review |
-| 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Implemented in the Stage 5B pull request; pending project-owner review |
-| 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Planned |
-| 7 | Mihomo core integration and run modes (Rule / Global / Direct) | Planned |
+| 5A | Direct startup and portable data directory stability | Delivered (PR #6, merged 2026-11-13) |
+| 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Delivered (PR #7, merged 2026-11-13) |
+| 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Delivered (PR #8, squash-merged; main `44e96e42`) |
+| 6C | Unified proxy configuration, redone 2026-11-14: single-column 「代理配置」 page (quick subscription import, config cards, read-only node list, create dialog); forward-reference import fix; Fake-IP system-proxy fallback; custom nodes/members removed; official Mihomo core bundled with minimal lifecycle + manual kernel update in settings | Implemented in the Stage 6C pull request (redo); pending project-owner review |
+| 7 | Mihomo core integration and run modes (Rule / Global / Direct) | Planned — starts only after Stage 6C is delivered and accepted |
 | 8 | Rule management (airport / custom / mixed rule sources) | Planned |
 | 9 | Browser kernels, instance launch and per-instance proxy wiring; bookmarks | Planned |
 | 10 | Multi-window synchronization | Planned |
@@ -58,21 +59,31 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 - The formal portable layout is unchanged (same `data/`, `config/`, `webview2-data/` paths); existing Stage 4A installations start exactly as before, with their data untouched, and replacing the executable never touches user data
 - No scanning, detection or automatic migration of legacy data anywhere (`internal/migration` and the automatic Roaming migration are removed); the SQLite schema migration mechanism is retained unchanged
 
-## Stage 5B — Logging and diagnostics (implemented in the Stage 5B pull request, pending review)
+## Stage 5B — Logging and diagnostics (delivered, PR #7)
 
 - Run / operation / error log separation with retention (30 / 90 / 90 days) and size caps
 - Operation audit for instance/proxy changes, subscription imports, mode and rule changes, backup/restore and updates; no secrets in logs
 - In-app diagnostics view and one-click diagnostics/acceptance record export
 
-## Stage 6 — Subscription and full configuration import (implemented in the Stage 6 pull request, pending review)
+## Stage 6 — Subscription and full configuration import (delivered, PR #8)
 
 - Four import formats through one pipeline: full Clash/Mihomo YAML, proxies-only YAML, V2Ray/Base64 URI lists, local config files; unsupported content errors explicitly, never silently dropped
 - Native Mihomo `proxy-groups` parsed into structured storage; members resolve by stable node identity (rendered names unique per node), never silently rebound to a same-named node from another subscription
 - Full-config management: original artifacts stored with credentials stripped into the vault; Stage 6 records a security report of risky settings (allow-lan, external listeners/controller, missing controller secret, TUN, external DNS listen) — the safe defaults themselves (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) are enforced when Stage 7 renders a runnable config, with every adjustment reported to the user
 
+## Stage 6C — Unified proxy configuration (redone 2026-11-14 in the same pull request, pending review)
+
+- Page: one 「代理配置」 page in a single column — a top action bar (paste a subscription URL and import directly, or open the create dialog), a vertical list of configuration cards (name, 远程/本地 source, node and group counts, update time, last refresh state and failure reason; select / refresh / delete with confirmation), and below it the selected configuration's node list as a read-only table (name, protocol, address, port, status — never credentials), with the native proxy-groups shown read-only underneath. The create dialog makes remote (name + subscription URL) or local (name + native file picker, choose first then create) configurations. Custom nodes and custom group membership were REMOVED by product decision: nodes come only from subscriptions and local files. Stage 4A's stored custom-node records and credentials are untouched in the database; only the unshipped PR #9 feature surface was withdrawn
+- Data model: migration 0007's unified source vocabulary (`custom` / `file` / `subscription`) is kept. Migration 0008 stays in the published history (the PR #9 acceptance builds already applied it); the overlay table it created is dropped by migration 0009, which harms no other data (populated-fixture tested)
+- Import correctness: `ReplaceProxyGroups` now inserts all group rows before all member rows — real-world configs whose first group references a group defined later (a forward reference) previously died on the `target_group_id` foreign key and surfaced as 「关联数据不存在或已被删除」
+- Subscription downloads in Fake-IP environments: when the whole DNS answer is rejected AND every rejected address is inside the Clash/Mihomo Fake-IP pool (198.18.0.0/15), the placeholder addresses are a local proxy core's mappings that no application can dial directly, so the fetch retries through the operating system's configured proxy (which receives the hostname), accepting only loopback/private proxy endpoints. The direct path's SSRF policy is unchanged, 198.18.0.0/15 stays refused for direct dials, mixed answers get no fallback, and environment proxy variables are never used. DNS rejection errors still name the offending IP and its category
+- Mihomo core (pulled forward by the 2026-11-14 instruction; run modes remain Stage 7): the official MetaCubeX binary (pinned v1.19.34, SHA-256 in `internal/mihomocore/release.go`) ships unmodified beside DeBrowser.exe and is copied into `data/mihomo/` on first run. The app reads its real version, can start/stop it with a minimal loopback-only configuration (no proxy listeners, no TUN, no system-proxy changes), shows its log, and stops it on exit. System settings host the kernel section: current version, latest version, check time, manual check button, and — when a newer stable exists — a manual update that downloads the official asset, verifies its SHA-256 against the official release digest, verifies the extracted binary's version, and swaps with rollback (the old core survives any failure). Nothing checks or updates automatically
+- Shell: the top-right persistent refresh-status and console controls are gone; errors surface in-page and detail lives in 日志与诊断， which also offers the extended fault-report ZIP (redacted, fail-closed scanning) designed to be handed straight to support/ChatGPT
+
 ## Stage 7 — Mihomo core integration and run modes
 
-- Pinned, SHA-256-verified Mihomo core download/install and version management; single core process with per-instance listeners on 127.0.0.1
+
+- Core lifecycle basics (install, version, start/stop, verified manual update) were delivered early in the Stage 6C redo; this stage adds the traffic plane: single core process with per-instance listeners on 127.0.0.1
 - Render → `mihomo -t` validate → atomic swap → controller hot-reload; failures keep the previous working config
 - Core-level run modes Rule / Global / Direct; core process lifecycle management; per-instance readiness verification (`VerifyInstanceReady`) and fail-closed behaviour
 

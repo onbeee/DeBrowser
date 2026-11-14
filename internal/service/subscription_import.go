@@ -211,7 +211,7 @@ func (s *SubscriptionService) applyImport(c context.Context, owner importOwner, 
 				subID := owner.subscription.ID
 				row.SubscriptionID = &subID
 			} else {
-				row.Source = "file_import"
+				row.Source = "file"
 			}
 			if d.matched != nil {
 				row.ID = d.matched.ID
@@ -416,7 +416,13 @@ func (s *SubscriptionService) refreshOne(c context.Context, id string) (ImportSu
 		s.markRefreshFailed(sub, err)
 		return ImportSummary{}, err
 	}
-	data, err := s.fetchFn(c, string(raw), sub.AllowLAN)
+	fetched, err := s.fetchFn(c, string(raw), sub.AllowLAN)
+	data := fetched.Body
+	if err == nil && fetched.Path != "" {
+		// Stage record for the diagnostics/fault report: which
+		// download path served this refresh (never the URL).
+		s.proxy.log.Info("订阅下载完成", "subscriptionId", sub.ID, "fetchPath", fetched.Path)
+	}
 	if err != nil {
 		s.markRefreshFailed(sub, err)
 		return ImportSummary{}, err
@@ -500,6 +506,57 @@ func (s *SubscriptionService) ImportLocalConfig(name string) (summary ImportSumm
 	if path == "" {
 		return ImportSummary{Cancelled: true}, nil
 	}
+	return s.importFromPath(name, path)
+}
+
+// SelectLocalConfigFile opens the native picker and remembers
+// the chosen file inside the service (the frontend never holds
+// a path — it receives only the file's display name). It backs
+// the two-step create dialog: pick first, create afterwards.
+func (s *SubscriptionService) SelectLocalConfigFile() (string, error) {
+	if s.FilePicker == nil {
+		return "", fmt.Errorf("本地文件导入不可用")
+	}
+	path, err := s.FilePicker()
+	if err != nil {
+		return "", fmt.Errorf("打开文件选择器失败")
+	}
+	if path == "" {
+		return "", nil
+	}
+	s.pickedMu.Lock()
+	s.pickedFile = path
+	s.pickedMu.Unlock()
+	return filepath.Base(path), nil
+}
+
+// ImportPickedLocalConfig imports the file chosen through
+// SelectLocalConfigFile under the given display name.
+func (s *SubscriptionService) ImportPickedLocalConfig(name string) (summary ImportSummary, err error) {
+	start := time.Now()
+	defer func() { auditOp(s.Auditor, "config.import", "config", summary.ConfigID, start, err) }()
+	s.pickedMu.Lock()
+	path := s.pickedFile
+	s.pickedFile = ""
+	s.pickedMu.Unlock()
+	if path == "" {
+		return ImportSummary{}, fmt.Errorf("尚未选择配置文件")
+	}
+	summary, err = s.importFromPath(name, path)
+	if err != nil {
+		// Keep the selection so the user can retry after fixing
+		// the name or reading the error.
+		s.pickedMu.Lock()
+		s.pickedFile = path
+		s.pickedMu.Unlock()
+		return ImportSummary{}, err
+	}
+	return summary, nil
+}
+
+// importFromPath reads, parses and applies one local file.
+// Auditing stays with the public entry points.
+func (s *SubscriptionService) importFromPath(name, path string) (summary ImportSummary, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ImportSummary{}, fmt.Errorf("读取所选文件失败")

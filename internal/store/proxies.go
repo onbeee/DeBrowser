@@ -84,7 +84,7 @@ func (s *Store) CreateProxy(ctx context.Context, p model.Proxy) (model.Proxy, er
 		p.ConfigJSON = "{}"
 	}
 	if p.Source == "" {
-		p.Source = "manual"
+		p.Source = "custom"
 	}
 	if _, err := s.q.ExecContext(ctx, `INSERT INTO proxies
 		(id, name, protocol, address, port, config_json, secret_ref, enabled,

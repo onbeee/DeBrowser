@@ -37,7 +37,7 @@ Proxy nodes. `protocol` is constrained to `http, https, socks5, vmess, vless, tr
 
 **Credential policy**: passwords, keys and tokens are never stored in this table (or in logs). Non-secret connection parameters may live in `config_json`; `secret_ref` is an opaque reference into the credential vault (`internal/secrets`, Stage 4A).
 
-Stage 4A (migration 0004) adds: `sort_order`, `source` (`manual` / `file_import` / `subscription`), `subscription_id` (FK → `subscriptions`, `ON DELETE CASCADE`), `dedup_key` (import fingerprint; partial UNIQUE index `WHERE dedup_key <> ''`, so empty keys never collide), and the connection-test record `last_latency_ms` / `last_test_ok` / `last_tested_at`. (Migration 0004 also added a `group_id` column here and to `subscriptions`, plus the `proxy_groups` / `proxy_tags` tables; the Stage 4A correction removed all of them again — see migration 0005 below.)
+Stage 4A (migration 0004) adds: `sort_order`, `source` (`manual` / `file_import` / `subscription` — renamed to `custom` / `file` / `subscription` by migration 0007, see below), `subscription_id` (FK → `subscriptions`, `ON DELETE CASCADE`), `dedup_key` (import fingerprint; partial UNIQUE index `WHERE dedup_key <> ''`, so empty keys never collide), and the connection-test record `last_latency_ms` / `last_test_ok` / `last_tested_at`. (Migration 0004 also added a `group_id` column here and to `subscriptions`, plus the `proxy_groups` / `proxy_tags` tables; the Stage 4A correction removed all of them again — see migration 0005 below.)
 
 Stage 6 (migration 0006) adds: `config_id` (FK → `mihomo_configs`, `ON DELETE SET NULL`) — the imported config a node came from — and `source_node_name` (the node's name inside its source document; native proxy-group members address nodes by this name, so it is kept separately from the editable display `name`). Imported nodes carry a non-empty `dedup_key` of the form `<scope>:<owner-id>:<sha256>` where the fingerprint covers owner ID + name + protocol + server + port (never secrets): a subscription refresh matches its own previous nodes by this key and preserves their row IDs, and different subscriptions can hold same-named nodes without colliding.
 
@@ -104,6 +104,9 @@ Application-level key/value settings (Stage 1, migration 0001), accessed through
 | 4 | `0004_proxy_foundation.sql` | `proxy_groups`, `proxy_tags`, `subscriptions`; `proxies` group/source/dedup/test columns; `browser_instances.proxy_listen_port` |
 | 5 | `0005_remove_proxy_groups_tags.sql` | Stage 4A correction: removes DeBrowser's own proxy groups/tags — rebuilds `proxies` and `subscriptions` without `group_id` and drops `proxy_tags` and `proxy_groups` (see below) |
 | 6 | `0006_mihomo_config_import.sql` | Stage 6: `mihomo_configs`, `mihomo_proxy_groups`, `mihomo_proxy_group_members`; `proxies.config_id` / `proxies.source_node_name` (see below) |
+| 7 | `0007_proxy_source_vocabulary.sql` | Stage 6C: rebuilds `proxies` with the unified source vocabulary `custom` / `file` / `subscription` (values mapped `manual` → `custom`, `file_import` → `file`); link rescue preserves instance bindings and group members (see below) |
+| 8 | `0008_proxy_group_custom_members.sql` | Stage 6C review fix: user custom-member overlay for native proxy-groups (superseded the same day — see 0009) |
+| 9 | `0009_drop_custom_members_overlay.sql` | Stage 6C redo: drops the 0008 overlay table; the custom-member feature was withdrawn before release (see below) |
 
 ### Migration 0005: removing groups and tags (Stage 4A correction)
 
@@ -114,6 +117,21 @@ Because both `group_id` columns carry a foreign key to `proxy_groups` (and `prox
 ### Migration 0006: Mihomo config import (Stage 6)
 
 Purely additive: three new tables plus two new `proxies` columns with compatibility defaults (`config_id` NULL, `source_node_name` `''`), so existing Stage 4A/5A/5B rows, values and relationships are untouched. The v5 → v6 upgrade test (`internal/database/stage6_test.go`) verifies data preservation over a populated v5 fixture, the member CHECK constraints, `PRAGMA foreign_key_check` and `PRAGMA integrity_check`. The vault reference checks (`SecretRefInUse`, `AllSecretRefs`) cover `mihomo_configs.secret_ref` as well, so config credential bundles take part in guarded cleanup and garbage collection exactly like proxy and subscription references.
+
+### Migration 0007: unified proxy source vocabulary (Stage 6C)
+
+The unified 「代理配置」 module manages three sources — subscription, local file and custom (manual) nodes. Migration 0007 renames the Stage 4A `proxies.source` values to that vocabulary (`manual` → `custom`, `file_import` → `file`, `subscription` unchanged) and changes the column CHECK/default accordingly, so the values match `mihomo_configs.source_type` and the UI. Changing a CHECK constraint takes a table rebuild; the rebuild reuses migration 0005's link-rescue pattern inside the runner's transaction (FK actions fire immediately with `foreign_keys=1`): `browser_instances.proxy_id` links are copied aside and restored, and proxy-kind `mihomo_proxy_group_members` rows (whose CHECK forbids detaching them) are copied aside in full, deleted, and re-inserted against the rebuilt table with group, order and names intact. No row, ID, `secret_ref`, config/subscription link or member relation changes. The v6 → v7 upgrade test (`internal/database/stage7_test.go`) verifies the mapping and preservation over a populated v6 fixture (manual node bound to an instance, subscription + file configs with groups and members), plus `PRAGMA foreign_key_check` / `integrity_check`, rejection of the retired vocabulary, and the partial unique dedup index.
+
+### Migration 0008: custom proxy-group members overlay (Stage 6C review fix)
+
+> Superseded by migration 0009 (Stage 6C redo, 2026-11-14): the custom-node / custom-member feature was withdrawn by product decision before PR #9 merged. The 0008 file remains in the migration history untouched — databases from the PR #9 acceptance builds already applied it — and 0009 drops the table. The overlay never owned user data (it only referenced configs and custom nodes), so the drop loses nothing; existing `source='custom'` node records and their vault credentials are unaffected.
+
+`mihomo_proxy_group_custom_members` stores **user-added** memberships: a `source = 'custom'` node attached to a native proxy-group of an imported config. It is strictly separate from the imported members (`mihomo_proxy_group_members`, which mirror the source document):
+
+- Primary key `(config_id, group_name, proxy_id)`; groups are addressed by **name**, because a subscription refresh deletes and recreates the group rows themselves — the name is the identity that survives a refresh.
+- `config_id` and `proxy_id` are `ON DELETE CASCADE` foreign keys: deleting a config or a custom node removes only its overlay rows; nothing ever cascades into nodes, configs or imported members.
+- That the node is really `source = 'custom'` and that `(config_id, group_name)` names a group the config actually has is validated by the service layer inside the write transaction (a CHECK cannot express cross-table conditions).
+- Refresh/re-import rebuilds only the imported structures (`ReplaceProxyGroups`) and never touches this table: after a refresh the attachment reappears in the same-named group; if the group vanished upstream the row is kept and reported as orphaned, and it takes effect again when the group returns.
 
 ## Backup before migration
 

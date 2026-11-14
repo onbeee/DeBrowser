@@ -99,16 +99,19 @@ const (
 // every read path of this service. It deliberately has no field
 // that could carry a secret value or the vault reference itself.
 type ProxyView struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Protocol         string   `json:"protocol"`
-	Address          string   `json:"address"`
-	Port             *int     `json:"port,omitempty"`
-	ConfigJSON       string   `json:"configJson"`
-	Enabled          bool     `json:"enabled"`
-	SortOrder        int      `json:"sortOrder"`
-	Source           string   `json:"source"`
-	SubscriptionID   *string  `json:"subscriptionId,omitempty"`
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Protocol       string  `json:"protocol"`
+	Address        string  `json:"address"`
+	Port           *int    `json:"port,omitempty"`
+	ConfigJSON     string  `json:"configJson"`
+	Enabled        bool    `json:"enabled"`
+	SortOrder      int     `json:"sortOrder"`
+	Source         string  `json:"source"`
+	SubscriptionID *string `json:"subscriptionId,omitempty"`
+	// ConfigID identifies the imported Mihomo config a node came
+	// from (Stage 6C: the unified page groups nodes by source).
+	ConfigID         *string  `json:"configId,omitempty"`
 	HasSecrets       bool     `json:"hasSecrets"`
 	SecretFields     []string `json:"secretFields"`
 	CredentialStatus string   `json:"credentialStatus"`
@@ -238,8 +241,8 @@ func (s *ProxyService) toView(p model.Proxy) ProxyView {
 		ID: p.ID, Name: p.Name, Protocol: p.Protocol, Address: p.Address,
 		Port: p.Port, ConfigJSON: p.ConfigJSON, Enabled: p.Enabled,
 		SortOrder: p.SortOrder, Source: p.Source,
-		SubscriptionID: p.SubscriptionID,
-		LastLatencyMs:  p.LastLatencyMs, LastTestOK: p.LastTestOK,
+		SubscriptionID: p.SubscriptionID, ConfigID: p.ConfigID,
+		LastLatencyMs: p.LastLatencyMs, LastTestOK: p.LastTestOK,
 		LastTestedAt: p.LastTestedAt, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
 		SecretFields: []string{},
 	}
@@ -308,7 +311,7 @@ func (s *ProxyService) createProxy(input CreateProxyInput) (ProxyView, error) {
 		Name: fields.name, Protocol: fields.protocol, Address: fields.address,
 		Port: fields.port, ConfigJSON: fields.configJSON, SecretRef: ref,
 		Enabled: true, SortOrder: input.SortOrder,
-		Source: "manual",
+		Source: "custom",
 	}
 	var created model.Proxy
 	txErr := s.withTx(c, func(tx *store.Store) error {

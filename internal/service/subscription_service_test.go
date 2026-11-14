@@ -104,8 +104,8 @@ func (f subFixture) createSub(t *testing.T) SubscriptionView {
 }
 
 func (f subFixture) stubFeed(payload string) {
-	f.svc.fetchFn = func(context.Context, string, bool) ([]byte, error) {
-		return []byte(payload), nil
+	f.svc.fetchFn = func(context.Context, string, bool) (fetchResult, error) {
+		return fetchResult{Body: []byte(payload), Path: "direct"}, nil
 	}
 }
 
@@ -227,8 +227,8 @@ func TestSubscriptionRefreshFailureKeepsOldData(t *testing.T) {
 	if _, err := f.svc.RefreshSubscription(v.ID); err != nil {
 		t.Fatal(err)
 	}
-	f.svc.fetchFn = func(context.Context, string, bool) ([]byte, error) {
-		return nil, errors.New("订阅请求超时（https://subs.example.com）")
+	f.svc.fetchFn = func(context.Context, string, bool) (fetchResult, error) {
+		return fetchResult{}, errors.New("订阅请求超时（https://subs.example.com）")
 	}
 	if _, err := f.svc.RefreshSubscription(v.ID); err == nil {
 		t.Fatal("failing refresh reported success")
@@ -361,7 +361,7 @@ func TestImportLocalConfigFile(t *testing.T) {
 		t.Fatalf("cfg = %+v err %v", cfg, err)
 	}
 	proxies, _ := f.store.ListProxiesByConfig(c, sum.ConfigID)
-	if len(proxies) != 2 || proxies[0].Source != "file_import" {
+	if len(proxies) != 2 || proxies[0].Source != "file" {
 		t.Fatalf("proxies = %+v", proxies)
 	}
 	// Cancel is a normal, error-free outcome.

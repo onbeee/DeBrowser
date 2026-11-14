@@ -14,12 +14,12 @@ func TestProxyStage4Fields(t *testing.T) {
 
 	p, err := s.CreateProxy(ctx, model.Proxy{
 		Name: "节点一", Protocol: "socks5", Address: "127.0.0.1", Port: intPtr(1080),
-		SortOrder: 5, Source: "manual", DedupKey: "fp-1", SecretRef: "ref-1",
+		SortOrder: 5, Source: "custom", DedupKey: "fp-1", SecretRef: "ref-1",
 	})
 	if err != nil {
 		t.Fatalf("CreateProxy: %v", err)
 	}
-	if p.SortOrder != 5 || p.DedupKey != "fp-1" || p.Source != "manual" {
+	if p.SortOrder != 5 || p.DedupKey != "fp-1" || p.Source != "custom" {
 		t.Fatalf("proxy fields = %+v", p)
 	}
 	// Test-result fields round-trip through their dedicated writer.
