@@ -92,61 +92,53 @@ func validateSubscriptionURL(raw string) error {
 	return nil
 }
 
-// specialUsePrefixes are address ranges that are NOT ordinary
+// specialUseRanges are address ranges that are NOT ordinary
 // public unicast space and are therefore refused in both policy
 // modes (Stage 6 review: net.IP.IsPrivate alone does not cover
-// them). Each entry names the registry purpose that keeps it out
-// of the public target set. The list follows the IANA IPv4/IPv6
-// special-purpose registries; allocations the registries mark
-// globally reachable (the AS112 and AMT anycast ranges, for
-// example) are deliberately NOT listed, and no broad aggregate
-// such as 2001::/23 is banned, because it contains globally
-// reachable assignments.
-var specialUsePrefixes = []netip.Prefix{
-	// IPv4
-	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 791)
-	netip.MustParsePrefix("100.64.0.0/10"),   // shared address space / CGNAT (RFC 6598)
-	netip.MustParsePrefix("192.0.0.0/24"),    // IETF special registry (RFC 6890)
-	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 documentation (RFC 5737)
-	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2 documentation (RFC 5737)
-	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3 documentation (RFC 5737)
-	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking (RFC 2544)
-	netip.MustParsePrefix("192.88.99.0/24"),  // 6to4 relay anycast, deprecated (RFC 7526)
-	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, incl. the limited broadcast (RFC 1112)
-	// IPv6
-	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix (RFC 6052): translated, not a direct target
-	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use translation prefix (RFC 8215)
-	netip.MustParsePrefix("100::/64"),       // discard-only (RFC 6666)
-	netip.MustParsePrefix("100:0:0:1::/64"), // dummy prefix (RFC 7600)
-	netip.MustParsePrefix("2001::/32"),      // Teredo tunnelling (RFC 4380)
-	netip.MustParsePrefix("2001:2::/48"),    // benchmarking (RFC 5180)
-	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849)
-	netip.MustParsePrefix("2001:10::/28"),   // ORCHID, deprecated (RFC 4843)
-	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637)
-	netip.MustParsePrefix("2002::/16"),      // 6to4 (RFC 3056): tunnels an embedded IPv4 target — refused wholesale so the tunnel spelling cannot bypass the IPv4 policy
-	netip.MustParsePrefix("5f00::/16"),      // SRv6 segment IDs (RFC 9603): locator space, not host targets
+// them). The list follows the IANA IPv4/IPv6 special-purpose
+// registries; allocations the registries mark globally reachable
+// (the AS112 and AMT anycast ranges, for example) are deliberately
+// NOT listed, and no broad aggregate such as 2001::/23 is banned,
+// because it contains globally reachable assignments. Each range
+// carries the Chinese category reported to the user when an
+// address inside it is refused (Stage 6C diagnostics), so a
+// rejection names the offending IP and why it is not allowed
+// instead of just the domain.
+type specialUseRange struct {
+	prefix   netip.Prefix
+	category string
 }
 
-// ipAllowedByPolicy classifies one resolved IP under the
-// subscription fetch policy:
-//
-//   - loopback, unspecified, multicast and link-local addresses
-//     are ALWAYS refused;
-//   - RFC 1918 IPv4 private space and IPv6 ULA are refused unless
-//     the subscription explicitly allows LAN access;
-//   - special-use, reserved, documentation, benchmarking and
-//     other non-public ranges (specialUsePrefixes) are ALWAYS
-//     refused — allowLAN never widens beyond private space;
-//   - everything else is ordinary public space and is allowed.
-//
-// The address is normalised with netip first: an IPv4-mapped IPv6
-// address is unmapped to its IPv4 form before any check, so the
-// IPv6 spelling of a forbidden IPv4 target cannot slip through.
+var specialUseRanges = []specialUseRange{
+	// IPv4
+	{netip.MustParsePrefix("0.0.0.0/8"), "保留地址"},         // "this network" (RFC 791)
+	{netip.MustParsePrefix("100.64.0.0/10"), "共享地址空间"},   // shared address space / CGNAT (RFC 6598)
+	{netip.MustParsePrefix("192.0.0.0/24"), "特殊用途地址"},    // IETF special registry (RFC 6890)
+	{netip.MustParsePrefix("192.0.2.0/24"), "文档测试地址"},    // TEST-NET-1 documentation (RFC 5737)
+	{netip.MustParsePrefix("198.51.100.0/24"), "文档测试地址"}, // TEST-NET-2 documentation (RFC 5737)
+	{netip.MustParsePrefix("203.0.113.0/24"), "文档测试地址"},  // TEST-NET-3 documentation (RFC 5737)
+	{netip.MustParsePrefix("198.18.0.0/15"), "基准测试地址"},   // benchmarking (RFC 2544)
+	{netip.MustParsePrefix("192.88.99.0/24"), "特殊用途地址"},  // 6to4 relay anycast, deprecated (RFC 7526)
+	{netip.MustParsePrefix("240.0.0.0/4"), "保留地址"},       // reserved, incl. the limited broadcast (RFC 1112)
+	// IPv6
+	{netip.MustParsePrefix("64:ff9b::/96"), "协议转换地址"},   // NAT64 well-known prefix (RFC 6052): translated, not a direct target
+	{netip.MustParsePrefix("64:ff9b:1::/48"), "协议转换地址"}, // NAT64 local-use translation prefix (RFC 8215)
+	{netip.MustParsePrefix("100::/64"), "特殊用途地址"},       // discard-only (RFC 6666)
+	{netip.MustParsePrefix("100:0:0:1::/64"), "特殊用途地址"}, // dummy prefix (RFC 7600)
+	{netip.MustParsePrefix("2001::/32"), "隧道地址"},        // Teredo tunnelling (RFC 4380)
+	{netip.MustParsePrefix("2001:2::/48"), "基准测试地址"},    // benchmarking (RFC 5180)
+	{netip.MustParsePrefix("2001:db8::/32"), "文档测试地址"},  // documentation (RFC 3849)
+	{netip.MustParsePrefix("2001:10::/28"), "特殊用途地址"},   // ORCHID, deprecated (RFC 4843)
+	{netip.MustParsePrefix("3fff::/20"), "文档测试地址"},      // documentation (RFC 9637)
+	{netip.MustParsePrefix("2002::/16"), "隧道地址"},        // 6to4 (RFC 3056): tunnels an embedded IPv4 target — refused wholesale so the tunnel spelling cannot bypass the IPv4 policy
+	{netip.MustParsePrefix("5f00::/16"), "特殊用途地址"},      // SRv6 segment IDs (RFC 9603): locator space, not host targets
+}
+
 // globallyReachableExceptions are single addresses INSIDE a
 // denied special-use range that the IANA registry nevertheless
 // marks Globally Reachable=True; they are carved out of the
 // enclosing denial and treated as ordinary public addresses, in
-// line with the principle stated on specialUsePrefixes. Both sit
+// line with the principle stated on specialUseRanges. Both sit
 // inside 192.0.0.0/24 (kept denied for every other address):
 //
 //   - 192.0.0.9  — Port Control Protocol anycast (RFC 7723)
@@ -156,43 +148,74 @@ var globallyReachableExceptions = []netip.Prefix{
 	netip.MustParsePrefix("192.0.0.10/32"),
 }
 
-func ipAllowedByPolicy(ip net.IP, allowLAN bool) bool {
+// ipRejectionCategory classifies one resolved IP under the
+// subscription fetch policy and returns the Chinese category of
+// the refusal, or "" when the address is allowed:
+//
+//   - loopback, unspecified, multicast and link-local addresses
+//     are ALWAYS refused;
+//   - RFC 1918 IPv4 private space and IPv6 ULA are refused unless
+//     the subscription explicitly allows LAN access;
+//   - special-use, reserved, documentation, benchmarking and
+//     other non-public ranges (specialUseRanges) are ALWAYS
+//     refused — allowLAN never widens beyond private space;
+//   - everything else is ordinary public space and is allowed.
+//
+// The address is normalised with netip first: an IPv4-mapped IPv6
+// address is unmapped to its IPv4 form before any check, so the
+// IPv6 spelling of a forbidden IPv4 target cannot slip through.
+func ipRejectionCategory(ip net.IP, allowLAN bool) string {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		if v4 := ip.To4(); v4 != nil {
 			addr, ok = netip.AddrFromSlice(v4)
 		}
 		if !ok {
-			return false
+			return "无效地址"
 		}
 	}
 	addr = addr.Unmap()
-	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() ||
-		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
-		return false
+	switch {
+	case addr.IsLoopback():
+		return "环回地址"
+	case addr.IsUnspecified():
+		return "未指定地址"
+	case addr.IsMulticast():
+		return "多播地址"
+	case addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast():
+		return "链路本地地址"
 	}
 	if addr.IsPrivate() {
-		return allowLAN
+		if allowLAN {
+			return ""
+		}
+		return "私有地址"
 	}
 	for _, exception := range globallyReachableExceptions {
 		if exception.Contains(addr) {
-			return true
+			return ""
 		}
 	}
-	for _, prefix := range specialUsePrefixes {
-		if prefix.Contains(addr) {
-			return false
+	for _, r := range specialUseRanges {
+		if r.prefix.Contains(addr) {
+			return r.category
 		}
 	}
-	return true
+	return ""
+}
+
+// ipAllowedByPolicy reports whether the policy admits the
+// address; ipRejectionCategory carries the diagnostic detail.
+func ipAllowedByPolicy(ip net.IP, allowLAN bool) bool {
+	return ipRejectionCategory(ip, allowLAN) == ""
 }
 
 // validateHostIPs resolves host and validates every resulting IP.
 // It returns the validated IPs for pinned dialing.
 func (f *subscriptionFetcher) validateHostIPs(ctx context.Context, host string, allowLAN bool) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		if !ipAllowedByPolicy(ip, allowLAN) {
-			return nil, fmt.Errorf("订阅目标地址不被允许（%s）", host)
+		if category := ipRejectionCategory(ip, allowLAN); category != "" {
+			return nil, fmt.Errorf("订阅目标地址不被允许：%s 属于%s（%s）", ip.String(), category, host)
 		}
 		return []net.IP{ip}, nil
 	}
@@ -204,8 +227,8 @@ func (f *subscriptionFetcher) validateHostIPs(ctx context.Context, host string, 
 		return nil, fmt.Errorf("订阅域名没有解析结果（%s）", host)
 	}
 	for _, ip := range ips {
-		if !ipAllowedByPolicy(ip, allowLAN) {
-			return nil, fmt.Errorf("订阅域名解析到了不被允许的地址（%s）", host)
+		if category := ipRejectionCategory(ip, allowLAN); category != "" {
+			return nil, fmt.Errorf("订阅域名解析到不被允许的地址：%s 属于%s，已拒绝连接（%s）", ip.String(), category, host)
 		}
 	}
 	return ips, nil

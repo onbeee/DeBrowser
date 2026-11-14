@@ -425,3 +425,135 @@ func TestFetchGloballyReachableExceptions(t *testing.T) {
 		}
 	}
 }
+
+// TestIPRejectionCategories pins the Stage 6C diagnostic
+// classification: every refused class of address reports its own
+// category, allowed addresses report "", and allowLAN only ever
+// widens private space.
+func TestIPRejectionCategories(t *testing.T) {
+	cases := []struct {
+		ip       string
+		allowLAN bool
+		want     string
+	}{
+		{"8.8.8.8", false, ""},
+		{"2606:4700:4700::1111", false, ""},
+		{"192.0.0.9", false, ""},    // globally reachable exception
+		{"10.0.0.5", false, "私有地址"}, // RFC1918
+		{"fd00::5", false, "私有地址"},  // ULA
+		{"10.0.0.5", true, ""},      // allowLAN widens private only
+		{"fd00::5", true, ""},
+		{"127.0.0.1", false, "环回地址"},
+		{"127.0.0.1", true, "环回地址"},
+		{"::1", false, "环回地址"},
+		{"0.0.0.0", false, "未指定地址"},
+		{"224.0.0.1", false, "多播地址"},
+		{"169.254.1.1", false, "链路本地地址"},
+		{"169.254.1.1", true, "链路本地地址"},
+		{"fe80::1", true, "链路本地地址"},
+		{"100.64.0.1", false, "共享地址空间"},
+		{"100.64.0.1", true, "共享地址空间"},
+		{"192.0.2.1", false, "文档测试地址"},
+		{"2001:db8::1", false, "文档测试地址"},
+		{"198.18.0.1", false, "基准测试地址"},
+		{"240.0.0.1", false, "保留地址"},
+		{"0.1.2.3", false, "保留地址"},
+		{"2001::1", false, "隧道地址"},           // Teredo
+		{"2002:0808:0808::1", false, "隧道地址"}, // 6to4
+		{"64:ff9b:1::1", false, "协议转换地址"},
+		{"192.0.0.1", false, "特殊用途地址"},
+		{"5f00::1", false, "特殊用途地址"},
+		{"::ffff:127.0.0.1", false, "环回地址"}, // mapped spelling judged as IPv4
+		{"::ffff:192.168.0.1", false, "私有地址"},
+	}
+	for _, tc := range cases {
+		ip := net.ParseIP(tc.ip)
+		if ip == nil {
+			t.Fatalf("bad test IP %q", tc.ip)
+		}
+		if got := ipRejectionCategory(ip, tc.allowLAN); got != tc.want {
+			t.Errorf("ipRejectionCategory(%s, %v) = %q, want %q", tc.ip, tc.allowLAN, got, tc.want)
+		}
+		// The boolean policy must agree with the category view.
+		if allowed := ipAllowedByPolicy(ip, tc.allowLAN); allowed != (tc.want == "") {
+			t.Errorf("ipAllowedByPolicy(%s, %v) = %v, inconsistent with category %q", tc.ip, tc.allowLAN, allowed, tc.want)
+		}
+	}
+}
+
+// TestFetchRejectionDiagnosticsMessage: a mixed DNS answer is
+// refused as a whole, the error names the exact offending record
+// and its category (not just the domain), and nothing is dialed.
+func TestFetchRejectionDiagnosticsMessage(t *testing.T) {
+	fx, _ := newFetchFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	fx.resolve["subs.example.com"] = []net.IP{net.ParseIP("93.184.216.34"), net.ParseIP("192.0.2.53")}
+	_, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed?token=secret", false)
+	if err == nil {
+		t.Fatal("mixed resolution accepted")
+	}
+	msg := err.Error()
+	for _, want := range []string{"192.0.2.53", "文档测试地址", "subs.example.com"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "token=secret") || strings.Contains(msg, "93.184.216.34") {
+		t.Errorf("error leaks URL material or blames the good record: %q", msg)
+	}
+	if len(fx.dialedTo) != 0 {
+		t.Fatalf("dialed despite refusal: %v", fx.dialedTo)
+	}
+	// A private offender is categorised as such.
+	fx.resolve["subs.example.com"] = []net.IP{net.ParseIP("172.16.0.9")}
+	_, err = fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
+	if err == nil || !strings.Contains(err.Error(), "172.16.0.9") || !strings.Contains(err.Error(), "私有地址") {
+		t.Fatalf("private rejection error = %v", err)
+	}
+}
+
+// TestFetchRebindingStaysPinned: validation happens inside the
+// dial hook against the very answer being dialed. A resolver that
+// turns hostile AFTER the first answer cannot redirect the
+// connection: the fetch completes over the first (validated,
+// pinned) address and the resolver is consulted exactly once.
+// Conversely, a hostile first answer is refused at dial time —
+// there is no earlier trusting pass to bypass.
+func TestFetchRebindingStaysPinned(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("proxies: []\n"))
+	})
+	fx, _ := newFetchFixture(t, handler)
+	calls := 0
+	fx.fetcher.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		calls++
+		if calls == 1 {
+			return []net.IP{net.ParseIP("93.184.216.34")}, nil
+		}
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil // rebinding attempt
+	}
+	body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
+	if err != nil {
+		t.Fatalf("fetch failed under rebinding resolver: %v", err)
+	}
+	if string(body) != "proxies: []\n" {
+		t.Fatalf("body = %q", body)
+	}
+	if calls != 1 {
+		t.Fatalf("resolver consulted %d times, want exactly 1 (the dial-time validation)", calls)
+	}
+	if len(fx.dialedTo) != 1 || fx.dialedTo[0] != "93.184.216.34:80" {
+		t.Fatalf("dialedTo = %v, want the pinned validated address", fx.dialedTo)
+	}
+	// Hostile from the start: refused inside the dial, no dial.
+	fx2, _ := newFetchFixture(t, handler)
+	fx2.fetcher.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	_, err = fx2.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
+	if err == nil || !strings.Contains(err.Error(), "环回地址") {
+		t.Fatalf("hostile-first-answer error = %v, want a loopback-category refusal", err)
+	}
+	if len(fx2.dialedTo) != 0 {
+		t.Fatalf("dialed a refused address: %v", fx2.dialedTo)
+	}
+}
