@@ -50,7 +50,7 @@ DeBrowser is portable-first and local-first. Everything lives next to the execut
 ```
 <application folder>\
   debrowser.exe
-  data\            debrowser.db, backups\, logs\, profiles\, mihomo\
+  data\            debrowser.db, backups\, logs\, profiles\
   webview2-data\   WebView2 user data for the app window
   config\          settings.json (language, theme)
 ```
