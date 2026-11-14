@@ -15,8 +15,12 @@ import (
 	"sync"
 	"time"
 
+	"runtime/debug"
+	"sort"
+
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
+	"github.com/onbeee/DeBrowser/internal/store"
 	"github.com/onbeee/DeBrowser/internal/version"
 )
 
@@ -40,6 +44,10 @@ type DiagnosticsService struct {
 	// internal/app so this package stays GUI-free). An empty
 	// result means "cancelled".
 	SavePathPicker func(defaultName string) (string, error)
+
+	// CoreInfo, when wired, contributes the Mihomo core's state
+	// and log tail to the fault report. Set by the app assembly.
+	CoreInfo coreInfoProvider
 
 	// replaceFile atomically replaces the export destination with
 	// the finished temporary archive (platform implementation in
@@ -144,7 +152,7 @@ func (s *DiagnosticsService) ExportDiagnostics() (ExportResult, error) {
 	if dest == "" {
 		return ExportResult{Cancelled: true}, nil
 	}
-	summary, err := s.exportTo(dest)
+	summary, err := s.exportTo(dest, nil)
 	auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
 	if err != nil {
 		return ExportResult{}, err
@@ -159,7 +167,7 @@ func (s *DiagnosticsService) ExportDiagnostics() (ExportResult, error) {
 // written to a temporary file in the same directory and renamed
 // into place, so a failure never leaves a partial export behind and
 // never touches existing data.
-func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
+func (s *DiagnosticsService) exportTo(dest string, extras map[string][]byte) (ExportSummary, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	schema, err := s.db.AppliedVersion(ctx)
 	cancel()
@@ -221,6 +229,30 @@ func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
 		})
 		totalFiles += len(files)
 		totalBytes += catBytes
+	}
+
+	// Extra documents (fault report): same treatment as the log
+	// streams — path redaction, sensitivity scan, manifest entry
+	// with the SHA-256 of exactly the archived bytes.
+	if len(extras) > 0 {
+		names := make([]string, 0, len(extras))
+		for name := range extras {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			data := redactPaths(extras[name])
+			if err := ScanForSecrets(data); err != nil {
+				return ExportSummary{}, fmt.Errorf("敏感信息检查未通过（%s）：%w", name, err)
+			}
+			sum := sha256.Sum256(data)
+			pending = append(pending, pendingFile{arcName: name, data: data, sha256: hex.EncodeToString(sum[:])})
+			manifestFiles = append(manifestFiles, map[string]any{
+				"path": name, "size": len(data), "sha256": hex.EncodeToString(sum[:]),
+			})
+			totalFiles++
+			totalBytes += int64(len(data))
+		}
 	}
 
 	manifest := map[string]any{
@@ -351,4 +383,126 @@ func ScanForSecrets(data []byte) error {
 	default:
 		return nil
 	}
+}
+
+// coreInfoProvider is what the fault report needs from the
+// Mihomo core service: a state snapshot and the core log tail.
+type coreInfoProvider interface {
+	CoreFaultInfo() CoreFaultInfo
+	GetCoreLog(lines int) ([]string, error)
+}
+
+// ExportFaultReport builds the extended ZIP a user can hand
+// straight to support/ChatGPT: everything the diagnostics
+// export carries, plus fault-report.json (app/build/OS info,
+// migration version, per-subscription and per-config operation
+// state with their already-sanitized last errors, and the
+// Mihomo core's state) and the core's own log tail. All content
+// passes the same path redaction and fail-closed sensitivity
+// scan as the log streams; the database, the vault, browser
+// data and raw user configs are never included.
+func (s *DiagnosticsService) ExportFaultReport() (ExportResult, error) {
+	start := time.Now()
+	if s.SavePathPicker == nil {
+		return ExportResult{}, fmt.Errorf("保存对话框不可用")
+	}
+	defaultName := "debrowser-fault-report-" + time.Now().Format("20060102-150405") + ".zip"
+	dest, err := s.SavePathPicker(defaultName)
+	if err != nil {
+		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		return ExportResult{}, fmt.Errorf("打开保存对话框失败：%w", err)
+	}
+	if dest == "" {
+		return ExportResult{Cancelled: true}, nil
+	}
+	extras, err := s.buildFaultReportExtras()
+	if err != nil {
+		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		return ExportResult{}, err
+	}
+	summary, err := s.exportTo(dest, extras)
+	auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+	if err != nil {
+		return ExportResult{}, err
+	}
+	s.mu.Lock()
+	s.lastExport = &summary
+	s.mu.Unlock()
+	return ExportResult{Path: summary.Path, Files: summary.Files, Bytes: summary.Bytes}, nil
+}
+
+func (s *DiagnosticsService) buildFaultReportExtras() (map[string][]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	schema, err := s.db.AppliedVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取数据库结构版本失败：%w", err)
+	}
+	st := store.New(s.db)
+	report := map[string]any{
+		"reportKind":    "fault-report",
+		"generatedAt":   time.Now().Format(time.RFC3339),
+		"appName":       version.Name,
+		"appVersion":    version.Version,
+		"platform":      runtime.GOOS + "/" + runtime.GOARCH,
+		"schemaVersion": schema,
+		"correlation":   "审计日志（logs/operation）按操作名与目标 ID 记录每次导入/刷新/导出；订阅与配置 ID 即关联键，可据此在日志中定位完整阶段记录。",
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				report["gitCommit"] = setting.Value
+			}
+		}
+	}
+	if subs, err := st.ListSubscriptions(ctx); err == nil {
+		list := make([]map[string]any, 0, len(subs))
+		for _, sub := range subs {
+			entry := map[string]any{
+				"id": sub.ID, "name": sub.Name, "urlHint": sub.URLHint,
+				"lastStatus": sub.LastStatus, "lastError": sub.LastError,
+			}
+			if sub.LastUpdatedAt != nil {
+				entry["lastUpdatedAt"] = *sub.LastUpdatedAt
+			}
+			list = append(list, entry)
+		}
+		report["subscriptions"] = list
+	}
+	if cfgs, err := st.ListMihomoConfigs(ctx); err == nil {
+		list := make([]map[string]any, 0, len(cfgs))
+		for _, cfg := range cfgs {
+			list = append(list, map[string]any{
+				"id": cfg.ID, "name": cfg.Name, "sourceType": cfg.SourceType,
+			})
+		}
+		report["configs"] = list
+	}
+	extras := map[string][]byte{}
+	if s.CoreInfo != nil {
+		info := s.CoreInfo.CoreFaultInfo()
+		report["mihomoCore"] = map[string]any{
+			"installed": info.Installed, "version": info.Version,
+			"running": info.Running, "lastExit": info.LastExit,
+			"updateStatus": info.UpdateStatus, "latestVersion": info.LatestVersion,
+			"lastUpdateError": info.LastUpdateError,
+		}
+		if lines, err := s.CoreInfo.GetCoreLog(200); err == nil && len(lines) > 0 {
+			extras["mihomo-core.log"] = []byte(joinLines(lines))
+		}
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	extras["fault-report.json"] = data
+	return extras, nil
+}
+
+func joinLines(lines []string) string {
+	out := ""
+	for _, l := range lines {
+		out += l + "\n"
+	}
+	return out
 }

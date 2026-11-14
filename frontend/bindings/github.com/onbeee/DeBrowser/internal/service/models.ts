@@ -18,6 +18,48 @@ export interface CategoryView {
 }
 
 /**
+ * CoreFaultInfo is the core's contribution to the diagnostics
+ * fault report (§10): versions and lifecycle state only — never
+ * the controller secret or any user data.
+ */
+export interface CoreFaultInfo {
+    "Installed": boolean;
+    "Version": string;
+    "Running": boolean;
+    "LastExit": string;
+    "UpdateStatus": string;
+    "LatestVersion": string;
+    "LastUpdateError": string;
+}
+
+/**
+ * CoreStatusView is the settings page's core status.
+ */
+export interface CoreStatusView {
+    "installed": boolean;
+    "version": string;
+    "running": boolean;
+    "pid": number;
+    "startedAt": string;
+    "lastExit": string;
+}
+
+/**
+ * CoreUpdateView is the settings page's update state.
+ */
+export interface CoreUpdateView {
+    "currentVersion": string;
+    "latestVersion": string;
+
+    /**
+     * unchecked | up-to-date | update-available | check-failed
+     */
+    "status": string;
+    "checkedAt": string;
+    "error": string;
+}
+
+/**
  * CreateInstanceInput carries the user-editable fields for creation.
  * UserDataDir is optional: empty means the default profiles/<id>.
  */
@@ -45,18 +87,6 @@ export interface CreateProxyInput {
     "configJson": string;
     "sortOrder": number;
     "secrets": { [_ in string]?: string } | null;
-}
-
-/**
- * CustomMembershipView is one overlay attachment of one node, for
- * the node's detail view. GroupExists is false when the config's
- * current document no longer contains the group.
- */
-export interface CustomMembershipView {
-    "configId": string;
-    "configName": string;
-    "groupName": string;
-    "groupExists": boolean;
 }
 
 /**
@@ -96,18 +126,11 @@ export interface ExportSummary {
 /**
  * GroupMemberView is one group member. ProxyName is the current
  * display name of the referenced proxy row (proxy members only).
- * Origin separates the members that came with the imported
- * document ("imported", read-only) from the user's own overlay
- * attachments ("custom", removable) — Stage 6C. ProxyID is set
- * for custom members (the removal handle) and for imported proxy
- * members.
  */
 export interface GroupMemberView {
     "name": string;
     "kind": string;
     "proxyName"?: string;
-    "origin": string;
-    "proxyId"?: string;
 }
 
 /**
@@ -140,15 +163,6 @@ export interface MihomoConfigView {
     "issues": mihomoimport$0.SecurityIssue[] | null;
     "createdAt": string;
     "updatedAt": string;
-}
-
-/**
- * OrphanedCustomGroupView lists the overlay members whose group
- * no longer exists in the config's current document.
- */
-export interface OrphanedCustomGroupView {
-    "groupName": string;
-    "members": GroupMemberView[] | null;
 }
 
 /**

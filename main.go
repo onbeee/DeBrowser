@@ -33,6 +33,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
+	"github.com/onbeee/DeBrowser/internal/mihomocore"
 	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/service"
 	"github.com/onbeee/DeBrowser/internal/singleinstance"
@@ -173,8 +174,23 @@ func run() error {
 	subscriptionService := service.NewSubscriptionService(proxyService, cfg.Layout, logger)
 	subscriptionService.Auditor = logSystem
 
-	wailsApp := app.New(cfg, appService, instanceService, proxyService, diagnosticsService, subscriptionService, logger, assets)
+	// Mihomo core management (official binary, unmodified):
+	// install the bundled copy into the portable data directory
+	// if needed. A failure here is not fatal — the settings page
+	// reports the core as not installed — and the core is never
+	// auto-started and never auto-updated.
+	coreManager := mihomocore.NewManager(cfg.Layout, logger)
+	if err := coreManager.EnsureInstalled(); err != nil {
+		logger.Error("Mihomo 核心初始化失败", "error", err)
+	}
+	coreService := service.NewCoreService(coreManager, logger)
+	diagnosticsService.CoreInfo = coreService
+
+	wailsApp := app.New(cfg, appService, instanceService, proxyService, diagnosticsService, subscriptionService, coreService, logger, assets)
 	runErr := wailsApp.Run()
+
+	// Exit cleanup: no Mihomo core process may outlive the app.
+	coreManager.Shutdown()
 
 	// The app has fully stopped and its background loops are drained:
 	// nothing can touch the database any more, so close it now.
