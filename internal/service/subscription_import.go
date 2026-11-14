@@ -179,6 +179,21 @@ func (s *SubscriptionService) applyImport(c context.Context, owner importOwner, 
 	nodeIDByName := map[string]string{}
 	var staleRefs []string
 	txErr := s.proxy.withTx(c, func(tx *store.Store) error {
+		// Name-conflict guard (Stage 6C): BEFORE anything is
+		// rebuilt, the incoming document's node names must not
+		// collide with the custom nodes the user has attached to
+		// this config through the overlay. A conflict aborts the
+		// whole transaction here — the previous config, nodes,
+		// groups, members, overlay rows and vault references all
+		// stay exactly as they were, and the vault entries staged
+		// above are compensated by the caller as for any other
+		// failed import. (A brand-new config has no overlay rows,
+		// so the same check runs and trivially passes.)
+		if name, conflict, err := importNameConflict(tx, c, configID, parsed); err != nil {
+			return err
+		} else if conflict {
+			return fmt.Errorf("导入的节点名称「%s」与已加入该配置的自定义节点重名，已拒绝本次导入", name)
+		}
 		cfgRow := model.MihomoConfig{
 			ID: configID, Name: configName, FilePath: relPath, SHA256: digest,
 			SecretRef: bundleRef, FormatVersion: 1, SecurityReportJSON: string(issuesJSON),

@@ -1,13 +1,89 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/onbeee/DeBrowser/internal/mihomoimport"
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
+
+// configNameConflict reports whether name is already used inside
+// one config's EFFECTIVE node set — the config's imported nodes
+// plus the distinct custom nodes attached through the overlay —
+// by a node other than excludeProxyID. Mihomo groups reference
+// members by name, so two different nodes sharing one name in
+// one config would be ambiguous; across configs the same name
+// is fine. Comparison is exact string equality, matching the
+// stored names (writes trim surrounding space; no case folding,
+// exactly Mihomo's own name semantics).
+func configNameConflict(q *store.Store, c context.Context, configID, name, excludeProxyID string) (bool, error) {
+	imported, err := q.ListProxiesByConfig(c, configID)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range imported {
+		if p.ID != excludeProxyID && p.Name == name {
+			return true, nil
+		}
+	}
+	members, err := q.ListCustomGroupMembers(c, configID)
+	if err != nil {
+		return false, err
+	}
+	seen := map[string]bool{}
+	for _, m := range members {
+		if m.ProxyID == excludeProxyID || seen[m.ProxyID] {
+			continue
+		}
+		seen[m.ProxyID] = true
+		node, err := q.GetProxy(c, m.ProxyID)
+		if err != nil {
+			return false, err
+		}
+		if node.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// importNameConflict reports the first name that appears both in
+// a freshly parsed document's node set and among the config's
+// existing overlay custom nodes (each counted once, however many
+// groups it joined). Used before an import/refresh rebuilds
+// anything.
+func importNameConflict(q *store.Store, c context.Context, configID string, parsed *mihomoimport.Parsed) (string, bool, error) {
+	incoming := map[string]bool{}
+	for _, n := range parsed.Nodes {
+		incoming[n.Name] = true
+	}
+	if len(incoming) == 0 {
+		return "", false, nil
+	}
+	members, err := q.ListCustomGroupMembers(c, configID)
+	if err != nil {
+		return "", false, err
+	}
+	seen := map[string]bool{}
+	for _, m := range members {
+		if seen[m.ProxyID] {
+			continue
+		}
+		seen[m.ProxyID] = true
+		node, err := q.GetProxy(c, m.ProxyID)
+		if err != nil {
+			return "", false, err
+		}
+		if incoming[node.Name] {
+			return node.Name, true, nil
+		}
+	}
+	return "", false, nil
+}
 
 // Custom group-member overlay (Stage 6C review fix): the user
 // attaches their own custom nodes to the native proxy-groups of
@@ -89,6 +165,17 @@ func (s *SubscriptionService) AddCustomGroupMember(configID, groupName, proxyID 
 			return err
 		} else if has {
 			return fmt.Errorf("该节点已经是这个代理组的成员")
+		}
+		// Name uniqueness inside the config's effective node set:
+		// the node's name must not collide with any imported node
+		// of this config nor with a DIFFERENT custom node already
+		// attached to this config (in any of its groups). The node
+		// itself is excluded, so joining several groups of the
+		// same config stays allowed.
+		if conflict, err := configNameConflict(tx, c, configID, node.Name, proxyID); err != nil {
+			return err
+		} else if conflict {
+			return fmt.Errorf("节点名称「%s」与该配置中已有的节点重名，无法加入", node.Name)
 		}
 		n, err := tx.CountCustomGroupMembers(c, configID, groupName)
 		if err != nil {

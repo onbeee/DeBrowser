@@ -392,6 +392,38 @@ func (s *ProxyService) updateProxy(input UpdateProxyInput) (ProxyView, error) {
 	}
 	var updated model.Proxy
 	txErr := s.withTx(c, func(tx *store.Store) error {
+		// Renaming a custom node that is attached to imported
+		// configs (Stage 6C overlay) must keep every attached
+		// config's effective node set name-unique: check the new
+		// name against each attached config (imported nodes and
+		// other attached custom nodes, excluding this node). Any
+		// conflict aborts the whole update inside this
+		// transaction — name, memberships, vault reference and
+		// instance bindings all stay untouched.
+		if current.Source == "custom" && fields.name != current.Name {
+			memberships, err := tx.ListCustomMembershipsByProxy(c, current.ID)
+			if err != nil {
+				return err
+			}
+			checked := map[string]bool{}
+			for _, m := range memberships {
+				if checked[m.ConfigID] {
+					continue
+				}
+				checked[m.ConfigID] = true
+				conflict, err := configNameConflict(tx, c, m.ConfigID, fields.name, current.ID)
+				if err != nil {
+					return err
+				}
+				if conflict {
+					cfgName := m.ConfigID
+					if cfg, err := tx.GetMihomoConfig(c, m.ConfigID); err == nil {
+						cfgName = cfg.Name
+					}
+					return fmt.Errorf("新名称「%s」与配置「%s」中已有的节点重名，无法修改", fields.name, cfgName)
+				}
+			}
+		}
 		var err error
 		updated, err = tx.UpdateProxy(c, row)
 		return err
