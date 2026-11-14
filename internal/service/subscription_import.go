@@ -211,7 +211,7 @@ func (s *SubscriptionService) applyImport(c context.Context, owner importOwner, 
 				subID := owner.subscription.ID
 				row.SubscriptionID = &subID
 			} else {
-				row.Source = "file_import"
+				row.Source = "file"
 			}
 			if d.matched != nil {
 				row.ID = d.matched.ID

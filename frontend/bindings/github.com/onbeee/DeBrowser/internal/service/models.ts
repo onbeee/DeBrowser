@@ -161,6 +161,12 @@ export interface ProxyView {
     "sortOrder": number;
     "source": string;
     "subscriptionId"?: string | null;
+
+    /**
+     * ConfigID identifies the imported Mihomo config a node came
+     * from (Stage 6C: the unified page groups nodes by source).
+     */
+    "configId"?: string | null;
     "hasSecrets": boolean;
     "secretFields": string[] | null;
     "credentialStatus": string;

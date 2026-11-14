@@ -361,7 +361,7 @@ func TestImportLocalConfigFile(t *testing.T) {
 		t.Fatalf("cfg = %+v err %v", cfg, err)
 	}
 	proxies, _ := f.store.ListProxiesByConfig(c, sum.ConfigID)
-	if len(proxies) != 2 || proxies[0].Source != "file_import" {
+	if len(proxies) != 2 || proxies[0].Source != "file" {
 		t.Fatalf("proxies = %+v", proxies)
 	}
 	// Cancel is a normal, error-free outcome.
