@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -48,12 +50,12 @@ func TestFetchSuccessPublicHost(t *testing.T) {
 	fx, _ := newFetchFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("proxies: []"))
 	}))
-	body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed?token=abc", false)
+	res, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed?token=abc", false)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if string(body) != "proxies: []" {
-		t.Fatalf("body = %q", body)
+	if string(res.Body) != "proxies: []" {
+		t.Fatalf("body = %q", res.Body)
 	}
 	// The dial used the validated public IP, never the hostname
 	// and never an unvalidated address.
@@ -110,9 +112,9 @@ func TestFetchRedirectPolicy(t *testing.T) {
 		http.Redirect(w, r, "http://127.0.0.1:9/secret", http.StatusFound)
 	})
 	fx, _ := newFetchFixture(t, mux)
-	body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/start", false)
-	if err != nil || string(body) != "ok-body" {
-		t.Fatalf("redirect chain: body=%q err=%v", body, err)
+	res, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/start", false)
+	if err != nil || string(res.Body) != "ok-body" {
+		t.Fatalf("redirect chain: body=%q err=%v", res.Body, err)
 	}
 	if _, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/loop", false); err == nil ||
 		!strings.Contains(err.Error(), "重定向") {
@@ -196,12 +198,12 @@ func TestFetchTLS(t *testing.T) {
 		!strings.Contains(err.Error(), "TLS") {
 		t.Fatalf("untrusted TLS: err = %v", err)
 	}
-	body, err := newTLSFetcher(true).fetch(context.Background(), "https://example.com/feed", false)
+	res, err := newTLSFetcher(true).fetch(context.Background(), "https://example.com/feed", false)
 	if err != nil {
 		t.Fatalf("trusted TLS fetch: %v", err)
 	}
-	if string(body) != "tls-body" {
-		t.Fatalf("body = %q", body)
+	if string(res.Body) != "tls-body" {
+		t.Fatalf("body = %q", res.Body)
 	}
 }
 
@@ -408,13 +410,13 @@ func TestFetchGloballyReachableExceptions(t *testing.T) {
 	for _, tc := range cases {
 		fx.dialedTo = nil
 		fx.resolve["subs.example.com"] = []net.IP{net.ParseIP(tc.resolved)}
-		body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
+		res, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
 		if err != nil {
 			t.Errorf("%s: fetch failed: %v", tc.resolved, err)
 			continue
 		}
-		if string(body) != payload {
-			t.Errorf("%s: body mismatch: %q", tc.resolved, body)
+		if string(res.Body) != payload {
+			t.Errorf("%s: body mismatch: %q", tc.resolved, res.Body)
 		}
 		if len(fx.dialedTo) != 1 {
 			t.Errorf("%s: expected exactly one pinned dial, got %v", tc.resolved, fx.dialedTo)
@@ -531,12 +533,12 @@ func TestFetchRebindingStaysPinned(t *testing.T) {
 		}
 		return []net.IP{net.ParseIP("127.0.0.1")}, nil // rebinding attempt
 	}
-	body, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
+	res, err := fx.fetcher.fetch(context.Background(), "http://subs.example.com/feed", false)
 	if err != nil {
 		t.Fatalf("fetch failed under rebinding resolver: %v", err)
 	}
-	if string(body) != "proxies: []\n" {
-		t.Fatalf("body = %q", body)
+	if string(res.Body) != "proxies: []\n" {
+		t.Fatalf("body = %q", res.Body)
 	}
 	if calls != 1 {
 		t.Fatalf("resolver consulted %d times, want exactly 1 (the dial-time validation)", calls)
@@ -555,5 +557,118 @@ func TestFetchRebindingStaysPinned(t *testing.T) {
 	}
 	if len(fx2.dialedTo) != 0 {
 		t.Fatalf("dialed a refused address: %v", fx2.dialedTo)
+	}
+}
+
+// ---- Fake-IP fallback (Stage 6C redo §3) ----
+//
+// Regression suite for the Windows acceptance failure: the
+// system DNS (hijacked by a Clash/Mihomo core in Fake-IP mode)
+// answers the subscription domain with 198.18.1.34, a Fake-IP
+// pool placeholder. The direct policy must keep refusing to
+// dial it — and the fetch must instead succeed through the
+// operating system's configured proxy, which receives the
+// hostname. Whitelisting 198.18.0.0/15 for direct dials would
+// be both useless (the dial cannot succeed) and an SSRF hole;
+// these tests pin that it never happens.
+
+func fakeIPFetcher(t *testing.T, proxyURL string, proxyHits *int32) *subscriptionFetcher {
+	t.Helper()
+	f := newSubscriptionFetcher()
+	f.resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("198.18.1.34")}, nil
+	}
+	f.dial = func(context.Context, string, string) (net.Conn, error) {
+		t.Error("direct dial attempted for a Fake-IP answer")
+		return nil, errors.New("must not dial")
+	}
+	if proxyURL != "" {
+		f.systemProxy = func() (string, bool) { return proxyURL, true }
+	} else {
+		f.systemProxy = func() (string, bool) { return "", false }
+	}
+	return f
+}
+
+func proxyServer(t *testing.T, hits *int32, status int) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		_, _ = w.Write([]byte("proxies: []\n"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL // http://127.0.0.1:<port>
+}
+
+func TestFetchFakeIPFallsBackToSystemProxy(t *testing.T) {
+	var hits int32
+	f := fakeIPFetcher(t, proxyServer(t, &hits, http.StatusOK), &hits)
+	res, err := f.fetch(context.Background(), "http://subs.example.com/feed", false)
+	if err != nil {
+		t.Fatalf("fake-ip fetch via system proxy: %v", err)
+	}
+	if res.Path != "system-proxy" {
+		t.Errorf("path = %q, want system-proxy", res.Path)
+	}
+	if string(res.Body) != "proxies: []\n" {
+		t.Errorf("body = %q", res.Body)
+	}
+	if hits != 1 {
+		t.Errorf("proxy hits = %d, want 1", hits)
+	}
+}
+
+func TestFetchFakeIPWithoutSystemProxyFails(t *testing.T) {
+	var hits int32
+	f := fakeIPFetcher(t, "", &hits)
+	_, err := f.fetch(context.Background(), "http://subs.example.com/feed", false)
+	if err == nil {
+		t.Fatal("fake-ip fetch without a system proxy succeeded")
+	}
+	if !strings.Contains(err.Error(), "Fake-IP") {
+		t.Errorf("error should explain the Fake-IP situation, got: %v", err)
+	}
+}
+
+func TestFetchFakeIPRejectsPublicSystemProxy(t *testing.T) {
+	var hits int32
+	f := fakeIPFetcher(t, "http://93.184.216.34:8080", &hits)
+	if _, err := f.fetch(context.Background(), "http://subs.example.com/feed", false); err == nil {
+		t.Fatal("fetch via a public proxy endpoint was accepted")
+	}
+}
+
+func TestFetchFakeIPProxyErrorFails(t *testing.T) {
+	var hits int32
+	f := fakeIPFetcher(t, proxyServer(t, &hits, http.StatusInternalServerError), &hits)
+	if _, err := f.fetch(context.Background(), "http://subs.example.com/feed", false); err == nil {
+		t.Fatal("fetch succeeded despite the proxy returning 500")
+	}
+	if hits != 1 {
+		t.Errorf("proxy hits = %d, want 1", hits)
+	}
+}
+
+func TestFetchMixedFakeAndPrivateGetsNoFallback(t *testing.T) {
+	var hits int32
+	proxy := proxyServer(t, &hits, http.StatusOK)
+	f := newSubscriptionFetcher()
+	f.resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("198.18.1.34"), net.ParseIP("10.0.0.8")}, nil
+	}
+	f.dial = func(context.Context, string, string) (net.Conn, error) {
+		t.Error("direct dial attempted for a rejected answer")
+		return nil, errors.New("must not dial")
+	}
+	f.systemProxy = func() (string, bool) { return proxy, true }
+	if _, err := f.fetch(context.Background(), "http://subs.example.com/feed", false); err == nil {
+		t.Fatal("mixed fake-ip + private answer was accepted")
+	}
+	if hits != 0 {
+		t.Errorf("proxy consulted %d times for a mixed rejection, want 0 (fallback is Fake-IP-only)", hits)
 	}
 }

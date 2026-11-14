@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -50,11 +51,17 @@ type subscriptionFetcher struct {
 	resolve   func(ctx context.Context, host string) ([]net.IP, error)
 	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
 	tlsConfig *tls.Config // nil in production; tests inject test roots
+	// systemProxy reports the operating system's configured
+	// proxy (an explicit, user-level setting — never environment
+	// variables). It is the fallback download path for Fake-IP
+	// DNS environments; see fetch.
+	systemProxy func() (string, bool)
 }
 
 func newSubscriptionFetcher() *subscriptionFetcher {
 	resolver := &net.Resolver{}
 	return &subscriptionFetcher{
+		systemProxy: detectSystemProxy,
 		resolve: func(ctx context.Context, host string) ([]net.IP, error) {
 			return resolver.LookupIP(ctx, "ip", host)
 		},
@@ -226,16 +233,103 @@ func (f *subscriptionFetcher) validateHostIPs(ctx context.Context, host string, 
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("订阅域名没有解析结果（%s）", host)
 	}
+	var rejected []netip.Addr
+	var detail string
 	for _, ip := range ips {
 		if category := ipRejectionCategory(ip, allowLAN); category != "" {
-			return nil, fmt.Errorf("订阅域名解析到不被允许的地址：%s 属于%s，已拒绝连接（%s）", ip.String(), category, host)
+			if addr, ok := netip.AddrFromSlice(ip); ok {
+				rejected = append(rejected, addr.Unmap())
+			}
+			if detail == "" {
+				detail = fmt.Sprintf("订阅域名解析到不被允许的地址：%s 属于%s，已拒绝连接（%s）", ip.String(), category, host)
+			}
 		}
+	}
+	if len(rejected) > 0 {
+		return nil, &policyRejectError{host: host, resolvedCount: len(ips), rejected: rejected, detail: detail}
 	}
 	return ips, nil
 }
 
-// fetch downloads rawURL under the subscription policy.
-func (f *subscriptionFetcher) fetch(ctx context.Context, rawURL string, allowLAN bool) ([]byte, error) {
+// policyRejectError is a whole-resolution refusal: at least one
+// resolved address failed the SSRF policy, so nothing was
+// dialed. It carries the resolution outcome so callers can
+// recognise the Fake-IP signature (below) without parsing text.
+type policyRejectError struct {
+	host          string
+	resolvedCount int
+	rejected      []netip.Addr
+	detail        string
+}
+
+func (e *policyRejectError) Error() string { return e.detail }
+
+// fakeIPRange is the Clash/Mihomo Fake-IP pool (the RFC 2544
+// benchmarking block). A DNS answer drawn entirely from it is
+// not a set of real server addresses at all: it is the local
+// proxy core's placeholder mapping, meaningful only to that
+// core. Dialing it directly can never succeed — but the core
+// itself can serve the request when it is handed the hostname
+// through its proxy port.
+var fakeIPRange = netip.MustParsePrefix("198.18.0.0/15")
+
+// allFakeIP reports whether EVERY resolved address was rejected
+// and every rejection sits inside the Fake-IP pool — the exact
+// signature of a Fake-IP DNS environment. Any other rejection
+// mix keeps the plain refusal: no fallback is attempted.
+func (e *policyRejectError) allFakeIP() bool {
+	if len(e.rejected) == 0 || len(e.rejected) != e.resolvedCount {
+		return false
+	}
+	for _, a := range e.rejected {
+		if !fakeIPRange.Contains(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// fetchResult is one successful download plus the path that
+// served it: "direct" for the policy-validated direct dial, or
+// "system-proxy" for the Fake-IP fallback through the operating
+// system's configured proxy.
+type fetchResult struct {
+	Body []byte
+	Path string
+}
+
+// fetch downloads rawURL. The primary path is the direct,
+// SSRF-validated dial (fetchDirect). Exactly one failure mode
+// earns a fallback: the whole DNS answer was rejected AND every
+// rejected address sits in the Fake-IP pool — the signature of
+// a local proxy core (Clash/Mihomo) answering DNS with
+// placeholder addresses that only the core itself can resolve.
+// In that environment a direct dial can never work for any
+// application, so the download is retried through the operating
+// system's configured proxy, which receives the hostname and
+// resolves it on its side (the same fallback chain Clash Verge
+// itself uses: direct, then proxy). Every other failure —
+// including any mixed or non-Fake-IP rejection — keeps the
+// plain refusal; the direct policy is never weakened.
+func (f *subscriptionFetcher) fetch(ctx context.Context, rawURL string, allowLAN bool) (fetchResult, error) {
+	body, err := f.fetchDirect(ctx, rawURL, allowLAN)
+	if err == nil {
+		return fetchResult{Body: body, Path: "direct"}, nil
+	}
+	var rej *policyRejectError
+	if errors.As(err, &rej) && rej.allFakeIP() {
+		pbody, perr := f.fetchViaSystemProxy(ctx, rawURL)
+		if perr == nil {
+			return fetchResult{Body: pbody, Path: "system-proxy"}, nil
+		}
+		return fetchResult{}, fmt.Errorf("系统 DNS 返回了代理核心的 Fake-IP 占位地址（%s），该地址只能由代理核心解析、无法直连；已尝试通过系统代理下载但未成功：%v", rej.rejected[0], perr)
+	}
+	return fetchResult{}, err
+}
+
+// fetchDirect downloads rawURL under the subscription policy:
+// resolve, validate every IP, dial only validated IPs.
+func (f *subscriptionFetcher) fetchDirect(ctx context.Context, rawURL string, allowLAN bool) ([]byte, error) {
 	if err := validateSubscriptionURL(rawURL); err != nil {
 		return nil, err
 	}
@@ -284,6 +378,69 @@ func (f *subscriptionFetcher) fetch(ctx context.Context, rawURL string, allowLAN
 			return nil
 		},
 	}
+	return downloadWithClient(ctx, client, rawURL)
+}
+
+// fetchViaSystemProxy downloads rawURL through the operating
+// system's configured proxy. Security boundary for this path:
+// the proxy endpoint must be loopback or private-network (the
+// user's own local proxy core qualifies; an arbitrary remote
+// proxy does not), the target URL keeps the same scheme and
+// redirect validation, and the response keeps the same size
+// cap. The target hostname is handed to the proxy (CONNECT for
+// https), so no local DNS answer is involved at all. This path
+// is reached ONLY from the Fake-IP fallback in fetch — never
+// unconditionally, and environment proxy variables are never
+// consulted anywhere.
+func (f *subscriptionFetcher) fetchViaSystemProxy(ctx context.Context, rawURL string) ([]byte, error) {
+	if err := validateSubscriptionURL(rawURL); err != nil {
+		return nil, err
+	}
+	proxyStr, ok := f.systemProxy()
+	if !ok || strings.TrimSpace(proxyStr) == "" {
+		return nil, fmt.Errorf("未检测到系统代理")
+	}
+	u, err := url.Parse(proxyStr)
+	if err != nil || u.Host == "" || u.Port() == "" {
+		return nil, fmt.Errorf("系统代理设置无效")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("系统代理协议不受支持")
+	}
+	if host := u.Hostname(); host != "localhost" {
+		addr, perr := netip.ParseAddr(host)
+		if perr != nil {
+			return nil, fmt.Errorf("系统代理地址不受支持（仅本机或局域网代理）")
+		}
+		if a := addr.Unmap(); !a.IsLoopback() && !a.IsPrivate() {
+			return nil, fmt.Errorf("系统代理不在本机或局域网内，已拒绝使用")
+		}
+	}
+	transport := &http.Transport{
+		Proxy:               http.ProxyURL(u),
+		TLSClientConfig:     f.tlsConfig,
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   true,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   subscriptionFetchTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxSubscriptionRedirects {
+				return fmt.Errorf("订阅重定向次数过多")
+			}
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return fmt.Errorf("订阅重定向到了不被允许的协议")
+			}
+			return nil
+		},
+	}
+	return downloadWithClient(ctx, client, rawURL)
+}
+
+// downloadWithClient performs the GET with an already-built
+// client and applies the shared status/size rules.
+func downloadWithClient(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("订阅地址格式无效")

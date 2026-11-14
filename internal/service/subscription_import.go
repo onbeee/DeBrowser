@@ -416,7 +416,13 @@ func (s *SubscriptionService) refreshOne(c context.Context, id string) (ImportSu
 		s.markRefreshFailed(sub, err)
 		return ImportSummary{}, err
 	}
-	data, err := s.fetchFn(c, string(raw), sub.AllowLAN)
+	fetched, err := s.fetchFn(c, string(raw), sub.AllowLAN)
+	data := fetched.Body
+	if err == nil && fetched.Path != "" {
+		// Stage record for the diagnostics/fault report: which
+		// download path served this refresh (never the URL).
+		s.proxy.log.Info("订阅下载完成", "subscriptionId", sub.ID, "fetchPath", fetched.Path)
+	}
 	if err != nil {
 		s.markRefreshFailed(sub, err)
 		return ImportSummary{}, err

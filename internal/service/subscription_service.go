@@ -41,7 +41,7 @@ type SubscriptionService struct {
 
 	// fetchFn performs one subscription download. It defaults to
 	// the SSRF-guarded fetcher; tests substitute a payload source.
-	fetchFn func(ctx context.Context, rawURL string, allowLAN bool) ([]byte, error)
+	fetchFn func(ctx context.Context, rawURL string, allowLAN bool) (fetchResult, error)
 
 	// refreshMu serialises refreshes (manual and automatic never
 	// run concurrently, and the same subscription never refreshes
