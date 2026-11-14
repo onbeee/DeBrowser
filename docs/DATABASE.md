@@ -137,6 +137,8 @@ Migration 0007 was written for the Stage 6C unified proxy module (since removed 
 
 The PR #9 scope cleanup removed the proxy/subscription/Mihomo product features in code only. **No migration was added, removed, renamed or edited**: migrations 0001–0009 remain byte-identical, no table or column was dropped, and no row was deleted. Existing databases — including ones holding proxy, subscription, imported-config and vault-reference data — upgrade and start exactly as before; the populated-fixture upgrade tests for every stage (0004–0009) continue to run unchanged.
 
+The final review round of PR #9 converged the data layer further, still without touching stored data: the store's proxy/subscription/config repositories lost every create/update/delete method and now expose only the vault reference queries over those tables (`SecretRefInUse`, `AllSecretRefs`); instance create/update can no longer set or change `proxy_id` (creation writes NULL, updates preserve the stored value verbatim — pinned by `TestInstanceUpdatePreservesHistoricalProxyID`), and the instance UI carries no proxy column or selector.
+
 ## Backup before migration
 
 Schema changes are the riskiest moment for a local database, so upgrades protect the data first:

@@ -2,201 +2,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
-
-	"github.com/onbeee/DeBrowser/internal/model"
 )
 
-const proxyColumns = `id, name, protocol, address, port, config_json, secret_ref, enabled,
-	sort_order, source, subscription_id, dedup_key,
-	last_latency_ms, last_test_ok, last_tested_at, created_at, updated_at,
-	config_id, source_node_name`
-
-func scanProxy(row interface{ Scan(dest ...any) error }) (model.Proxy, error) {
-	var (
-		p        model.Proxy
-		port     sql.NullInt64
-		enable   int
-		subID    sql.NullString
-		latency  sql.NullInt64
-		testOK   sql.NullInt64
-		testedAt sql.NullString
-		configID sql.NullString
-	)
-	if err := row.Scan(&p.ID, &p.Name, &p.Protocol, &p.Address, &port,
-		&p.ConfigJSON, &p.SecretRef, &enable,
-		&p.SortOrder, &p.Source, &subID, &p.DedupKey,
-		&latency, &testOK, &testedAt, &p.CreatedAt, &p.UpdatedAt,
-		&configID, &p.SourceNodeName); err != nil {
-		return model.Proxy{}, err
-	}
-	if configID.Valid {
-		p.ConfigID = &configID.String
-	}
-	if port.Valid {
-		v := int(port.Int64)
-		p.Port = &v
-	}
-	p.Enabled = enable != 0
-	if subID.Valid {
-		p.SubscriptionID = &subID.String
-	}
-	if latency.Valid {
-		v := int(latency.Int64)
-		p.LastLatencyMs = &v
-	}
-	if testOK.Valid {
-		v := testOK.Int64 != 0
-		p.LastTestOK = &v
-	}
-	if testedAt.Valid {
-		p.LastTestedAt = &testedAt.String
-	}
-	return p, nil
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-func nullBool(p *bool) sql.NullInt64 {
-	if p == nil {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: int64(boolInt(*p)), Valid: true}
-}
-
-// CreateProxy inserts a new proxy node, generating its ID when empty.
-func (s *Store) CreateProxy(ctx context.Context, p model.Proxy) (model.Proxy, error) {
-	if p.ID == "" {
-		id, err := newID()
-		if err != nil {
-			return model.Proxy{}, err
-		}
-		p.ID = id
-	}
-	if p.ConfigJSON == "" {
-		p.ConfigJSON = "{}"
-	}
-	if p.Source == "" {
-		p.Source = "custom"
-	}
-	if _, err := s.q.ExecContext(ctx, `INSERT INTO proxies
-		(id, name, protocol, address, port, config_json, secret_ref, enabled,
-		 sort_order, source, subscription_id, dedup_key,
-		 last_latency_ms, last_test_ok, last_tested_at,
-		 config_id, source_node_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Name, p.Protocol, p.Address, nullInt(p.Port),
-		p.ConfigJSON, p.SecretRef, boolInt(p.Enabled),
-		p.SortOrder, p.Source, nullStr(p.SubscriptionID), p.DedupKey,
-		nullInt(p.LastLatencyMs), nullBool(p.LastTestOK), nullStr(p.LastTestedAt),
-		nullStr(p.ConfigID), p.SourceNodeName); err != nil {
-		return model.Proxy{}, fmt.Errorf("store: create proxy: %w", err)
-	}
-	return s.GetProxy(ctx, p.ID)
-}
-
-// GetProxy returns one proxy by ID, or ErrNotFound.
-func (s *Store) GetProxy(ctx context.Context, id string) (model.Proxy, error) {
-	p, err := scanProxy(s.q.QueryRowContext(ctx,
-		`SELECT `+proxyColumns+` FROM proxies WHERE id = ?`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return model.Proxy{}, ErrNotFound
-	}
-	if err != nil {
-		return model.Proxy{}, fmt.Errorf("store: get proxy: %w", err)
-	}
-	return p, nil
-}
-
-// ListProxies returns all proxies in display order (sort_order,
-// then name).
-func (s *Store) ListProxies(ctx context.Context) ([]model.Proxy, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT `+proxyColumns+` FROM proxies ORDER BY sort_order, name, id`)
-	if err != nil {
-		return nil, fmt.Errorf("store: list proxies: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var out []model.Proxy
-	for rows.Next() {
-		p, err := scanProxy(rows)
-		if err != nil {
-			return nil, fmt.Errorf("store: list proxies: %w", err)
-		}
-		out = append(out, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list proxies: %w", err)
-	}
-	return out, nil
-}
-
-// UpdateProxy replaces the editable fields of a proxy and refreshes
-// its updated_at timestamp. The last-test fields are managed
-// separately (UpdateProxyTestResult) and are not touched here.
-func (s *Store) UpdateProxy(ctx context.Context, p model.Proxy) (model.Proxy, error) {
-	res, err := s.q.ExecContext(ctx, `UPDATE proxies SET
-		name = ?, protocol = ?, address = ?, port = ?, config_json = ?,
-		secret_ref = ?, enabled = ?, sort_order = ?,
-		source = ?, subscription_id = ?, dedup_key = ?,
-		config_id = ?, source_node_name = ?,
-		updated_at = datetime('now')
-		WHERE id = ?`,
-		p.Name, p.Protocol, p.Address, nullInt(p.Port), p.ConfigJSON,
-		p.SecretRef, boolInt(p.Enabled), p.SortOrder,
-		p.Source, nullStr(p.SubscriptionID), p.DedupKey,
-		nullStr(p.ConfigID), p.SourceNodeName, p.ID)
-	if err != nil {
-		return model.Proxy{}, fmt.Errorf("store: update proxy: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return model.Proxy{}, fmt.Errorf("store: update proxy: %w", err)
-	} else if n == 0 {
-		return model.Proxy{}, ErrNotFound
-	}
-	return s.GetProxy(ctx, p.ID)
-}
-
-// UpdateProxyTestResult records the outcome of one connection test.
-// A failed test clears the latency (nil) rather than keeping a
-// stale success value.
-func (s *Store) UpdateProxyTestResult(ctx context.Context, id string, latencyMs *int, ok bool, testedAt string) error {
-	res, err := s.q.ExecContext(ctx, `UPDATE proxies SET
-		last_latency_ms = ?, last_test_ok = ?, last_tested_at = ?,
-		updated_at = datetime('now')
-		WHERE id = ?`,
-		nullInt(latencyMs), boolInt(ok), testedAt, id)
-	if err != nil {
-		return fmt.Errorf("store: update proxy test result: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("store: update proxy test result: %w", err)
-	} else if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// DeleteProxy removes a proxy. Instances that referenced it keep
-// existing with proxy_id set to NULL (schema ON DELETE SET NULL).
-func (s *Store) DeleteProxy(ctx context.Context, id string) error {
-	res, err := s.q.ExecContext(ctx, `DELETE FROM proxies WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete proxy: %w", err)
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("store: delete proxy: %w", err)
-	} else if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
+// This file is the historical-data compatibility layer for the
+// proxies / subscriptions / mihomo_configs tables. The proxy,
+// subscription and Mihomo-config features were removed in the PR #9
+// scope cleanup: no service, page or binding can create, update or
+// delete those records any more, so this repository intentionally
+// exposes no CRUD at all.
+//
+// What remains is exactly what data compatibility still needs:
+//
+//   - SecretRefInUse / AllSecretRefs: the vault's guarded cleanup
+//     must keep recognising credential refs held by historical
+//     proxy, subscription and imported-config rows, so an in-use
+//     credential is never collected.
+//   - The tables themselves (created by migrations 0001–0009, which
+//     are never modified) keep historical rows readable by SQLite
+//     and keep browser_instances.proxy_id foreign keys valid.
 
 // SecretRefInUse reports whether any database row (proxy,
 // subscription or imported Mihomo config) currently references

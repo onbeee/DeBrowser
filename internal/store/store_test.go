@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -27,61 +26,28 @@ func newTestStore(t *testing.T) *Store {
 
 func intPtr(v int) *int { return &v }
 
-func TestProxyCRUD(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	created, err := s.CreateProxy(ctx, model.Proxy{
-		Name: "节点 A", Protocol: "socks5", Address: "127.0.0.1",
-		Port: intPtr(1080), ConfigJSON: `{"udp":true}`, Enabled: true,
-	})
-	if err != nil {
-		t.Fatalf("CreateProxy: %v", err)
-	}
-	if created.ID == "" || created.CreatedAt == "" {
-		t.Fatalf("created proxy missing id/timestamps: %+v", created)
-	}
-	if created.Port == nil || *created.Port != 1080 {
-		t.Fatalf("port roundtrip = %v, want 1080", created.Port)
-	}
-	if !created.Enabled {
-		t.Error("enabled did not roundtrip as true")
-	}
-
-	created.Name = "节点 A2"
-	created.Enabled = false
-	updated, err := s.UpdateProxy(ctx, created)
-	if err != nil {
-		t.Fatalf("UpdateProxy: %v", err)
-	}
-	if updated.Name != "节点 A2" || updated.Enabled {
-		t.Errorf("updated = %+v", updated)
-	}
-
-	list, err := s.ListProxies(ctx)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("ListProxies = %d (err %v), want 1", len(list), err)
-	}
-	if err := s.DeleteProxy(ctx, created.ID); err != nil {
-		t.Fatalf("DeleteProxy: %v", err)
-	}
-	if _, err := s.GetProxy(ctx, created.ID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetProxy after delete err = %v, want ErrNotFound", err)
-	}
-	if err := s.DeleteProxy(ctx, created.ID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("second DeleteProxy err = %v, want ErrNotFound", err)
+// seedHistoricalProxy inserts a proxies row directly with SQL. The
+// store deliberately exposes no proxy write API any more (PR #9
+// scope cleanup), so tests seed historical rows exactly the way a
+// migrated user database contains them.
+func seedHistoricalProxy(t *testing.T, s *Store, id, name, protocol, secretRef string) {
+	t.Helper()
+	if _, err := s.q.ExecContext(context.Background(),
+		`INSERT INTO proxies (id, name, protocol, secret_ref) VALUES (?, ?, ?, ?)`,
+		id, name, protocol, secretRef); err != nil {
+		t.Fatalf("seed historical proxy: %v", err)
 	}
 }
 
 func TestProxyProtocolCheckConstraint(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	if _, err := s.CreateProxy(ctx, model.Proxy{Name: "bad", Protocol: "carrier-pigeon"}); err == nil {
+	if _, err := s.q.ExecContext(ctx,
+		`INSERT INTO proxies (id, name, protocol) VALUES ('bad', 'bad', 'carrier-pigeon')`); err == nil {
 		t.Fatal("invalid protocol accepted, want CHECK constraint error")
 	}
-	if _, err := s.CreateProxy(ctx, model.Proxy{
-		Name: "badport", Protocol: "http", Port: intPtr(70000),
-	}); err == nil {
+	if _, err := s.q.ExecContext(ctx,
+		`INSERT INTO proxies (id, name, protocol, port) VALUES ('badport', 'badport', 'http', 70000)`); err == nil {
 		t.Fatal("out-of-range port accepted, want CHECK constraint error")
 	}
 }
@@ -90,12 +56,10 @@ func TestInstanceCRUDAndConstraints(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	proxy, err := s.CreateProxy(ctx, model.Proxy{Name: "p1", Protocol: "http", Enabled: true})
-	if err != nil {
-		t.Fatalf("CreateProxy: %v", err)
-	}
+	seedHistoricalProxy(t, s, "hist-proxy-1", "p1", "http", "")
+	proxyID := "hist-proxy-1"
 	in, err := s.CreateInstance(ctx, model.Instance{
-		Name: "工作", UserDataDir: "profiles/work", ProxyID: &proxy.ID,
+		Name: "工作", UserDataDir: "profiles/work", ProxyID: &proxyID,
 		KernelName: "Chromium", KernelVersion: "130",
 	})
 	if err != nil {
@@ -104,7 +68,7 @@ func TestInstanceCRUDAndConstraints(t *testing.T) {
 	if in.Status != model.StatusStopped {
 		t.Errorf("default status = %q, want stopped", in.Status)
 	}
-	if in.ProxyID == nil || *in.ProxyID != proxy.ID {
+	if in.ProxyID == nil || *in.ProxyID != proxyID {
 		t.Errorf("proxy link not stored: %+v", in)
 	}
 
@@ -141,9 +105,10 @@ func TestInstanceCRUDAndConstraints(t *testing.T) {
 		t.Errorf("status after set = %q (err %v), want running", got.Status, err)
 	}
 
-	// Deleting the proxy detaches instances instead of failing.
-	if err := s.DeleteProxy(ctx, proxy.ID); err != nil {
-		t.Fatalf("DeleteProxy: %v", err)
+	// Deleting the proxy row (schema-level; no store API does this)
+	// detaches instances instead of failing.
+	if _, err := s.q.ExecContext(ctx, `DELETE FROM proxies WHERE id = ?`, proxyID); err != nil {
+		t.Fatalf("delete proxy row: %v", err)
 	}
 	got, err = s.GetInstance(ctx, in.ID)
 	if err != nil {

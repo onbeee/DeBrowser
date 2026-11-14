@@ -15,7 +15,7 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 | 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Delivered (PR #8, squash-merged; main `44e96e42`) |
 | 6C | Unified proxy configuration — **superseded by the PR #9 scope cleanup (2026-11-15)**: the proxy/subscription/Mihomo features built in this PR were removed again by project-owner decision before merge; see the cleanup note below | Closed as a feature; PR #9 repurposed as the scope-cleanup PR |
 | 7 | Mihomo core integration and run modes — **cancelled with the proxy scope**; whether proxy capability returns is a future re-evaluation (see below) | Cancelled |
-| 8 | Rule management (airport / custom / mixed rule sources) | Planned |
+| 8 | Rule management (airport / custom / mixed rule sources) — **cancelled with the proxy scope**; rules only made sense on top of a proxy runtime, which is no longer in the product plan | Cancelled |
 | 9 | Browser kernels, instance launch (per-instance profiles, CDP ports, lifecycle); bookmarks | Planned — current development focus |
 | 10 | Multi-window synchronization | Planned |
 | 11 | In-app update (after a code-signing / trusted-release solution) and release | Planned |
@@ -82,23 +82,27 @@ PR #9 no longer delivers a proxy feature. By the project owner's decision it now
 - **Removed**: basic proxy server management (page, `ProxyService`, bindings); subscription management and config import (subscription UI, `SubscriptionService`, the SSRF-guarded fetcher including the Fake-IP fallback, `internal/mihomoimport`, local YAML import); the unified 「代理配置」 page (cards, node list, group views); and the Mihomo core runtime (`internal/mihomocore`, `CoreService`, settings kernel section, CI bundling — the build artifact is the executable only; the app does not download, install or start a core).
 - **Sidebar fixed at eight entries**: 总览、浏览器实例、代理配置、浏览器内核、书签管理、多开同步、数据管理、系统设置. 「代理配置」 opens a placeholder page that only states the feature is not yet open.
 - **Data management**: logs, operation audit and diagnostics (formerly the standalone 「诊断」 entry) are unified under 「数据管理」, which also hosts the data overview and the (not yet open) backup & restore area. The fault report no longer contains any core, subscription or proxy fields.
-- **Data protection**: migrations 0001–0009 are untouched; no table, column or row was deleted; the vault file and entries are preserved and still opened at startup; existing instances and profiles are unaffected. The historical proxy/subscription/config tables remain as a data-compatibility layer in `internal/store` / `internal/model`.
+- **Data protection**: migrations 0001–0009 are untouched; no table, column or row was deleted; the vault file and entries are preserved and still opened at startup; existing instances and profiles are unaffected. The historical proxy/subscription/config tables remain in the schema and in `internal/model`; the `internal/store` layer over them was converged to read-only vault reference queries (no create/update/delete methods remain).
+- **Final review round**: the instance page's proxy column, form selector and `InstanceService.ListProxies` were removed as well — instance creation always writes `proxy_id` NULL and updates preserve a historical row's stored `proxy_id` verbatim, so no code path can create or change an instance proxy binding, while historical bindings stay readable as data.
 - **Current focus** (owner's phased route): (1) Chromium kernel download/install/version management, real instance launch/stop with isolated profiles and per-instance CDP ports, 3–5 instances verified on Windows 11; (2) bookmarks, browser basics, multi-window synchronization; (3) future re-evaluation of proxy capability; (4) in-app update, then full backup & restore (Stage 12, last).
 
 ## Stage 7 — (cancelled)
 
 Mihomo core integration and run modes were cancelled together with the proxy product scope in the PR #9 cleanup. Proxy capability may be re-evaluated in a future phase; nothing in the current code starts, bundles or manages a proxy core.
 
-## Stage 8 — Rule management
+## Stage 8 — Rule management (cancelled)
 
-- Rule sources for Rule mode: airport rules / custom rules / mixed (user rules first, airport base preserved, subscription updates never overwrite user rules)
-- Original config, user rules and rendered runtime config kept as three separate artifacts
+Cancelled in the PR #9 scope cleanup, together with the proxy scope it depended on: rule sources only have meaning on top of a proxy runtime. Whether proxy capability — and with it any rule management — is ever reintroduced will be evaluated separately in the future; it is not part of the current plan.
 
-## Stage 9 — Browser kernels, instance launch and proxy wiring
+## Stage 9 — Browser kernels and real instance launch
 
-- Kernel management (verified downloads, `kernels` table), instance start/stop with isolated user-data dirs and localhost CDP
+- Chromium kernel download, installation and version management (verified downloads, `kernels` table)
+- Real browser instance start and stop, with process lifecycle management
+- Independent per-instance profiles: Cookie, Local Storage and cache isolation; a user data directory is never shared between running instances
+- An independent localhost CDP port per instance
 - Changing one instance never affects others
-- Bookmarks delivered with this stage
+- Bookmark management delivered with this stage
+- No proxy wiring: instances no longer expose any proxy binding in the UI or service API (a historical `proxy_id` value stored on old rows is preserved as data only)
 
 ## Stage 10 — Multi-window synchronization
 

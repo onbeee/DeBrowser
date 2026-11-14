@@ -37,38 +37,3 @@ export enum InstanceStatus {
     StatusRunning = "running",
     StatusError = "error",
 };
-
-/**
- * Proxy is a proxy node definition. Credential material is never part
- * of this struct: non-secret parameters live in ConfigJSON, and
- * SecretRef is an opaque reference into the credential vault
- * (internal/secrets).
- */
-export interface Proxy {
-    "id": string;
-    "name": string;
-    "protocol": string;
-    "address": string;
-    "port"?: number | null;
-    "configJson": string;
-    "secretRef": string;
-    "enabled": boolean;
-    "sortOrder": number;
-    "source": string;
-    "subscriptionId"?: string | null;
-
-    /**
-     * ConfigID is the imported Mihomo config this node came from
-     * (Stage 6); nil for manually created nodes. SourceNodeName is
-     * the node's name inside its source document — native
-     * proxy-group members address nodes by that name.
-     */
-    "configId"?: string | null;
-    "sourceNodeName": string;
-    "dedupKey": string;
-    "lastLatencyMs"?: number | null;
-    "lastTestOk"?: boolean | null;
-    "lastTestedAt"?: string | null;
-    "createdAt": string;
-    "updatedAt": string;
-}

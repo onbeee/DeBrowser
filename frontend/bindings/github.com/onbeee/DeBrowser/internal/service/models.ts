@@ -16,10 +16,12 @@ export interface CategoryView {
 /**
  * CreateInstanceInput carries the user-editable fields for creation.
  * UserDataDir is optional: empty means the default profiles/<id>.
+ * There is deliberately no proxy field: instances are always created
+ * unbound (proxy_id NULL). A historical instance's stored proxy_id is
+ * data, not an editable binding.
  */
 export interface CreateInstanceInput {
     "name": string;
-    "proxyId": string | null;
     "startUrl": string;
     "kernelName": string;
     "kernelVersion": string;
@@ -94,11 +96,12 @@ export interface Status {
  * UpdateInstanceInput carries the editable fields of one instance.
  * The profile directory of an existing instance cannot be changed
  * here (moving live profile data is a separate, explicit operation).
+ * The stored proxy_id is likewise not editable here: updates preserve
+ * whatever value the row already has.
  */
 export interface UpdateInstanceInput {
     "id": string;
     "name": string;
-    "proxyId": string | null;
     "startUrl": string;
     "kernelName": string;
     "kernelVersion": string;
