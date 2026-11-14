@@ -71,6 +71,30 @@ export default function DiagnosticsPage() {
       .finally(() => setExporting(false));
   }, [log, refresh]);
 
+  const doFaultReport = useCallback(() => {
+    setExporting(true);
+    setExportNote(null);
+    setExportError(null);
+    DiagnosticsService.ExportFaultReport()
+      .then((res: ExportResult) => {
+        if (res.cancelled) {
+          setExportNote("已取消导出。");
+        } else {
+          setExportNote(
+            `故障报告已导出：${res.path}。可将该 ZIP 直接发送给技术支持或 ChatGPT 用于定位故障（已自动脱敏，不含订阅链接、密码与凭据）。`,
+          );
+          log("info", `故障报告已导出到 ${res.path}`);
+          refresh();
+        }
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setExportError(`导出失败：${message}`);
+        log("error", `故障报告导出失败：${message}`);
+      })
+      .finally(() => setExporting(false));
+  }, [log, refresh]);
+
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-8">
       <div className="flex items-start justify-between">
@@ -180,6 +204,18 @@ export default function DiagnosticsPage() {
           {exporting ? <FileArchive size={16} /> : <Download size={16} />}
           {exporting ? "正在导出…" : "一键导出诊断信息"}
         </button>
+        <button
+          onClick={doFaultReport}
+          disabled={exporting}
+          className="mt-3 ml-3 inline-flex items-center gap-2 rounded-md border border-(--border-strong) px-4 py-2 text-sm text-(--text-main) transition-colors hover:bg-(--hover-bg) disabled:opacity-50"
+        >
+          <FileArchive size={16} />
+          导出故障报告
+        </button>
+        <p className="mt-2 text-xs leading-relaxed text-(--text-faint)">
+          故障报告在诊断信息之外附带导入/刷新阶段记录与 Mihomo 核心状态，全部经后端脱敏，可直接交给技术支持或
+          ChatGPT 分析。
+        </p>
         {exportNote && <div className="mt-2 text-sm text-(--text-dim)">{exportNote}</div>}
         {exportError && <div className="mt-2 text-sm text-(--danger)">{exportError}</div>}
       </div>

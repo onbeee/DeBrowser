@@ -276,3 +276,38 @@ func TestLocalImportSurvivesRestart(t *testing.T) {
 		t.Fatalf("groups after restart = %d, want 2", len(groups))
 	}
 }
+
+// TestLocalImportTwoStepPickedFile: the create dialog's flow —
+// pick a file first (only its name reaches the frontend), then
+// import it under a chosen display name.
+func TestLocalImportTwoStepPickedFile(t *testing.T) {
+	f := newSubFixture(t)
+	// Importing before picking is an error, not a silent no-op.
+	if _, err := f.svc.ImportPickedLocalConfig("未选择"); err == nil {
+		t.Fatal("import without a picked file succeeded")
+	}
+	file := filepath.Join(t.TempDir(), "airport.yaml")
+	if err := os.WriteFile(file, []byte(forwardRefYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.FilePicker = func() (string, error) { return file, nil }
+	name, err := f.svc.SelectLocalConfigFile()
+	if err != nil || name != "airport.yaml" {
+		t.Fatalf("SelectLocalConfigFile = %q, %v", name, err)
+	}
+	sum, err := f.svc.ImportPickedLocalConfig("两步导入")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Added != 2 || sum.Groups != 2 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	configs, err := f.svc.ListConfigs()
+	if err != nil || len(configs) != 1 || configs[0].Name != "两步导入" {
+		t.Fatalf("configs = %+v, %v", configs, err)
+	}
+	// The pick is consumed by a successful import.
+	if _, err := f.svc.ImportPickedLocalConfig("再次"); err == nil {
+		t.Fatal("picked file was not consumed by the import")
+	}
+}

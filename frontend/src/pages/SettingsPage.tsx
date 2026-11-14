@@ -1,5 +1,12 @@
-import { useState } from "react";
-import { AppService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
+import { useCallback, useEffect, useState } from "react";
+import {
+  AppService,
+  CoreService,
+} from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
+import type {
+  CoreStatusView,
+  CoreUpdateView,
+} from "../../bindings/github.com/onbeee/DeBrowser/internal/service/models";
 import { useAppStore, type Theme } from "../stores/useAppStore";
 
 const THEME_OPTIONS: { value: Theme; label: string }[] = [
@@ -95,6 +102,8 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      <MihomoCoreSection />
+
       <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-5">
         <h3 className="text-sm font-semibold">目录（便携模式）</h3>
         <p className="mt-1 text-xs leading-relaxed text-(--text-faint)">
@@ -109,6 +118,192 @@ export default function SettingsPage() {
           <PathRow label="设置文件" value={status?.settingsFile} />
         </div>
       </div>
+    </div>
+  );
+}
+
+// Mihomo 内核（系统设置）：展示实际安装核心的版本（由运行核心
+// 本体查询得到，不写死），以及手动检查/更新入口。检查只在用户
+// 点击时进行，不自动检查、不自动更新；更新包来自 MetaCubeX
+// 官方 GitHub Releases，安装前强制校验官方 SHA-256。
+function MihomoCoreSection() {
+  const [core, setCore] = useState<CoreStatusView | null>(null);
+  const [update, setUpdate] = useState<CoreUpdateView | null>(null);
+  const [busy, setBusy] = useState<"" | "check" | "update" | "power">("");
+  const [error, setError] = useState("");
+  const [coreLog, setCoreLog] = useState<string[] | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [st, up] = await Promise.all([
+        CoreService.GetCoreStatus(),
+        CoreService.GetCoreUpdate(),
+      ]);
+      setCore(st);
+      setUpdate(up);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const check = async () => {
+    setBusy("check");
+    setError("");
+    try {
+      setUpdate(await CoreService.CheckCoreUpdate());
+      setCore(await CoreService.GetCoreStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setUpdate(await CoreService.GetCoreUpdate().catch(() => null));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doUpdate = async () => {
+    setBusy("update");
+    setError("");
+    try {
+      setUpdate(await CoreService.UpdateCore());
+      setCore(await CoreService.GetCoreStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setUpdate(await CoreService.GetCoreUpdate().catch(() => null));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const togglePower = async () => {
+    setBusy("power");
+    setError("");
+    try {
+      if (core?.running) {
+        await CoreService.StopCore();
+      } else {
+        await CoreService.StartCore();
+      }
+      setCore(await CoreService.GetCoreStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const toggleLog = async () => {
+    if (coreLog !== null) {
+      setCoreLog(null);
+      return;
+    }
+    try {
+      setCoreLog(await CoreService.GetCoreLog(100));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const statusText =
+    update?.status === "up-to-date"
+      ? "已是最新版本"
+      : update?.status === "update-available"
+        ? "发现新版本"
+        : update?.status === "check-failed"
+          ? "检查失败"
+          : busy === "check"
+            ? "检查中"
+            : "尚未检查";
+
+  return (
+    <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-5">
+      <h3 className="text-sm font-semibold">Mihomo 内核</h3>
+      <p className="mt-1 text-xs leading-relaxed text-(--text-faint)">
+        使用 MetaCubeX 官方原始发布二进制，不做任何修改。更新检查仅在点击时进行，不会自动更新。
+      </p>
+      {error && (
+        <div className="mt-3 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
+          {error}
+        </div>
+      )}
+      <div className="mt-4 space-y-2.5 text-sm">
+        <div className="flex items-baseline gap-4">
+          <span className="w-36 shrink-0 text-xs text-(--text-faint)">当前版本</span>
+          <span>
+            {core === null
+              ? "加载中…"
+              : core.installed
+                ? core.version || "版本读取失败"
+                : "核心未安装"}
+          </span>
+        </div>
+        <div className="flex items-baseline gap-4">
+          <span className="w-36 shrink-0 text-xs text-(--text-faint)">最新版本</span>
+          <span>{update?.latestVersion || "—"}</span>
+        </div>
+        <div className="flex items-baseline gap-4">
+          <span className="w-36 shrink-0 text-xs text-(--text-faint)">更新状态</span>
+          <span>{statusText}</span>
+        </div>
+        <div className="flex items-baseline gap-4">
+          <span className="w-36 shrink-0 text-xs text-(--text-faint)">最近检查</span>
+          <span>{update?.checkedAt || "—"}</span>
+        </div>
+        <div className="flex items-baseline gap-4">
+          <span className="w-36 shrink-0 text-xs text-(--text-faint)">运行状态</span>
+          <span>
+            {core?.running
+              ? `运行中（进程 ${core.pid}，启动于 ${core.startedAt}）`
+              : core?.lastExit
+                ? `未运行 · ${core.lastExit}`
+                : "未运行"}
+          </span>
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          onClick={() => void check()}
+          disabled={busy !== ""}
+          className="rounded-md border border-(--border-strong) px-4 py-1.5 text-sm text-(--text-main) transition-colors hover:bg-(--hover-bg) disabled:opacity-50"
+        >
+          {busy === "check" ? "检查中…" : "检查更新"}
+        </button>
+        {update?.status === "update-available" && (
+          <button
+            onClick={() => void doUpdate()}
+            disabled={busy !== ""}
+            className="rounded-md bg-(--accent) px-4 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {busy === "update" ? "更新中…" : `更新内核到 ${update.latestVersion}`}
+          </button>
+        )}
+        {core?.installed && (
+          <button
+            onClick={() => void togglePower()}
+            disabled={busy !== ""}
+            className="rounded-md border border-(--border-strong) px-4 py-1.5 text-sm text-(--text-main) transition-colors hover:bg-(--hover-bg) disabled:opacity-50"
+          >
+            {busy === "power" ? "处理中…" : core.running ? "停止核心" : "启动核心"}
+          </button>
+        )}
+        <button
+          onClick={() => void toggleLog()}
+          className="rounded-md border border-(--border-strong) px-4 py-1.5 text-sm text-(--text-dim) transition-colors hover:bg-(--hover-bg)"
+        >
+          {coreLog !== null ? "收起日志" : "查看核心日志"}
+        </button>
+      </div>
+      {update?.error && update.status === "check-failed" && (
+        <p className="mt-2 text-xs text-(--danger)">{update.error}</p>
+      )}
+      {coreLog !== null && (
+        <pre className="mt-3 max-h-64 overflow-y-auto rounded-md border border-(--border) bg-(--app-bg) p-3 font-mono text-[11px] leading-relaxed text-(--text-dim)">
+          {coreLog.length > 0 ? coreLog.join("\n") : "（暂无核心日志）"}
+        </pre>
+      )}
     </div>
   );
 }

@@ -39,6 +39,12 @@ type SubscriptionService struct {
 	// wires it; nil means local import is unavailable.
 	FilePicker func() (string, error)
 
+	// pickedFile remembers the file chosen through
+	// SelectLocalConfigFile until ImportPickedLocalConfig
+	// consumes it. The path never leaves the backend.
+	pickedMu   sync.Mutex
+	pickedFile string
+
 	// fetchFn performs one subscription download. It defaults to
 	// the SSRF-guarded fetcher; tests substitute a payload source.
 	fetchFn func(ctx context.Context, rawURL string, allowLAN bool) (fetchResult, error)
