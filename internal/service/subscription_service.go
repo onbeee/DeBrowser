@@ -120,17 +120,10 @@ type ProxyGroupView struct {
 
 // GroupMemberView is one group member. ProxyName is the current
 // display name of the referenced proxy row (proxy members only).
-// Origin separates the members that came with the imported
-// document ("imported", read-only) from the user's own overlay
-// attachments ("custom", removable) — Stage 6C. ProxyID is set
-// for custom members (the removal handle) and for imported proxy
-// members.
 type GroupMemberView struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
 	ProxyName string `json:"proxyName,omitempty"`
-	Origin    string `json:"origin"`
-	ProxyID   string `json:"proxyId,omitempty"`
 }
 
 // ImportSummary reports what one import/refresh changed.
@@ -398,39 +391,15 @@ func (s *SubscriptionService) GetConfigGroups(configID string) ([]ProxyGroupView
 			proxyNames[p.ID] = p.Name
 		}
 	}
-	// The user's custom-member overlay for this config, grouped by
-	// group name; appended after the imported members of each
-	// group, in the user's order.
-	overlay, err := s.proxy.store.ListCustomGroupMembers(c, configID)
-	if err != nil {
-		return nil, err
-	}
-	overlayByGroup := map[string][]model.CustomGroupMember{}
-	for _, m := range overlay {
-		if _, ok := proxyNames[m.ProxyID]; !ok {
-			if p, err := s.proxy.store.GetProxy(c, m.ProxyID); err == nil {
-				proxyNames[p.ID] = p.Name
-			}
-		}
-		overlayByGroup[m.GroupName] = append(overlayByGroup[m.GroupName], m)
-	}
 	out := make([]ProxyGroupView, 0, len(groups))
 	for _, g := range groups {
 		v := ProxyGroupView{ID: g.ID, Name: g.Name, Type: g.Type, Members: []GroupMemberView{}}
 		for _, m := range g.Members {
-			mv := GroupMemberView{Name: m.MemberName, Kind: m.Kind, Origin: "imported"}
+			mv := GroupMemberView{Name: m.MemberName, Kind: m.Kind}
 			if m.ProxyID != nil {
 				mv.ProxyName = proxyNames[*m.ProxyID]
-				mv.ProxyID = *m.ProxyID
 			}
 			v.Members = append(v.Members, mv)
-		}
-		for _, m := range overlayByGroup[g.Name] {
-			name := proxyNames[m.ProxyID]
-			v.Members = append(v.Members, GroupMemberView{
-				Name: name, Kind: "proxy", ProxyName: name,
-				Origin: "custom", ProxyID: m.ProxyID,
-			})
 		}
 		out = append(out, v)
 	}

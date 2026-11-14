@@ -20,9 +20,7 @@ func TestUpgradeFromV7ToV8CustomMembers(t *testing.T) {
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 7 {
 		t.Fatalf("pre-upgrade AppliedVersion = %d (err %v), want 7", v, err)
 	}
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate (v7 -> v8): %v", err)
-	}
+	applyUptoVersion(t, db, 8)
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 8 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 8", v, err)
 	}
@@ -113,9 +111,7 @@ func TestFreshDatabaseReachesV8(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	applyUptoVersion(t, db, 8)
 	if v, err := db.AppliedVersion(ctx); err != nil || v != 8 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 8", v, err)
 	}
