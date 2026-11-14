@@ -27,7 +27,7 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 
 ## Schema (current state)
 
-Current state (migrations 0001-0006, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances`, `bookmarks`, `mihomo_configs`, `mihomo_proxy_groups` and `mihomo_proxy_group_members` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
+Current state (migrations 0001-0009, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances`, `bookmarks`, `mihomo_configs`, `mihomo_proxy_groups` and `mihomo_proxy_group_members` **exist**. After the PR #9 scope cleanup, the proxy/subscription/import tables are historical data structures only: no product feature reads them in the UI, but they and all their rows are retained for compatibility and remain covered by the repository layer (see the scope note in docs/ARCHITECTURE.md). There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 
@@ -120,7 +120,7 @@ Purely additive: three new tables plus two new `proxies` columns with compatibil
 
 ### Migration 0007: unified proxy source vocabulary (Stage 6C)
 
-The unified 「代理配置」 module manages three sources — subscription, local file and custom (manual) nodes. Migration 0007 renames the Stage 4A `proxies.source` values to that vocabulary (`manual` → `custom`, `file_import` → `file`, `subscription` unchanged) and changes the column CHECK/default accordingly, so the values match `mihomo_configs.source_type` and the UI. Changing a CHECK constraint takes a table rebuild; the rebuild reuses migration 0005's link-rescue pattern inside the runner's transaction (FK actions fire immediately with `foreign_keys=1`): `browser_instances.proxy_id` links are copied aside and restored, and proxy-kind `mihomo_proxy_group_members` rows (whose CHECK forbids detaching them) are copied aside in full, deleted, and re-inserted against the rebuilt table with group, order and names intact. No row, ID, `secret_ref`, config/subscription link or member relation changes. The v6 → v7 upgrade test (`internal/database/stage7_test.go`) verifies the mapping and preservation over a populated v6 fixture (manual node bound to an instance, subscription + file configs with groups and members), plus `PRAGMA foreign_key_check` / `integrity_check`, rejection of the retired vocabulary, and the partial unique dedup index.
+Migration 0007 was written for the Stage 6C unified proxy module (since removed by the PR #9 scope cleanup — the migration and all data it produced remain in place). It renames the Stage 4A `proxies.source` values to that vocabulary (`manual` → `custom`, `file_import` → `file`, `subscription` unchanged) and changes the column CHECK/default accordingly, so the values match `mihomo_configs.source_type` and the UI. Changing a CHECK constraint takes a table rebuild; the rebuild reuses migration 0005's link-rescue pattern inside the runner's transaction (FK actions fire immediately with `foreign_keys=1`): `browser_instances.proxy_id` links are copied aside and restored, and proxy-kind `mihomo_proxy_group_members` rows (whose CHECK forbids detaching them) are copied aside in full, deleted, and re-inserted against the rebuilt table with group, order and names intact. No row, ID, `secret_ref`, config/subscription link or member relation changes. The v6 → v7 upgrade test (`internal/database/stage7_test.go`) verifies the mapping and preservation over a populated v6 fixture (manual node bound to an instance, subscription + file configs with groups and members), plus `PRAGMA foreign_key_check` / `integrity_check`, rejection of the retired vocabulary, and the partial unique dedup index.
 
 ### Migration 0008: custom proxy-group members overlay (Stage 6C review fix)
 
@@ -132,6 +132,10 @@ The unified 「代理配置」 module manages three sources — subscription, lo
 - `config_id` and `proxy_id` are `ON DELETE CASCADE` foreign keys: deleting a config or a custom node removes only its overlay rows; nothing ever cascades into nodes, configs or imported members.
 - That the node is really `source = 'custom'` and that `(config_id, group_name)` names a group the config actually has is validated by the service layer inside the write transaction (a CHECK cannot express cross-table conditions).
 - Refresh/re-import rebuilds only the imported structures (`ReplaceProxyGroups`) and never touches this table: after a refresh the attachment reappears in the same-named group; if the group vanished upstream the row is kept and reported as orphaned, and it takes effect again when the group returns.
+
+### Scope cleanup note (PR #9, 2026-11-15)
+
+The PR #9 scope cleanup removed the proxy/subscription/Mihomo product features in code only. **No migration was added, removed, renamed or edited**: migrations 0001–0009 remain byte-identical, no table or column was dropped, and no row was deleted. Existing databases — including ones holding proxy, subscription, imported-config and vault-reference data — upgrade and start exactly as before; the populated-fixture upgrade tests for every stage (0004–0009) continue to run unchanged.
 
 ## Backup before migration
 

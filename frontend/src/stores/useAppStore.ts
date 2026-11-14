@@ -8,8 +8,7 @@ export type PageKey =
   | "kernels"
   | "bookmarks"
   | "sync"
-  | "backup"
-  | "diagnostics"
+  | "datamanagement"
   | "settings";
 
 export type Theme = "dark" | "light" | "warm";

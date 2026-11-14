@@ -5,7 +5,7 @@ import { AppStatus } from "../bindings/events";
 import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import StatusBar from "./components/layout/StatusBar";
-import DiagnosticsPage from "./pages/DiagnosticsPage";
+import DataManagementPage from "./pages/DataManagementPage";
 import InstancesPage from "./pages/InstancesPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
@@ -67,8 +67,8 @@ export default function App() {
             <InstancesPage />
           ) : page === "proxyconfig" ? (
             <ProxyConfigPage />
-          ) : page === "diagnostics" ? (
-            <DiagnosticsPage />
+          ) : page === "datamanagement" ? (
+            <DataManagementPage />
           ) : (
             <PlannedPage page={page} />
           )}

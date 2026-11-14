@@ -23,7 +23,7 @@ func TestResolveLayoutUnderRoot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Resolve(%s): %v", root, err)
 		}
-		for _, p := range []string{l.Data, l.DatabaseFile, l.Backups, l.Logs, l.LogFile, l.Profiles, l.Mihomo, l.WebView2, l.Config, l.SettingsFile, l.SecretsFile} {
+		for _, p := range []string{l.Data, l.DatabaseFile, l.Backups, l.Logs, l.LogFile, l.Profiles, l.WebView2, l.Config, l.SettingsFile, l.SecretsFile} {
 			assertUnder(t, l.Root, p)
 		}
 		if filepath.Base(l.DatabaseFile) != "debrowser.db" {
@@ -72,7 +72,7 @@ func TestEnsureCreatesAndProbes(t *testing.T) {
 	if err := l.Ensure(); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	for _, dir := range []string{l.Data, l.Backups, l.Logs, l.Profiles, l.Mihomo, l.WebView2, l.Config} {
+	for _, dir := range []string{l.Data, l.Backups, l.Logs, l.Profiles, l.WebView2, l.Config} {
 		info, err := os.Stat(dir)
 		if err != nil || !info.IsDir() {
 			t.Errorf("directory %s not created: %v", dir, err)

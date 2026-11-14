@@ -2,9 +2,9 @@
 
 A lightweight, local-first desktop application for managing multiple isolated browser profiles.
 
-DeBrowser is built for **Windows 11 x64**. Each browser instance gets its own user data directory, configuration, process and optional proxy — profiles are never shared between running instances.
+DeBrowser is built for **Windows 11 x64**. Each browser instance gets its own user data directory, configuration and process — profiles are never shared between running instances.
 
-> **Status: Stages 1–6 delivered and merged; Stage 6C (unified proxy configuration, redone) is in review (PR #9).** The repository contains the application shell, the SQLite data layer, instance management foundations, the credential vault, subscription/local-config import with SSRF-safe fetching (including the Fake-IP system-proxy fallback), the single-column proxy configuration page, structured logging with diagnostics and fault-report export, and the bundled official Mihomo core with lifecycle management and manual, SHA-256-verified kernel updates in system settings. Remaining business features (Mihomo run modes and traffic, kernels, instance launch, bookmarks, synchronization, backup & restore) are delivered in later stages; see [docs/ROADMAP.md](docs/ROADMAP.md). No placeholder data stands in for those features.
+> **Status: Stages 1–5B delivered and merged; PR #9 now carries a product-scope cleanup decided by the project owner.** The repository contains the application shell, the SQLite data layer, instance management foundations, the credential vault as a data-compatibility layer, and structured logging / operation audit / diagnostics (unified under the 「数据管理」 sidebar entry). By owner decision, proxy server management, subscription management and config import, the unified proxy configuration UI and the Mihomo core runtime are **not** part of the current product scope: they were removed in PR #9, and the 「代理配置」 sidebar entry is a placeholder page stating the feature is not yet open. The sidebar is fixed at exactly eight entries: 总览、浏览器实例、代理配置、浏览器内核、书签管理、多开同步、数据管理、系统设置. The current development focus is Chromium kernel management and real multi-instance launching; bookmarks, synchronization, in-app update and (last) full backup & restore follow in later stages — see [docs/ROADMAP.md](docs/ROADMAP.md). Whether proxy capability returns is re-evaluated in a future stage. No placeholder data stands in for undelivered features.
 
 ## Tech stack
 
@@ -18,7 +18,7 @@ DeBrowser is built for **Windows 11 x64**. Each browser instance gets its own us
 | Icons | lucide-react | 0.469.0 |
 | State management | Zustand | 5.1.0 |
 | Database | SQLite via modernc.org/sqlite | 1.62.0 |
-| Proxy engine | Mihomo (official binary, bundled unmodified) | core lifecycle since Stage 6C; run modes arrive in Stage 7 |
+| Proxy engine | — | not in current scope (removed in PR #9; future re-evaluation) |
 | Browser control | Chrome DevTools Protocol | arrives in Stage 9 |
 
 All dependency versions are pinned (Go: `go.mod`/`go.sum`, frontend: `package.json`/`package-lock.json`). Read [AGENTS.md](AGENTS.md) before contributing — it defines the project's engineering rules.
@@ -55,7 +55,7 @@ DeBrowser is portable-first and local-first. Everything lives next to the execut
   config\          settings.json (language, theme)
 ```
 
-Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch the app directly creates its portable data directory and initializes the database and credential vault automatically — no setup choices are required, and no data is scanned, detected or migrated from `%AppData%` or any other location. The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies, credentials and proxy subscription URLs are never committed to this repository.
+Nothing is written to `%AppData%` or `%LocalAppData%`; moving or copying the folder to another drive or PC keeps everything working (a system WebView2 Runtime is required). If the folder is not writable, the app reports an error instead of silently storing data elsewhere. On first launch the app directly creates its portable data directory and initializes the database and credential vault automatically — no setup choices are required, and no data is scanned, detected or migrated from `%AppData%` or any other location. The UI is Simplified Chinese only and ships with dark, light and warm themes. User databases, browser profiles, cookies and credentials are never committed to this repository.
 
 ## License
 

@@ -13,10 +13,10 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 | 5A | Direct startup and portable data directory stability | Delivered (PR #6, merged 2026-11-13) |
 | 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Delivered (PR #7, merged 2026-11-13) |
 | 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Delivered (PR #8, squash-merged; main `44e96e42`) |
-| 6C | Unified proxy configuration, redone 2026-11-14: single-column 「代理配置」 page (quick subscription import, config cards, read-only node list, create dialog); forward-reference import fix; Fake-IP system-proxy fallback; custom nodes/members removed; official Mihomo core bundled with minimal lifecycle + manual kernel update in settings | Implemented in the Stage 6C pull request (redo); pending project-owner review |
-| 7 | Mihomo core integration and run modes (Rule / Global / Direct) | Planned — starts only after Stage 6C is delivered and accepted |
+| 6C | Unified proxy configuration — **superseded by the PR #9 scope cleanup (2026-11-15)**: the proxy/subscription/Mihomo features built in this PR were removed again by project-owner decision before merge; see the cleanup note below | Closed as a feature; PR #9 repurposed as the scope-cleanup PR |
+| 7 | Mihomo core integration and run modes — **cancelled with the proxy scope**; whether proxy capability returns is a future re-evaluation (see below) | Cancelled |
 | 8 | Rule management (airport / custom / mixed rule sources) | Planned |
-| 9 | Browser kernels, instance launch and per-instance proxy wiring; bookmarks | Planned |
+| 9 | Browser kernels, instance launch (per-instance profiles, CDP ports, lifecycle); bookmarks | Planned — current development focus |
 | 10 | Multi-window synchronization | Planned |
 | 11 | In-app update (after a code-signing / trusted-release solution) and release | Planned |
 | 12 | Full backup and restore (portable backup package, independent backup password) — final stage | Planned |
@@ -48,6 +48,8 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 
 ## Stage 4A — Proxy data foundation (PR #5)
 
+> **Superseded in part (2026-11-15)**: `ProxyService` and the proxy page were removed by the PR #9 scope cleanup. The credential vault, migration 0004 and the stored data remain as a compatibility layer.
+
 - Credential vault (`internal/secrets`): DPAPI-protected file store in the portable directory, opaque references in SQLite, vault-first write protocol with guarded cleanup and orphan GC
 - Migration 0004: `subscriptions` metadata (URL only in the vault), proxy source/dedup/test fields, `browser_instances.proxy_listen_port`
 - `ProxyService` and the proxy management page: manual node CRUD, credential handling that never round-trips plaintext to the UI, TCP reachability test recorded per node
@@ -62,30 +64,30 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 ## Stage 5B — Logging and diagnostics (delivered, PR #7)
 
 - Run / operation / error log separation with retention (30 / 90 / 90 days) and size caps
-- Operation audit for instance/proxy changes, subscription imports, mode and rule changes, backup/restore and updates; no secrets in logs
+- Operation audit for instance changes, theme changes and diagnostic exports; no secrets in logs
 - In-app diagnostics view and one-click diagnostics/acceptance record export
 
 ## Stage 6 — Subscription and full configuration import (delivered, PR #8)
+
+> **Superseded (2026-11-15)**: the features described in this section were removed again by the PR #9 scope cleanup (project-owner decision) — see the cleanup section below. The historical record of what PR #8 delivered is kept unchanged.
 
 - Four import formats through one pipeline: full Clash/Mihomo YAML, proxies-only YAML, V2Ray/Base64 URI lists, local config files; unsupported content errors explicitly, never silently dropped
 - Native Mihomo `proxy-groups` parsed into structured storage; members resolve by stable node identity (rendered names unique per node), never silently rebound to a same-named node from another subscription
 - Full-config management: original artifacts stored with credentials stripped into the vault; Stage 6 records a security report of risky settings (allow-lan, external listeners/controller, missing controller secret, TUN, external DNS listen) — the safe defaults themselves (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) are enforced when Stage 7 renders a runnable config, with every adjustment reported to the user
 
-## Stage 6C — Unified proxy configuration (redone 2026-11-14 in the same pull request, pending review)
+## Stage 6C / PR #9 — Product scope cleanup (project-owner decision, 2026-11-15)
 
-- Page: one 「代理配置」 page in a single column — a top action bar (paste a subscription URL and import directly, or open the create dialog), a vertical list of configuration cards (name, 远程/本地 source, node and group counts, update time, last refresh state and failure reason; select / refresh / delete with confirmation), and below it the selected configuration's node list as a read-only table (name, protocol, address, port, status — never credentials), with the native proxy-groups shown read-only underneath. The create dialog makes remote (name + subscription URL) or local (name + native file picker, choose first then create) configurations. Custom nodes and custom group membership were REMOVED by product decision: nodes come only from subscriptions and local files. Stage 4A's stored custom-node records and credentials are untouched in the database; only the unshipped PR #9 feature surface was withdrawn
-- Data model: migration 0007's unified source vocabulary (`custom` / `file` / `subscription`) is kept. Migration 0008 stays in the published history (the PR #9 acceptance builds already applied it); the overlay table it created is dropped by migration 0009, which harms no other data (populated-fixture tested)
-- Import correctness: `ReplaceProxyGroups` now inserts all group rows before all member rows — real-world configs whose first group references a group defined later (a forward reference) previously died on the `target_group_id` foreign key and surfaced as 「关联数据不存在或已被删除」
-- Subscription downloads in Fake-IP environments: when the whole DNS answer is rejected AND every rejected address is inside the Clash/Mihomo Fake-IP pool (198.18.0.0/15), the placeholder addresses are a local proxy core's mappings that no application can dial directly, so the fetch retries through the operating system's configured proxy (which receives the hostname), accepting only loopback/private proxy endpoints. The direct path's SSRF policy is unchanged, 198.18.0.0/15 stays refused for direct dials, mixed answers get no fallback, and environment proxy variables are never used. DNS rejection errors still name the offending IP and its category
-- Mihomo core (pulled forward by the 2026-11-14 instruction; run modes remain Stage 7): the official MetaCubeX binary (pinned v1.19.34, SHA-256 in `internal/mihomocore/release.go`) ships unmodified beside DeBrowser.exe and is copied into `data/mihomo/` on first run. The app reads its real version, can start/stop it with a minimal loopback-only configuration (no proxy listeners, no TUN, no system-proxy changes), shows its log, and stops it on exit. System settings host the kernel section: current version, latest version, check time, manual check button, and — when a newer stable exists — a manual update that downloads the official asset, verifies its SHA-256 against the official release digest, verifies the extracted binary's version, and swaps with rollback (the old core survives any failure). Nothing checks or updates automatically
-- Shell: the top-right persistent refresh-status and console controls are gone; errors surface in-page and detail lives in 日志与诊断， which also offers the extended fault-report ZIP (redacted, fail-closed scanning) designed to be handed straight to support/ChatGPT
+PR #9 no longer delivers a proxy feature. By the project owner's decision it now removes one:
 
-## Stage 7 — Mihomo core integration and run modes
+- **Removed**: basic proxy server management (page, `ProxyService`, bindings); subscription management and config import (subscription UI, `SubscriptionService`, the SSRF-guarded fetcher including the Fake-IP fallback, `internal/mihomoimport`, local YAML import); the unified 「代理配置」 page (cards, node list, group views); and the Mihomo core runtime (`internal/mihomocore`, `CoreService`, settings kernel section, CI bundling — the build artifact is the executable only; the app does not download, install or start a core).
+- **Sidebar fixed at eight entries**: 总览、浏览器实例、代理配置、浏览器内核、书签管理、多开同步、数据管理、系统设置. 「代理配置」 opens a placeholder page that only states the feature is not yet open.
+- **Data management**: logs, operation audit and diagnostics (formerly the standalone 「诊断」 entry) are unified under 「数据管理」, which also hosts the data overview and the (not yet open) backup & restore area. The fault report no longer contains any core, subscription or proxy fields.
+- **Data protection**: migrations 0001–0009 are untouched; no table, column or row was deleted; the vault file and entries are preserved and still opened at startup; existing instances and profiles are unaffected. The historical proxy/subscription/config tables remain as a data-compatibility layer in `internal/store` / `internal/model`.
+- **Current focus** (owner's phased route): (1) Chromium kernel download/install/version management, real instance launch/stop with isolated profiles and per-instance CDP ports, 3–5 instances verified on Windows 11; (2) bookmarks, browser basics, multi-window synchronization; (3) future re-evaluation of proxy capability; (4) in-app update, then full backup & restore (Stage 12, last).
 
+## Stage 7 — (cancelled)
 
-- Core lifecycle basics (install, version, start/stop, verified manual update) were delivered early in the Stage 6C redo; this stage adds the traffic plane: single core process with per-instance listeners on 127.0.0.1
-- Render → `mihomo -t` validate → atomic swap → controller hot-reload; failures keep the previous working config
-- Core-level run modes Rule / Global / Direct; core process lifecycle management; per-instance readiness verification (`VerifyInstanceReady`) and fail-closed behaviour
+Mihomo core integration and run modes were cancelled together with the proxy product scope in the PR #9 cleanup. Proxy capability may be re-evaluated in a future phase; nothing in the current code starts, bundles or manages a proxy core.
 
 ## Stage 8 — Rule management
 
@@ -95,7 +97,7 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 ## Stage 9 — Browser kernels, instance launch and proxy wiring
 
 - Kernel management (verified downloads, `kernels` table), instance start/stop with isolated user-data dirs and localhost CDP
-- Per-instance proxy binding (fixed node / native group / follow run-mode); changing one instance never affects others; proxy failure is surfaced and fails closed — never a silent direct leak
+- Changing one instance never affects others
 - Bookmarks delivered with this stage
 
 ## Stage 10 — Multi-window synchronization
@@ -108,7 +110,7 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 
 ## Stage 12 — Full backup and restore (final stage)
 
-Backup & restore is deliberately the last functional stage: it must cover the complete user-data system in its final form (subscriptions, proxy configurations, native proxy-groups, rules, instances, kernels, bookmarks, multi-window state, update state). Fixing a full backup format before those exist would force constant format extensions, so this stage starts with an inventory of everything the finished application persists.
+Backup & restore is deliberately the last functional stage: it must cover the complete user-data system in its final form (instances, kernels, bookmarks, multi-window state, update state). Fixing a full backup format before those exist would force constant format extensions, so this stage starts with an inventory of everything the finished application persists.
 
 - User-created `.dbak` backup packages (manifest + per-file SHA-256), saveable outside the application folder; the backup format carries its OWN format version, independent of the application version, with compatibility/conversion for historical backup formats
 - Independent backup password (PBKDF2-HMAC-SHA256 from the Go standard library + AES-256-GCM) so backups restore across machines, Windows users and application versions — DPAPI alone is not the cross-machine mechanism

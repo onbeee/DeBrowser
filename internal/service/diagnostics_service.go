@@ -45,10 +45,6 @@ type DiagnosticsService struct {
 	// result means "cancelled".
 	SavePathPicker func(defaultName string) (string, error)
 
-	// CoreInfo, when wired, contributes the Mihomo core's state
-	// and log tail to the fault report. Set by the app assembly.
-	CoreInfo coreInfoProvider
-
 	// replaceFile atomically replaces the export destination with
 	// the finished temporary archive (platform implementation in
 	// replace_windows.go / replace_unix.go). It is a field so
@@ -82,13 +78,19 @@ type ExportSummary struct {
 	Bytes int64  `json:"bytes"`
 }
 
-// DiagnosticsView is everything the diagnostics page shows.
+// DiagnosticsView is everything the data-management page shows:
+// application and database state, the data directory, instance
+// counts and the logging-system categories (run / operation /
+// error), plus the last export summary.
 type DiagnosticsView struct {
 	AppName        string         `json:"appName"`
 	AppVersion     string         `json:"appVersion"`
 	SchemaVersion  int            `json:"schemaVersion"`
 	DatabaseStatus string         `json:"databaseStatus"`
 	UptimeSeconds  int64          `json:"uptimeSeconds"`
+	DataDir        string         `json:"dataDir"`
+	DatabaseBytes  int64          `json:"databaseBytes"`
+	InstanceCount  int            `json:"instanceCount"`
 	LogDir         string         `json:"logDir"`
 	Categories     []CategoryView `json:"categories"`
 	LastExport     *ExportSummary `json:"lastExport"`
@@ -109,7 +111,19 @@ func (s *DiagnosticsService) GetDiagnostics() (DiagnosticsView, error) {
 		SchemaVersion:  schema,
 		DatabaseStatus: status.Database,
 		UptimeSeconds:  status.UptimeSeconds,
+		DataDir:        s.app.cfg.Layout.Data,
 		LogDir:         s.logs.Dir(),
+	}
+	// Data overview (data management): the database file size
+	// (main file plus its WAL sidecar) and the instance count are
+	// read directly, never estimated.
+	for _, suffix := range []string{"", "-wal"} {
+		if fi, err := os.Stat(s.app.cfg.Layout.DatabaseFile + suffix); err == nil {
+			view.DatabaseBytes += fi.Size()
+		}
+	}
+	if instances, err := store.New(s.db).ListInstances(ctx); err == nil {
+		view.InstanceCount = len(instances)
 	}
 	for _, st := range s.logs.Stats() {
 		view.Categories = append(view.Categories, CategoryView{
@@ -385,22 +399,13 @@ func ScanForSecrets(data []byte) error {
 	}
 }
 
-// coreInfoProvider is what the fault report needs from the
-// Mihomo core service: a state snapshot and the core log tail.
-type coreInfoProvider interface {
-	CoreFaultInfo() CoreFaultInfo
-	GetCoreLog(lines int) ([]string, error)
-}
-
 // ExportFaultReport builds the extended ZIP a user can hand
 // straight to support/ChatGPT: everything the diagnostics
 // export carries, plus fault-report.json (app/build/OS info,
-// migration version, per-subscription and per-config operation
-// state with their already-sanitized last errors, and the
-// Mihomo core's state) and the core's own log tail. All content
-// passes the same path redaction and fail-closed sensitivity
-// scan as the log streams; the database, the vault, browser
-// data and raw user configs are never included.
+// migration version, database status and instance counts).
+// All content passes the same path redaction and fail-closed
+// sensitivity scan as the log streams; the database, the
+// vault, browser data and raw user configs are never included.
 func (s *DiagnosticsService) ExportFaultReport() (ExportResult, error) {
 	start := time.Now()
 	if s.SavePathPicker == nil {
@@ -438,7 +443,6 @@ func (s *DiagnosticsService) buildFaultReportExtras() (map[string][]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("读取数据库结构版本失败：%w", err)
 	}
-	st := store.New(s.db)
 	report := map[string]any{
 		"reportKind":    "fault-report",
 		"generatedAt":   time.Now().Format(time.RFC3339),
@@ -446,7 +450,8 @@ func (s *DiagnosticsService) buildFaultReportExtras() (map[string][]byte, error)
 		"appVersion":    version.Version,
 		"platform":      runtime.GOOS + "/" + runtime.GOARCH,
 		"schemaVersion": schema,
-		"correlation":   "审计日志（logs/operation）按操作名与目标 ID 记录每次导入/刷新/导出；订阅与配置 ID 即关联键，可据此在日志中定位完整阶段记录。",
+		"database":      s.app.GetStatus().Database,
+		"correlation":   "审计日志（logs/operation）按操作名与目标 ID 记录每次操作，可据此在日志中定位完整阶段记录。",
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, setting := range info.Settings {
@@ -455,54 +460,19 @@ func (s *DiagnosticsService) buildFaultReportExtras() (map[string][]byte, error)
 			}
 		}
 	}
-	if subs, err := st.ListSubscriptions(ctx); err == nil {
-		list := make([]map[string]any, 0, len(subs))
-		for _, sub := range subs {
-			entry := map[string]any{
-				"id": sub.ID, "name": sub.Name, "urlHint": sub.URLHint,
-				"lastStatus": sub.LastStatus, "lastError": sub.LastError,
-			}
-			if sub.LastUpdatedAt != nil {
-				entry["lastUpdatedAt"] = *sub.LastUpdatedAt
-			}
-			list = append(list, entry)
+	if instances, err := store.New(s.db).ListInstances(ctx); err == nil {
+		byStatus := map[string]int{}
+		for _, in := range instances {
+			byStatus[string(in.Status)]++
 		}
-		report["subscriptions"] = list
-	}
-	if cfgs, err := st.ListMihomoConfigs(ctx); err == nil {
-		list := make([]map[string]any, 0, len(cfgs))
-		for _, cfg := range cfgs {
-			list = append(list, map[string]any{
-				"id": cfg.ID, "name": cfg.Name, "sourceType": cfg.SourceType,
-			})
-		}
-		report["configs"] = list
-	}
-	extras := map[string][]byte{}
-	if s.CoreInfo != nil {
-		info := s.CoreInfo.CoreFaultInfo()
-		report["mihomoCore"] = map[string]any{
-			"installed": info.Installed, "version": info.Version,
-			"running": info.Running, "lastExit": info.LastExit,
-			"updateStatus": info.UpdateStatus, "latestVersion": info.LatestVersion,
-			"lastUpdateError": info.LastUpdateError,
-		}
-		if lines, err := s.CoreInfo.GetCoreLog(200); err == nil && len(lines) > 0 {
-			extras["mihomo-core.log"] = []byte(joinLines(lines))
+		report["instances"] = map[string]any{
+			"total":    len(instances),
+			"byStatus": byStatus,
 		}
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	extras["fault-report.json"] = data
-	return extras, nil
-}
-
-func joinLines(lines []string) string {
-	out := ""
-	for _, l := range lines {
-		out += l + "\n"
-	}
-	return out
+	return map[string][]byte{"fault-report.json": data}, nil
 }

@@ -9,10 +9,13 @@ import (
 	"github.com/onbeee/DeBrowser/internal/model"
 )
 
-// Repository for Stage 6 Mihomo config imports: config documents,
-// their native proxy-groups and group members, plus the proxy
-// lookups the import pipeline needs. All methods work on both the
-// root Store and a transaction-bound Store (WithTx).
+// Repository for the historical Stage 6 imported-config tables
+// (mihomo_configs, native proxy-groups and members). The import
+// product features were removed by the project owner's scope
+// decision; this layer remains ONLY as the data-compatibility
+// layer for existing databases — no service exposes it to the
+// UI. All methods work on both the root Store and a
+// transaction-bound Store (WithTx).
 
 const mihomoConfigColumns = `id, name, source_type, subscription_id, file_path, sha256,
 	secret_ref, format_version, security_report_json, created_at, updated_at`

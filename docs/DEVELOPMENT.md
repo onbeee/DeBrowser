@@ -86,6 +86,6 @@ Version compatibility: Go 1.26 + Wails v3.0.0 (the first Wails release that requ
 - The NSIS installer task (`task package`) is defined but not exercised in CI yet.
 - Business modules (instances, proxies, kernels, bookmarks, synchronization, backup UI) are later stages — see `docs/ROADMAP.md`.
 
-## Mihomo core bundling (Stage 6C redo)
+## Build artifact contents
 
-The release package ships the official MetaCubeX Mihomo binary unmodified: the CI workflow downloads the pinned release asset (`internal/mihomocore/release.go` records the version, asset name, download URL and SHA-256 — the workflow step carries the same values and fails the build on a digest mismatch), verifies its SHA-256, and places it in the artifact as `mihomo/mihomo.exe` next to `DeBrowser.exe`. At first run the app copies it into `data/mihomo/mihomo.exe`; kernel updates replace that installed copy (verified the same way, with rollback) and never touch the shipped one or any user data. For a local package, replicate the layout manually: build the app, download the pinned zip from the official release, verify the SHA-256, extract `mihomo-windows-amd64.exe` and put it at `mihomo/mihomo.exe` beside the built `DeBrowser.exe`.
+The Windows build artifact contains only the application executable (`bin/*.exe`). No proxy core or other sidecar binary is bundled, downloaded or verified by CI: the Mihomo core integration was removed in the PR #9 scope cleanup, and the application neither installs nor starts any core at runtime.

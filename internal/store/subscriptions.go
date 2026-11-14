@@ -1,5 +1,10 @@
 package store
 
+// NOTE (scope cleanup): the subscriptions table is historical
+// user data. The subscription product features were removed;
+// this repository remains only so existing databases keep
+// working unchanged (instance bindings, vault references).
+
 import (
 	"context"
 	"database/sql"

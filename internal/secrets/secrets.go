@@ -42,7 +42,7 @@
 //     business cleanup goes through DeleteIfUnreferenced, whose
 //     caller-supplied check runs under the vault lock at decision
 //     time, and garbage collection takes the complete live set.
-//     Callers (the future ProxyService) must serialize their DB
+//     Callers must serialize their DB
 //     mutations that create or drop references together with these
 //     cleanup calls under one service-level mutex, so the check
 //     and the delete are atomic with respect to reference changes.

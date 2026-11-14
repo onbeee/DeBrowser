@@ -2,7 +2,7 @@ import { NAV_ITEMS } from "./navItems";
 import { useAppStore } from "../../stores/useAppStore";
 
 // 顶栏只显示当前页面标题。右上角不再常驻「刷新状态」与「控制台」
-// 入口（Stage 6C 重做 §9）：状态通过底部状态栏与「日志与诊断」
+// 入口：状态通过底部状态栏与「数据管理」
 // 页面查看，错误在各页面内就地提示。
 export default function TopBar() {
   const page = useAppStore((state) => state.page);
