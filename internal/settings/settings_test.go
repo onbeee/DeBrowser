@@ -6,13 +6,16 @@ import (
 	"testing"
 )
 
-func TestDefaultIsChineseDark(t *testing.T) {
+func TestDefaultIsChineseLight(t *testing.T) {
+	// First launch (no saved configuration) defaults to the
+	// light theme by product decision (2026-11-15); a saved user
+	// choice is loaded back unchanged (see the roundtrip test).
 	s := Default()
 	if s.Language != "zh-CN" {
 		t.Errorf("default language = %q, want zh-CN", s.Language)
 	}
-	if s.Theme != ThemeDark {
-		t.Errorf("default theme = %q, want dark", s.Theme)
+	if s.Theme != ThemeLight {
+		t.Errorf("default theme = %q, want light", s.Theme)
 	}
 }
 

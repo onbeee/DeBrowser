@@ -43,7 +43,6 @@ var assets embed.FS
 
 func init() {
 	application.RegisterEvent[service.Status](service.StatusEvent)
-	application.RegisterEvent[service.InstallProgress](service.InstallProgressEvent)
 }
 
 func main() {

@@ -52,20 +52,15 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 	}
 
 	// Manual browser registration picks an executable through the
-	// native open-file dialog (Stage 9A); verification happens in
-	// the service, never in the picker.
+	// native open-file dialog (Stage 9A). Registration is a pure
+	// path record: no verification happens anywhere — not in the
+	// picker and not in the service.
 	browserService.ExecutablePicker = func() (string, error) {
 		dlg := application.Get().Dialog.OpenFile()
 		dlg.SetTitle("选择浏览器可执行文件")
 		dlg.AddFilter("可执行文件", "*.exe")
 		return dlg.PromptForSingleSelection()
 	}
-	// Managed-kernel install progress is forwarded to the frontend
-	// on its typed event channel.
-	browserService.OnProgress = func(p service.InstallProgress) {
-		a.wails.Event.Emit(service.InstallProgressEvent, p)
-	}
-
 	a.wails = application.New(application.Options{
 		Name:        version.Name,
 		Description: "Local-first multi-profile browser manager",

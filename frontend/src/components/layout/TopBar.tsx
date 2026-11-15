@@ -1,17 +1,16 @@
 import { NAV_ITEMS } from "./navItems";
 import { useAppStore } from "../../stores/useAppStore";
 
-// 顶栏只显示当前页面标题。右上角不再常驻「刷新状态」与「控制台」
-// 入口：状态通过底部状态栏与「数据管理」
-// 页面查看，错误在各页面内就地提示。
+// 顶栏是页面标题的唯一所有者：只显示当前一级页面的名称。
+// 页面内容中不再重复主标题或阶段名称；没有底部固定状态栏，
+// 连接与数据库异常由各页面在真正发生时就地提示。
 export default function TopBar() {
   const page = useAppStore((state) => state.page);
   const current = NAV_ITEMS.find((item) => item.key === page);
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-(--border) bg-(--chrome-bg) px-5">
-      <h1 className="text-sm font-semibold">{current?.label ?? "DeBrowser"}</h1>
-      <span className="text-xs text-(--text-faint)">{current?.stage}</span>
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-(--border) bg-(--topbar-bg) px-6">
+      <h1 className="text-xl font-semibold">{current?.label ?? "DeBrowser"}</h1>
     </header>
   );
 }

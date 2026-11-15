@@ -302,6 +302,28 @@ func zipKeys(m map[string][]byte) []string {
 	return out
 }
 
+// TestExportRecordsReplaceFailureKeepsExistingDest preserves the
+// atomic-replace guarantee for the retained record exports: when
+// the platform replace fails, a previous export at the chosen
+// destination stays byte-identical and no partial file appears.
+func TestExportRecordsReplaceFailureKeepsExistingDest(t *testing.T) {
+	f := newDiagFixture(t)
+	f.logs.Logger().Info("hello")
+	dest := filepath.Join(t.TempDir(), "out.zip")
+	if err := os.WriteFile(dest, []byte("previous export"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
+	f.svc.replaceFile = func(src, dst string) error { return errString("replace denied") }
+	if _, err := f.svc.ExportRecords("", "all", "", ""); err == nil {
+		t.Fatal("export with failing replace must error")
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil || string(body) != "previous export" {
+		t.Fatalf("existing destination changed: %q, %v", body, err)
+	}
+}
+
 func TestExportRecordsPickerFailureIsExplicit(t *testing.T) {
 	f := newDiagFixture(t)
 	f.svc.SavePathPicker = func(string) (string, error) { return "", errString("dialog boom") }

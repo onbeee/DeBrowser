@@ -46,7 +46,10 @@ export const useAppStore = create<AppState>((set) => ({
   status: null,
   statusError: null,
   logs: [],
-  theme: "dark",
+  // First launch defaults to the light theme; a saved user
+  // choice is loaded from the backend settings right after start
+  // and replaces this fallback.
+  theme: "light",
   setPage: (page) => set({ page }),
   setStatus: (status) => set({ status, statusError: null }),
   setStatusError: (message) => set({ statusError: message }),

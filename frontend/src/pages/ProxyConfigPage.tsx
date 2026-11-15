@@ -11,8 +11,7 @@ export default function ProxyConfigPage() {
       <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-(--hover-bg) text-(--text-faint)">
         <Network size={26} />
       </span>
-      <h2 className="mt-4 text-lg font-semibold">代理配置</h2>
-      <p className="mt-1.5 max-w-md text-sm leading-relaxed text-(--text-dim)">
+      <p className="mt-4 max-w-md text-base leading-relaxed text-(--text-dim)">
         代理配置功能暂未开放
       </p>
     </div>

@@ -4,9 +4,9 @@ import { useAppStore, type Theme } from "../stores/useAppStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 const THEME_OPTIONS: { value: Theme; label: string }[] = [
-  { value: "dark", label: "深色" },
   { value: "light", label: "浅色" },
   { value: "warm", label: "暖色" },
+  { value: "dark", label: "深色" },
 ];
 
 function PathRow({ label, value }: { label: string; value?: string }) {
@@ -51,13 +51,6 @@ export default function SettingsPage() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-8">
-      <div>
-        <h2 className="text-xl font-semibold">系统设置</h2>
-        <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-(--text-dim)">
-          语言与外观偏好保存在应用目录的 config/settings.json 中，随应用文件夹一起迁移，重启后保持不变。
-        </p>
-      </div>
-
       {saveError && (
         <div className="rounded-lg border border-(--danger-border) bg-(--danger-bg) px-4 py-3 text-sm text-(--danger)">
           保存设置失败：{saveError}
@@ -65,14 +58,14 @@ export default function SettingsPage() {
       )}
 
       <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-5">
-        <h3 className="text-sm font-semibold">外观与语言</h3>
+        <h3 className="text-[15px] font-semibold">外观与语言</h3>
         <div className="mt-4 space-y-4">
           <label className="flex items-center gap-4">
             <span className="w-36 shrink-0 text-xs text-(--text-faint)">应用语言</span>
             <select
               value="zh-CN"
               disabled
-              className="w-56 cursor-not-allowed rounded-md border border-(--border-strong) bg-(--panel-bg) px-3 py-1.5 text-sm text-(--text-dim)"
+              className="w-56 cursor-not-allowed rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-dim)"
               title="当前版本仅提供简体中文界面"
             >
               <option value="zh-CN">简体中文</option>
@@ -80,31 +73,44 @@ export default function SettingsPage() {
             <span className="text-xs text-(--text-faint)">当前版本仅提供简体中文界面</span>
           </label>
 
-          <label className="flex items-center gap-4">
+          <div className="flex items-center gap-4">
             <span className="w-36 shrink-0 text-xs text-(--text-faint)">外观主题</span>
-            <select
-              value={theme}
-              onChange={(e) => changeTheme(e.target.value as Theme)}
-              className="w-56 rounded-md border border-(--border-strong) bg-(--panel-bg) px-3 py-1.5 text-sm text-(--text-main)"
-              title="切换界面主题"
+            <div
+              className="inline-flex overflow-hidden rounded-md border border-(--border-strong)"
+              role="group"
+              aria-label="外观主题"
             >
               {THEME_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => changeTheme(option.value)}
+                  aria-pressed={theme === option.value}
+                  className={`h-9 px-4 text-sm transition-colors ${
+                    theme === option.value
+                      ? "bg-(--accent) font-medium text-(--accent-contrast)"
+                      : "bg-(--input-bg) text-(--text-dim) hover:bg-(--hover-bg)"
+                  }`}
+                >
                   {option.label}
-                </option>
+                </button>
               ))}
-            </select>
-            <span className="text-xs text-(--text-faint)">切换后即时生效并自动保存</span>
-          </label>
+            </div>
+            <span className="text-xs text-(--text-faint)">切换后即时生效并自动保存，重启后保持</span>
+          </div>
         </div>
       </div>
 
       <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-5">
-        <h3 className="text-sm font-semibold">目录（便携模式）</h3>
+        <h3 className="text-[15px] font-semibold">目录（便携模式）</h3>
         <p className="mt-1 text-xs leading-relaxed text-(--text-faint)">
           全部数据都位于可执行文件所在目录下，移动整个应用文件夹即可完成迁移。本阶段暂不支持自定义数据路径。
         </p>
         <div className="mt-2 divide-y divide-(--border)">
+          <PathRow
+            label="应用版本"
+            value={status ? `${status.name} v${status.version}` : undefined}
+          />
           <PathRow label="应用根目录" value={status?.rootDir} />
           <PathRow label="数据目录" value={status?.dataDir} />
           <PathRow label="数据库文件" value={status?.databasePath} />

@@ -167,3 +167,15 @@ func (s *Store) DeleteInstance(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// CountInstancesByKernelID reports how many instances reference the
+// given registered-browser ID in their kernel_id column. It guards
+// registration removal: a referenced registration must not disappear
+// from under its instances.
+func (s *Store) CountInstancesByKernelID(ctx context.Context, kernelID string) (int, error) {
+	var n int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_instances WHERE kernel_id = ?`, kernelID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count instances by kernel: %w", err)
+	}
+	return n, nil
+}

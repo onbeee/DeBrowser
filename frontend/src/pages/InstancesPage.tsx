@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { AppWindow, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
-import { InstanceService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
+import { AppWindow, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
+import {
+  BrowserService,
+  InstanceService,
+  type BrowserView,
+} from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
@@ -15,11 +19,15 @@ interface FormState {
   id?: string;
   name: string;
   startUrl: string;
-  kernelName: string;
-  kernelVersion: string;
+  // browserId is the ID of one registered browser (「浏览器内核」
+  // page) associated with the instance; "" means no association.
+  // The options come only from actual registrations — never from
+  // free text — so an association always resolves to a real
+  // registered path.
+  browserId: string;
 }
 
-const EMPTY_FORM: FormState = { name: "", startUrl: "", kernelName: "", kernelVersion: "" };
+const EMPTY_FORM: FormState = { name: "", startUrl: "", browserId: "" };
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
@@ -31,7 +39,17 @@ type PendingDelete = { instance: Instance; withProfile: boolean } | null;
  */
 export default function InstancesPage() {
   const log = useAppStore((state) => state.log);
+  const setPage = useAppStore((state) => state.setPage);
   const [instances, setInstances] = useState<Instance[]>([]);
+  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
+  // browsersLoaded is true only after ListBrowsers has succeeded.
+  // While it is false (still loading, or the load failed), editing
+  // is disabled: judging an association against a not-yet-loaded
+  // list would mistake it for a missing registration, and saving
+  // would then clear the association in the database.
+  const [browsersLoaded, setBrowsersLoaded] = useState(false);
+  const [browsersError, setBrowsersError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
@@ -39,6 +57,11 @@ export default function InstancesPage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
+    // Close the editing gate FIRST, before any await: on a reload,
+    // a stale browsersLoaded=true from the previous load must not
+    // keep editing enabled while the fresh lists are in flight.
+    // Only a successful ListBrowsers below re-opens it.
+    setBrowsersLoaded(false);
     setLoading(true);
     try {
       const list = await InstanceService.ListInstances();
@@ -51,6 +74,17 @@ export default function InstancesPage() {
     } finally {
       setLoading(false);
     }
+    try {
+      const regs = await BrowserService.ListBrowsers();
+      setBrowsers(regs ?? []);
+      setBrowsersError(null);
+      setBrowsersLoaded(true);
+    } catch (err) {
+      // A failed load is NOT "no registrations": browsersLoaded
+      // stays false, editing stays disabled, and nothing about
+      // existing associations is inferred or touched.
+      setBrowsersError(err instanceof Error ? err.message : String(err));
+    }
   }, [log]);
 
   useEffect(() => {
@@ -59,6 +93,12 @@ export default function InstancesPage() {
 
   const submitForm = async () => {
     if (!form) return;
+    if (form.id && !browsersLoaded) {
+      // Never let an edit save carry a browserId that was derived
+      // from an incompletely loaded registration list.
+      setError("内核列表尚未加载完成，无法保存编辑。请等待加载完成或重新加载页面。");
+      return;
+    }
     setBusy(true);
     const opId = newOperationId();
     const action = form.id ? "instance.update" : "instance.create";
@@ -68,8 +108,7 @@ export default function InstancesPage() {
           id: form.id,
           name: form.name,
           startUrl: form.startUrl,
-          kernelName: form.kernelName,
-          kernelVersion: form.kernelVersion,
+          browserId: form.browserId,
           sortOrder: 0,
         });
         log("info", `实例已更新：${form.name}`);
@@ -78,14 +117,14 @@ export default function InstancesPage() {
         const created = await InstanceService.CreateInstance(opId, {
           name: form.name,
           startUrl: form.startUrl,
-          kernelName: form.kernelName,
-          kernelVersion: form.kernelVersion,
+          browserId: form.browserId,
           userDataDir: "",
         });
         log("info", `实例已创建：${created.name}`);
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
       }
       setForm(null);
+      setEditing(null);
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -125,40 +164,47 @@ export default function InstancesPage() {
   };
 
   const inputCls =
-    "w-full rounded-md border border-(--border) bg-(--app-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)";
+    "w-full rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)";
   const labelCls = "mb-1 block text-xs text-(--text-dim)";
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-6">
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">浏览器实例</h2>
-          <p className="mt-0.5 text-sm text-(--text-dim)">
-            管理浏览器实例的元数据。启动、停止浏览器进程将在后续阶段提供。
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="flex items-center gap-1.5 rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
-          >
-            <RefreshCw size={14} /> 刷新
-          </button>
-          <button
-            type="button"
-            onClick={() => setForm(EMPTY_FORM)}
-            className="flex items-center gap-1.5 rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
-          >
-            <Plus size={14} /> 新建实例
-          </button>
-        </div>
+        <p className="text-sm text-(--text-dim)">
+          管理浏览器实例的元数据。启动、停止浏览器进程将在后续阶段提供。
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            setEditing(null);
+            setForm(EMPTY_FORM);
+          }}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
+        >
+          <Plus size={14} /> 新建实例
+        </button>
       </div>
 
       {error && (
         <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
           <TriangleAlert size={16} className="mt-0.5 shrink-0" />
           <span>{error}</span>
+        </div>
+      )}
+
+      {browsersError && (
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
+          <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+          <span className="flex-1">
+            内核列表加载失败：{browsersError}。编辑功能已暂停，以免误清除实例的内核关联。
+          </span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="shrink-0 font-medium underline underline-offset-2"
+          >
+            重新加载
+          </button>
         </div>
       )}
 
@@ -194,26 +240,35 @@ export default function InstancesPage() {
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-(--text-dim)">
-                    {inst.kernelName
-                      ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
-                      : "未指定"}
+                    <span title={inst.kernelExecutablePath || undefined}>
+                      {inst.kernelName
+                        ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
+                        : "未指定"}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5 font-mono text-xs text-(--text-faint)">{inst.userDataDir}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex justify-end gap-1">
                       <button
                         type="button"
-                        title="编辑"
-                        onClick={() =>
+                        title={browsersLoaded ? "编辑" : "内核列表加载完成后可编辑"}
+                        disabled={!browsersLoaded}
+                        className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+                        onClick={() => {
+                          setEditing(inst);
                           setForm({
                             id: inst.id,
                             name: inst.name,
                             startUrl: inst.startUrl,
-                            kernelName: inst.kernelName,
-                            kernelVersion: inst.kernelVersion,
-                          })
-                        }
-                        className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg)"
+                            // A kernelId that no longer resolves
+                            // to a registration is shown as
+                            // unassociated (see the note in the
+                            // form); saving then clears it.
+                            browserId: browsers.some((b) => b.id === inst.kernelId)
+                              ? inst.kernelId
+                              : "",
+                          });
+                        }}
                       >
                         <Pencil size={14} />
                       </button>
@@ -257,31 +312,61 @@ export default function InstancesPage() {
                   placeholder="https://"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>内核名称（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={form.kernelName}
-                    onChange={(e) => setForm({ ...form, kernelName: e.target.value })}
-                    placeholder="Chromium"
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>内核版本（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={form.kernelVersion}
-                    onChange={(e) => setForm({ ...form, kernelVersion: e.target.value })}
-                    placeholder="130"
-                  />
-                </div>
+              <div>
+                <label className={labelCls}>浏览器内核（可选）</label>
+                <select
+                  className={inputCls}
+                  value={form.browserId}
+                  disabled={!browsersLoaded}
+                  onChange={(e) => setForm({ ...form, browserId: e.target.value })}
+                >
+                  <option value="">不选择内核</option>
+                  {browsers.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name} — {b.executablePath}
+                    </option>
+                  ))}
+                </select>
+                {browsersError ? (
+                  <p className="mt-1 text-xs text-(--danger)">内核列表加载失败：{browsersError}</p>
+                ) : !browsersLoaded ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">内核列表加载中…</p>
+                ) : browsers.length === 0 ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    尚未登记任何浏览器内核。
+                    <button
+                      type="button"
+                      className="text-(--accent) underline underline-offset-2"
+                      onClick={() => {
+                        setForm(null);
+                        setEditing(null);
+                        setPage("kernels");
+                      }}
+                    >
+                      前往「浏览器内核」页面添加
+                    </button>
+                  </p>
+                ) : null}
+                {editing && editing.kernelId !== "" && !browsers.some((b) => b.id === editing.kernelId) ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    原关联的内核登记已不存在，当前按未关联处理；保存后将清除原关联。
+                  </p>
+                ) : editing && editing.kernelId === "" && (editing.kernelName || editing.kernelVersion) ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    该实例保存有历史内核记录：{editing.kernelName}
+                    {editing.kernelVersion ? ` ${editing.kernelVersion}` : ""}
+                    （未关联登记内核）。不选择内核时此记录会保留；选择上方内核后将改为关联该登记。
+                  </p>
+                ) : null}
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setForm(null)}
+                onClick={() => {
+                  setForm(null);
+                  setEditing(null);
+                }}
                 className="rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
               >
                 取消
@@ -338,7 +423,7 @@ export default function InstancesPage() {
                 type="button"
                 disabled={busy}
                 onClick={() => void confirmDelete()}
-                className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-(--danger-contrast) hover:opacity-90 disabled:opacity-50"
               >
                 {pendingDelete.withProfile ? "确认删除并清理 Profile" : "确认删除记录"}
               </button>
