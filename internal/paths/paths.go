@@ -7,7 +7,6 @@
 //	<root>\data\backups\
 //	<root>\data\logs\
 //	<root>\data\profiles\
-//	<root>\data\mihomo\
 //	<root>\webview2-data\
 //	<root>\config\settings.json
 //
@@ -31,7 +30,6 @@ type Layout struct {
 	Logs         string // <root>/data/logs
 	LogFile      string // <root>/data/logs/debrowser.log
 	Profiles     string // <root>/data/profiles
-	Mihomo       string // <root>/data/mihomo
 	WebView2     string // <root>/webview2-data
 	Config       string // <root>/config
 	SettingsFile string // <root>/config/settings.json
@@ -71,7 +69,6 @@ func Resolve(root string) (Layout, error) {
 		Logs:           filepath.Join(data, "logs"),
 		LogFile:        filepath.Join(data, "logs", "debrowser.log"),
 		Profiles:       filepath.Join(data, "profiles"),
-		Mihomo:         filepath.Join(data, "mihomo"),
 		WebView2:       filepath.Join(abs, "webview2-data"),
 		Config:         cfg,
 		SettingsFile:   filepath.Join(cfg, "settings.json"),
@@ -101,7 +98,7 @@ func ExecutableDir() (string, error) {
 // in each key directory. A read-only location is a hard startup error:
 // DeBrowser never silently falls back to %APPDATA% or %LOCALAPPDATA%.
 func (l Layout) Ensure() error {
-	dirs := []string{l.Root, l.Data, l.Backups, l.Logs, l.Profiles, l.Mihomo, l.WebView2, l.Config}
+	dirs := []string{l.Root, l.Data, l.Backups, l.Logs, l.Profiles, l.WebView2, l.Config}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create directory %s: %w", dir, err)

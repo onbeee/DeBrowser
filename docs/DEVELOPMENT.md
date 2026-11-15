@@ -85,3 +85,7 @@ Version compatibility: Go 1.26 + Wails v3.0.0 (the first Wails release that requ
 - **Application icon**: `build/appicon.png` and `build/windows/icon.ico` are binary assets and have not been committed yet (both are git-ignored as generated files). CI and local builds generate Wails' example icon as a placeholder so the full build — including `.syso` version resources — runs end to end; the placeholder is not DeBrowser branding. When the real icon is ready, add it with `git add -f build/appicon.png` and remove the two icon lines from `.gitignore`.
 - The NSIS installer task (`task package`) is defined but not exercised in CI yet.
 - Business modules (instances, proxies, kernels, bookmarks, synchronization, backup UI) are later stages — see `docs/ROADMAP.md`.
+
+## Build artifact contents
+
+The Windows build artifact contains only the application executable (`bin/*.exe`). No proxy core or other sidecar binary is bundled, downloaded or verified by CI: the Mihomo core integration was removed in the PR #9 scope cleanup, and the application neither installs nor starts any core at runtime.

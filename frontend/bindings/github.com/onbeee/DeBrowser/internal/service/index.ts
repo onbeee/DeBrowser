@@ -4,33 +4,18 @@
 import * as AppService from "./appservice.js";
 import * as DiagnosticsService from "./diagnosticsservice.js";
 import * as InstanceService from "./instanceservice.js";
-import * as ProxyService from "./proxyservice.js";
-import * as SubscriptionService from "./subscriptionservice.js";
 export {
     AppService,
     DiagnosticsService,
-    InstanceService,
-    ProxyService,
-    SubscriptionService
+    InstanceService
 };
 
 export type {
     CategoryView,
     CreateInstanceInput,
-    CreateProxyInput,
     DiagnosticsView,
     ExportResult,
     ExportSummary,
-    GroupMemberView,
-    ImportSummary,
-    MihomoConfigView,
-    ProxyGroupView,
-    ProxyPortRange,
-    ProxyView,
     Status,
-    SubscriptionInput,
-    SubscriptionView,
-    TestProxyResult,
-    UpdateInstanceInput,
-    UpdateProxyInput
+    UpdateInstanceInput
 } from "./models.js";

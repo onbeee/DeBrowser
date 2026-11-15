@@ -1,13 +1,11 @@
 import {
-  Activity,
   AppWindow,
-  Archive,
   Bookmark,
   Cpu,
+  Database,
   LayoutDashboard,
   Network,
   RefreshCw,
-  Rss,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -21,15 +19,14 @@ export interface NavItem {
   stage: string;
 }
 
+// 侧边栏一级入口由产品负责人固定为以下八项，名称与顺序不得增减或调整。
 export const NAV_ITEMS: NavItem[] = [
   { key: "overview", label: "总览", icon: LayoutDashboard, stage: "阶段 1" },
   { key: "instances", label: "浏览器实例", icon: AppWindow, stage: "阶段 3" },
-  { key: "proxies", label: "代理", icon: Network, stage: "阶段 4" },
-  { key: "subscriptions", label: "订阅与配置", icon: Rss, stage: "阶段 6" },
-  { key: "kernels", label: "浏览器内核", icon: Cpu, stage: "阶段 5" },
-  { key: "bookmarks", label: "书签", icon: Bookmark, stage: "阶段 5" },
-  { key: "sync", label: "同步", icon: RefreshCw, stage: "阶段 6" },
-  { key: "backup", label: "备份与恢复", icon: Archive, stage: "阶段 7" },
-  { key: "diagnostics", label: "诊断", icon: Activity, stage: "阶段 5B" },
+  { key: "proxyconfig", label: "代理配置", icon: Network, stage: "暂未开放" },
+  { key: "kernels", label: "浏览器内核", icon: Cpu, stage: "阶段 9" },
+  { key: "bookmarks", label: "书签管理", icon: Bookmark, stage: "阶段 9" },
+  { key: "sync", label: "多开同步", icon: RefreshCw, stage: "阶段 10" },
+  { key: "datamanagement", label: "数据管理", icon: Database, stage: "阶段 5B" },
   { key: "settings", label: "系统设置", icon: Settings, stage: "基础设置" },
 ];

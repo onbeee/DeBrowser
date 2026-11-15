@@ -6,6 +6,5 @@ export {
 } from "./models.js";
 
 export type {
-    Instance,
-    Proxy
+    Instance
 } from "./models.js";

@@ -97,14 +97,6 @@ export function ListInstances(): $CancellablePromise<model$0.Instance[] | null> 
 }
 
 /**
- * ListProxies returns all proxy nodes (read-only; proxy management
- * itself is Stage 4) so the instance form can offer assignment.
- */
-export function ListProxies(): $CancellablePromise<model$0.Proxy[] | null> {
-    return $Call.ByID(2804579144);
-}
-
-/**
  * UpdateInstance validates and updates an instance's editable fields.
  * UpdateInstance updates an instance (audited, Stage 5B).
  */

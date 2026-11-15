@@ -94,15 +94,81 @@ func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
 			t.Errorf("windows-unsafe dir %q accepted, want error", bad)
 		}
 	}
-	// Missing proxy is refused before insert.
-	ghost := "no-such-proxy"
-	if _, err := svc.CreateInstance(CreateInstanceInput{Name: "ghost", ProxyID: &ghost}); err == nil ||
-		!strings.Contains(err.Error(), "所选代理不存在") {
-		t.Errorf("ghost proxy error = %v, want 所选代理不存在", err)
+	if created.ProxyID != nil {
+		t.Errorf("new instance proxy_id = %v, want NULL (create cannot bind a proxy)", *created.ProxyID)
 	}
 	list, err := svc.ListInstances()
 	if err != nil || len(list) != 1 {
 		t.Errorf("list = %d (err %v), want exactly the one valid instance", len(list), err)
+	}
+}
+
+// TestInstanceUpdatePreservesHistoricalProxyID pins the PR #9 final
+// review fix: a historical instance's stored proxy_id is data, not
+// an editable binding. Ordinary edits (name, start URL) must leave
+// it byte-identical, historical proxy/subscription rows must still
+// exist afterwards, and the vault ref queries must still recognise
+// the historical credential refs.
+func TestInstanceUpdatePreservesHistoricalProxyID(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	ctx := context.Background()
+
+	// Seed history exactly as a migrated user database holds it:
+	// one proxy row, one subscription row, and an instance whose
+	// proxy_id points at the proxy.
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO proxies (id, name, protocol, secret_ref) VALUES ('hist-proxy', '历史节点', 'socks5', 'hist-ref')`); err != nil {
+		t.Fatalf("seed proxy: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO subscriptions (id, name, secret_ref) VALUES ('hist-sub', '历史订阅', 'hist-sub-ref')`); err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+	seedStore := store.New(db)
+	proxyID := "hist-proxy"
+	historical, err := seedStore.CreateInstance(ctx, model.Instance{
+		Name: "历史实例", UserDataDir: "profiles/historical", ProxyID: &proxyID,
+	})
+	if err != nil {
+		t.Fatalf("seed historical instance: %v", err)
+	}
+
+	// Edit the name, then the start URL: proxy_id must not move.
+	renamed, err := svc.UpdateInstance(UpdateInstanceInput{ID: historical.ID, Name: "改名后的历史实例"})
+	if err != nil {
+		t.Fatalf("rename update: %v", err)
+	}
+	if renamed.ProxyID == nil || *renamed.ProxyID != proxyID {
+		t.Fatalf("proxy_id after rename = %v, want %q preserved", renamed.ProxyID, proxyID)
+	}
+	moved, err := svc.UpdateInstance(UpdateInstanceInput{
+		ID: historical.ID, Name: "改名后的历史实例", StartURL: "https://example.org",
+	})
+	if err != nil {
+		t.Fatalf("start-url update: %v", err)
+	}
+	if moved.ProxyID == nil || *moved.ProxyID != proxyID {
+		t.Fatalf("proxy_id after start-url edit = %v, want %q preserved", moved.ProxyID, proxyID)
+	}
+
+	// Historical rows and vault ref recognition survive the edits.
+	var proxies, subs int
+	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(1) FROM proxies WHERE id = 'hist-proxy'`).Scan(&proxies); err != nil || proxies != 1 {
+		t.Errorf("historical proxy rows = %d (err %v), want 1", proxies, err)
+	}
+	if err := db.SQL().QueryRowContext(ctx, `SELECT COUNT(1) FROM subscriptions WHERE id = 'hist-sub'`).Scan(&subs); err != nil || subs != 1 {
+		t.Errorf("historical subscription rows = %d (err %v), want 1", subs, err)
+	}
+	if inUse, err := seedStore.SecretRefInUse(ctx, "hist-ref"); err != nil || !inUse {
+		t.Errorf("SecretRefInUse(hist-ref) = %v, %v; want true", inUse, err)
+	}
+	if inUse, err := seedStore.SecretRefInUse(ctx, "hist-sub-ref"); err != nil || !inUse {
+		t.Errorf("SecretRefInUse(hist-sub-ref) = %v, %v; want true", inUse, err)
 	}
 }
 

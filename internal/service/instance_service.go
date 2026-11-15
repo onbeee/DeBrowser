@@ -71,26 +71,29 @@ func NewInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger) 
 
 // CreateInstanceInput carries the user-editable fields for creation.
 // UserDataDir is optional: empty means the default profiles/<id>.
+// There is deliberately no proxy field: instances are always created
+// unbound (proxy_id NULL). A historical instance's stored proxy_id is
+// data, not an editable binding.
 type CreateInstanceInput struct {
-	Name          string  `json:"name"`
-	ProxyID       *string `json:"proxyId"`
-	StartURL      string  `json:"startUrl"`
-	KernelName    string  `json:"kernelName"`
-	KernelVersion string  `json:"kernelVersion"`
-	UserDataDir   string  `json:"userDataDir"`
+	Name          string `json:"name"`
+	StartURL      string `json:"startUrl"`
+	KernelName    string `json:"kernelName"`
+	KernelVersion string `json:"kernelVersion"`
+	UserDataDir   string `json:"userDataDir"`
 }
 
 // UpdateInstanceInput carries the editable fields of one instance.
 // The profile directory of an existing instance cannot be changed
 // here (moving live profile data is a separate, explicit operation).
+// The stored proxy_id is likewise not editable here: updates preserve
+// whatever value the row already has.
 type UpdateInstanceInput struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	ProxyID       *string `json:"proxyId"`
-	StartURL      string  `json:"startUrl"`
-	KernelName    string  `json:"kernelName"`
-	KernelVersion string  `json:"kernelVersion"`
-	SortOrder     int     `json:"sortOrder"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	StartURL      string `json:"startUrl"`
+	KernelName    string `json:"kernelName"`
+	KernelVersion string `json:"kernelVersion"`
+	SortOrder     int    `json:"sortOrder"`
 }
 
 func ctx() (context.Context, context.CancelFunc) {
@@ -120,21 +123,6 @@ func (s *InstanceService) GetInstance(id string) (model.Instance, error) {
 		return model.Instance{}, fmt.Errorf("实例不存在")
 	}
 	return in, err
-}
-
-// ListProxies returns all proxy nodes (read-only; proxy management
-// itself is Stage 4) so the instance form can offer assignment.
-func (s *InstanceService) ListProxies() ([]model.Proxy, error) {
-	c, cancel := ctx()
-	defer cancel()
-	list, err := s.store.ListProxies(c)
-	if err != nil {
-		return nil, err
-	}
-	if list == nil {
-		list = []model.Proxy{}
-	}
-	return list, nil
 }
 
 // CreateInstance validates and creates an instance. The default
@@ -173,16 +161,8 @@ func (s *InstanceService) createInstance(input CreateInstanceInput) (model.Insta
 	}
 	c, cancel := ctx()
 	defer cancel()
-	if input.ProxyID != nil {
-		if _, err := s.store.GetProxy(c, *input.ProxyID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return model.Instance{}, fmt.Errorf("所选代理不存在")
-			}
-			return model.Instance{}, err
-		}
-	}
 	created, err := s.store.CreateInstance(c, model.Instance{
-		ID: id, Name: name, UserDataDir: dir, ProxyID: input.ProxyID,
+		ID: id, Name: name, UserDataDir: dir, // ProxyID stays nil: new instances are never bound
 		StartURL:      strings.TrimSpace(input.StartURL),
 		KernelName:    strings.TrimSpace(input.KernelName),
 		KernelVersion: strings.TrimSpace(input.KernelVersion),
@@ -217,16 +197,9 @@ func (s *InstanceService) updateInstance(input UpdateInstanceInput) (model.Insta
 		}
 		return model.Instance{}, err
 	}
-	if input.ProxyID != nil {
-		if _, err := s.store.GetProxy(c, *input.ProxyID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return model.Instance{}, fmt.Errorf("所选代理不存在")
-			}
-			return model.Instance{}, err
-		}
-	}
 	current.Name = name
-	current.ProxyID = input.ProxyID
+	// current.ProxyID is intentionally left untouched: the stored
+	// historical binding is preserved verbatim by every update.
 	current.StartURL = strings.TrimSpace(input.StartURL)
 	current.KernelName = strings.TrimSpace(input.KernelName)
 	current.KernelVersion = strings.TrimSpace(input.KernelVersion)

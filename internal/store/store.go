@@ -71,13 +71,6 @@ func newID() (string, error) {
 // ErrNotFound is returned by single-row lookups that match nothing.
 var ErrNotFound = fmt.Errorf("store: not found")
 
-func strPtr(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
 func nullStr(p *string) sql.NullString {
 	if p == nil {
 		return sql.NullString{}

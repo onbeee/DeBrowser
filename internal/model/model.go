@@ -81,11 +81,10 @@ type Instance struct {
 	UpdatedAt       string         `json:"updatedAt"`
 }
 
-// MihomoConfig is one imported Mihomo configuration document
-// (Stage 6). The sanitized document itself is a file under
-// data/mihomo/configs/; this row holds only its relative path,
-// content hash and the opaque vault reference of the extracted
-// config-level credential bundle.
+// MihomoConfig is one historically imported Mihomo configuration
+// document (Stage 6). The type remains only for compatibility
+// with existing databases; no current feature creates or shows
+// these rows.
 type MihomoConfig struct {
 	ID                 string  `json:"id"`
 	Name               string  `json:"name"`

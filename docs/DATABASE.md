@@ -21,41 +21,41 @@ The connection pool is limited to **one** open connection: SQLite permits a sing
 
 ## Layers
 
-- `internal/model` — plain data types (`Proxy`, `Instance`, `Bookmark`), no behaviour, no dependencies.
+- `internal/model` — plain data types (`Instance`, `Bookmark`, and the historical `Proxy` / `Subscription` / `MihomoConfig` data models), no behaviour, no dependencies.
 - `internal/database` — opening, pragmas, migrations, backups, `WithTx` transaction entry, health.
-- `internal/store` — the repository layer. All SQL for the core models lives here; each repository works against a small `querier` interface so the same code runs on the pool or inside a transaction. `Store.WithTx` runs several repository calls atomically (nested transactions are rejected). No ORM.
+- `internal/store` — the repository layer. All SQL for the core models lives here; each repository works against a small `querier` interface so the same code runs on the pool or inside a transaction. `Store.WithTx` runs several repository calls atomically (nested transactions are rejected). No ORM. For the historical proxy/subscription/config tables the store deliberately exposes **no** create/update/delete or list API — only the vault reference queries `SecretRefInUse` / `AllSecretRefs` still read them (see the schema notes below).
 
 ## Schema (current state)
 
-Current state (migrations 0001-0006, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances`, `bookmarks`, `mihomo_configs`, `mihomo_proxy_groups` and `mihomo_proxy_group_members` **exist** and are in use by the repository layer. There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
+Current state (migrations 0001-0009, all applied at startup): the tables `app_settings`, `proxies`, `subscriptions`, `browser_instances`, `bookmarks`, `mihomo_configs`, `mihomo_proxy_groups` and `mihomo_proxy_group_members` **exist**. After the PR #9 scope cleanup, the proxy/subscription/import tables are **historical data structures only — they are not a current product feature**. No page, service or binding exposes business CRUD or list operations for these historical tables. The only remaining reads are the vault reference protection queries `SecretRefInUse` / `AllSecretRefs`, which scan their `secret_ref` columns so historical credentials are never garbage-collected while still referenced. The tables and all their rows are retained for compatibility (existing databases keep their data and foreign keys intact). There is **no `kernels` table yet** — kernel records and the instance→kernel foreign key are Stage 9 work; until then, instances only carry kernel identity columns (see `browser_instances` below). Anything not listed in this section does not exist in the database.
 
 IDs are application-generated UUIDs (TEXT). Timestamps are UTC text (`datetime('now')` defaults; the repository refreshes `updated_at` on update).
 
-### `proxies`
+### `proxies` (historical)
 
-Proxy nodes. `protocol` is constrained to `http, https, socks5, vmess, vless, trojan, shadowsocks, hysteria2, tuic, wireguard, direct`; `port` must be 0-65535 when present; `enabled` is 0/1.
+Proxy nodes written by the removed Stage 4A–6 features. The table and its rows are retained as historical data only; no current code creates, lists or modifies them. `protocol` is constrained to `http, https, socks5, vmess, vless, trojan, shadowsocks, hysteria2, tuic, wireguard, direct`; `port` must be 0-65535 when present; `enabled` is 0/1.
 
 **Credential policy**: passwords, keys and tokens are never stored in this table (or in logs). Non-secret connection parameters may live in `config_json`; `secret_ref` is an opaque reference into the credential vault (`internal/secrets`, Stage 4A).
 
-Stage 4A (migration 0004) adds: `sort_order`, `source` (`manual` / `file_import` / `subscription`), `subscription_id` (FK → `subscriptions`, `ON DELETE CASCADE`), `dedup_key` (import fingerprint; partial UNIQUE index `WHERE dedup_key <> ''`, so empty keys never collide), and the connection-test record `last_latency_ms` / `last_test_ok` / `last_tested_at`. (Migration 0004 also added a `group_id` column here and to `subscriptions`, plus the `proxy_groups` / `proxy_tags` tables; the Stage 4A correction removed all of them again — see migration 0005 below.)
+Stage 4A (migration 0004) adds: `sort_order`, `source` (`manual` / `file_import` / `subscription` — renamed to `custom` / `file` / `subscription` by migration 0007, see below), `subscription_id` (FK → `subscriptions`, `ON DELETE CASCADE`), `dedup_key` (import fingerprint; partial UNIQUE index `WHERE dedup_key <> ''`, so empty keys never collide), and the connection-test record `last_latency_ms` / `last_test_ok` / `last_tested_at`. (Migration 0004 also added a `group_id` column here and to `subscriptions`, plus the `proxy_groups` / `proxy_tags` tables; the Stage 4A correction removed all of them again — see migration 0005 below.)
 
-Stage 6 (migration 0006) adds: `config_id` (FK → `mihomo_configs`, `ON DELETE SET NULL`) — the imported config a node came from — and `source_node_name` (the node's name inside its source document; native proxy-group members address nodes by this name, so it is kept separately from the editable display `name`). Imported nodes carry a non-empty `dedup_key` of the form `<scope>:<owner-id>:<sha256>` where the fingerprint covers owner ID + name + protocol + server + port (never secrets): a subscription refresh matches its own previous nodes by this key and preserves their row IDs, and different subscriptions can hold same-named nodes without colliding.
+Stage 6 (migration 0006) adds: `config_id` (FK → `mihomo_configs`, `ON DELETE SET NULL`) — the imported config a node came from — and `source_node_name` (the node's name inside its source document; native proxy-group members addressed nodes by this name, so it was kept separately from the display `name`). Imported nodes carry a non-empty `dedup_key` of the form `<scope>:<owner-id>:<sha256>` where the fingerprint covers owner ID + name + protocol + server + port (never secrets). These columns were written and matched by the Stage 6 import/refresh pipeline, which has been removed; today they are simply stored historical values that are preserved as-is.
 
-### `subscriptions`
+### `subscriptions` (historical)
 
-Subscription metadata; the refresh pipeline is Stage 6 work (implemented). The **full subscription URL is never stored here** — it may carry credentials and lives exclusively in the vault under `secret_ref`; this table keeps only `url_hint` (scheme+host), the fetch policy (`allow_lan` default 0, `auto_update_minutes` default 0 = off) and a sanitised refresh record (`last_updated_at`, `last_status`, `last_error` — status class only, never a URL).
+Subscription metadata written by the removed Stage 6 subscription feature. The table and its rows are retained as historical data only; there is no subscription refresh pipeline, fetcher or UI in the current product. The **full subscription URL was never stored here** — it may carry credentials and lives exclusively in the vault under `secret_ref`; this table keeps only `url_hint` (scheme+host), the fetch policy values recorded at the time (`allow_lan` default 0, `auto_update_minutes` default 0 = off) and a sanitised refresh record (`last_updated_at`, `last_status`, `last_error` — status class only, never a URL).
 
-### `mihomo_configs` (Stage 6, migration 0006)
+### `mihomo_configs` (Stage 6, migration 0006 — historical)
 
-One row per imported Mihomo configuration document. `source_type` is `file` (local import; `subscription_id` is NULL) or `subscription` (owned by a subscription; a partial UNIQUE index guarantees at most one current config per subscription). The sanitized document itself is a file under `data/mihomo/configs/<uuid>.yaml`; this table stores only the relative `file_path` (relative to `data/mihomo/`, never absolute), its `sha256`, and `secret_ref` — the opaque vault reference of the config-level credential bundle extracted during sanitisation (empty when the document carried none). `security_report_json` is the Stage 6 findings array (`allow_lan`, `external_bind`, `external_controller`, `controller_no_secret`, `tun_enabled`, `dns_external_listen`); it records risks only — Stage 7 enforces the safe values at render time. `format_version` versions the artifact format (currently 1).
+One row per Mihomo configuration document imported by the removed Stage 6 import feature. The table and its rows are retained as historical data only; no current code imports, parses or reads these configs (the vault reference queries still scan its `secret_ref` column). `source_type` is `file` (local import; `subscription_id` is NULL) or `subscription` (owned by a subscription; a partial UNIQUE index guaranteed at most one current config per subscription). The sanitized document itself was stored as a file under `data/mihomo/configs/<uuid>.yaml`; this table stores only the relative `file_path` (relative to `data/mihomo/`, never absolute), its `sha256`, and `secret_ref` — the opaque vault reference of the config-level credential bundle extracted during sanitisation (empty when the document carried none). `security_report_json` is the Stage 6 findings array (`allow_lan`, `external_bind`, `external_controller`, `controller_no_secret`, `tun_enabled`, `dns_external_listen`); it recorded risks only. `format_version` versions the artifact format (currently 1).
 
-### `mihomo_proxy_groups` (Stage 6, migration 0006)
+### `mihomo_proxy_groups` (Stage 6, migration 0006 — historical)
 
-The **native Mihomo `proxy-groups`** of one imported config, preserved structurally (name, type, non-secret `options_json`, document order in `sort_order`). These are the config author's groups — not a DeBrowser grouping feature (that was removed in migration 0005). `(config_id, name)` is UNIQUE. Deleting the config cascades to its groups.
+The **native Mihomo `proxy-groups`** of one formerly imported config, preserved structurally (name, type, non-secret `options_json`, document order in `sort_order`). These were the config author's groups — not a DeBrowser grouping feature (that was removed in migration 0005). The rows are retained as historical data only; no current code reads or displays proxy groups. `(config_id, name)` is UNIQUE. Deleting the config cascades to its groups (schema behaviour; no current code deletes configs).
 
-### `mihomo_proxy_group_members` (Stage 6, migration 0006)
+### `mihomo_proxy_group_members` (Stage 6, migration 0006 — historical)
 
-One row per group member, in document order (`PRIMARY KEY (group_id, sort_order)`). `member_kind` is `proxy`, `group` or `builtin`, and CHECK constraints enforce that exactly the matching target column is set: `proxy_id` (a node of the SAME config — resolution never crosses config boundaries) for `proxy`, `target_group_id` for `group`, neither for `builtin` (DIRECT, REJECT, GLOBAL, …). Group references were validated acyclic at import time.
+One row per group member, in document order (`PRIMARY KEY (group_id, sort_order)`). `member_kind` is `proxy`, `group` or `builtin`, and CHECK constraints enforce that exactly the matching target column is set: `proxy_id` (a node of the SAME config — resolution never crossed config boundaries) for `proxy`, `target_group_id` for `group`, neither for `builtin` (DIRECT, REJECT, GLOBAL, …). Group references were validated acyclic at import time by the removed import pipeline; the rows are retained as historical data only.
 
 ### `browser_instances`
 
@@ -66,8 +66,8 @@ One row per browser instance (isolated Chromium profile).
 | `name` | UNIQUE — instances are identified by name in the UI. |
 | `kernel_id`, `kernel_name`, `kernel_version` | Kernel identity recorded as data. The `kernels` table and its foreign key arrive in Stage 9. |
 | `user_data_dir` | UNIQUE. Profile path **relative** to the portable data directory (e.g. `profiles\<id>`), so the whole application folder stays movable. Profile contents are browser data and are never stored in SQLite. |
-| `proxy_id` | FK → `proxies(id)`, `ON DELETE SET NULL`: deleting a proxy detaches instances instead of breaking them. |
-| `proxy_listen_port` | Stage 4A (migration 0004): the instance's Mihomo listener port, allocated in Stage 7 from the `app_settings` range `proxy.port_range` (default `19000-19499`). Unique via a unique index (SQLite cannot add a UNIQUE column by ALTER); NULL ports never collide. |
+| `proxy_id` | **Historical compatibility field.** FK → `proxies(id)`, `ON DELETE SET NULL` (schema behaviour: deleting a proxy row would detach instances instead of breaking them). There is no proxy binding UI or operation in the current product: instance creation always writes NULL, and instance updates preserve whatever historical value a row already holds, verbatim. |
+| `proxy_listen_port` | **Historical compatibility field.** Stage 4A (migration 0004) added it as the instance's Mihomo listener port, to be allocated from the `app_settings` range `proxy.port_range` (default `19000-19499`) by the since-cancelled Stage 7. It is no longer allocated or used by any current business logic; stored values are preserved as-is. Unique via a unique index (SQLite cannot add a UNIQUE column by ALTER); NULL ports never collide. |
 | `status` | `stopped` / `running` / `error` (CHECK). The persisted lifecycle record; live runtime state is owned by the Stage 3 instance manager. |
 | `start_url`, `sort_order` | Optional start page; display ordering. |
 
@@ -79,7 +79,7 @@ Indexes: `proxy_id`, `status`.
 
 ### `app_settings`
 
-Application-level key/value settings (Stage 1, migration 0001), accessed through the repository's `GetSetting`/`SetSetting`/`DeleteSetting`. One reviewed key: `proxy.port_range` (for example `19000-19499`), the instance listener range consumed in Stage 7; an unset or malformed value falls back to the default in code. The user-facing `config/settings.json` file (language/theme) is separate and unrelated.
+Application-level key/value settings (Stage 1, migration 0001), accessed through the repository's `GetSetting`/`SetSetting`/`DeleteSetting`. One historical key: `proxy.port_range` (for example `19000-19499`) — the instance listener range the cancelled Stage 7 would have consumed. No current code reads or writes it; the key is mentioned only so existing databases' stored values are understood as historical data. The user-facing `config/settings.json` file (language/theme) is separate and unrelated.
 
 ## Rules (AGENTS.md section 5)
 
@@ -104,16 +104,42 @@ Application-level key/value settings (Stage 1, migration 0001), accessed through
 | 4 | `0004_proxy_foundation.sql` | `proxy_groups`, `proxy_tags`, `subscriptions`; `proxies` group/source/dedup/test columns; `browser_instances.proxy_listen_port` |
 | 5 | `0005_remove_proxy_groups_tags.sql` | Stage 4A correction: removes DeBrowser's own proxy groups/tags — rebuilds `proxies` and `subscriptions` without `group_id` and drops `proxy_tags` and `proxy_groups` (see below) |
 | 6 | `0006_mihomo_config_import.sql` | Stage 6: `mihomo_configs`, `mihomo_proxy_groups`, `mihomo_proxy_group_members`; `proxies.config_id` / `proxies.source_node_name` (see below) |
+| 7 | `0007_proxy_source_vocabulary.sql` | Stage 6C: rebuilds `proxies` with the unified source vocabulary `custom` / `file` / `subscription` (values mapped `manual` → `custom`, `file_import` → `file`); link rescue preserves instance bindings and group members (see below) |
+| 8 | `0008_proxy_group_custom_members.sql` | Stage 6C review fix: user custom-member overlay for native proxy-groups (superseded the same day — see 0009) |
+| 9 | `0009_drop_custom_members_overlay.sql` | Stage 6C redo: drops the 0008 overlay table; the custom-member feature was withdrawn before release (see below) |
 
 ### Migration 0005: removing groups and tags (Stage 4A correction)
 
-Product decision (2026-11-13): DeBrowser does not offer its own proxy grouping/tagging. Migration 0005 removes the structures migration 0004 had added for it. This is **not** related to Mihomo's native `proxy-groups`, which are part of imported airport configurations and arrive with subscription/config import in Stage 6.
+Product decision (2026-11-13): DeBrowser does not offer its own proxy grouping/tagging. Migration 0005 removes the structures migration 0004 had added for it. This is **not** related to Mihomo's native `proxy-groups`, which were part of imported airport configurations and arrived with the Stage 6 subscription/config import (itself removed in the PR #9 cleanup; the Stage 6 schema and data remain as historical structures).
 
 Because both `group_id` columns carry a foreign key to `proxy_groups` (and `proxies.group_id` an index), 0005 uses a table rebuild instead of `DROP COLUMN`. The rebuild works inside the migration runner's per-migration transaction with `foreign_keys=1`: on this SQLite build, foreign-key actions (`ON DELETE SET NULL` / `CASCADE`) fire immediately when a parent table is dropped, so the migration first rescues the incoming links (`browser_instances.proxy_id`, then `proxies.subscription_id`) into scratch tables and nulls them, swaps in the rebuilt tables under the same names, and then restores the links (the restores are themselves FK-checked). `proxies.sort_order` is kept — it is plain list ordering, not a group feature. The v4 → v5 upgrade test (`internal/database/stage5_test.go`) verifies data preservation, `PRAGMA foreign_key_check` and `PRAGMA integrity_check` over a populated v4 fixture.
 
 ### Migration 0006: Mihomo config import (Stage 6)
 
-Purely additive: three new tables plus two new `proxies` columns with compatibility defaults (`config_id` NULL, `source_node_name` `''`), so existing Stage 4A/5A/5B rows, values and relationships are untouched. The v5 → v6 upgrade test (`internal/database/stage6_test.go`) verifies data preservation over a populated v5 fixture, the member CHECK constraints, `PRAGMA foreign_key_check` and `PRAGMA integrity_check`. The vault reference checks (`SecretRefInUse`, `AllSecretRefs`) cover `mihomo_configs.secret_ref` as well, so config credential bundles take part in guarded cleanup and garbage collection exactly like proxy and subscription references.
+Purely additive: three new tables plus two new `proxies` columns with compatibility defaults (`config_id` NULL, `source_node_name` `''`), so existing Stage 4A/5A/5B rows, values and relationships are untouched. The v5 → v6 upgrade test (`internal/database/stage6_test.go`) verifies data preservation over a populated v5 fixture, the member CHECK constraints, `PRAGMA foreign_key_check` and `PRAGMA integrity_check`. The vault reference checks (`SecretRefInUse`, `AllSecretRefs`) cover `mihomo_configs.secret_ref` as well, so config credential bundles take part in guarded cleanup and garbage collection exactly like proxy and subscription references. (The Stage 6 import feature that wrote these tables was removed in the PR #9 cleanup; the migration, schema and data remain as historical structures, and the vault reference checks above are still live code.)
+
+### Migration 0007: unified proxy source vocabulary (Stage 6C)
+
+Migration 0007 was written for the Stage 6C unified proxy module (since removed by the PR #9 scope cleanup — the migration and all data it produced remain in place). It renames the Stage 4A `proxies.source` values to that vocabulary (`manual` → `custom`, `file_import` → `file`, `subscription` unchanged) and changes the column CHECK/default accordingly, so the values match `mihomo_configs.source_type` and the UI. Changing a CHECK constraint takes a table rebuild; the rebuild reuses migration 0005's link-rescue pattern inside the runner's transaction (FK actions fire immediately with `foreign_keys=1`): `browser_instances.proxy_id` links are copied aside and restored, and proxy-kind `mihomo_proxy_group_members` rows (whose CHECK forbids detaching them) are copied aside in full, deleted, and re-inserted against the rebuilt table with group, order and names intact. No row, ID, `secret_ref`, config/subscription link or member relation changes. The v6 → v7 upgrade test (`internal/database/stage7_test.go`) verifies the mapping and preservation over a populated v6 fixture (manual node bound to an instance, subscription + file configs with groups and members), plus `PRAGMA foreign_key_check` / `integrity_check`, rejection of the retired vocabulary, and the partial unique dedup index.
+
+### Migration 0008: custom proxy-group members overlay (Stage 6C review fix)
+
+> Superseded by migration 0009 (Stage 6C redo, 2026-11-14): the custom-node / custom-member feature was withdrawn by product decision before PR #9 merged. The 0008 file remains in the migration history untouched — databases from the PR #9 acceptance builds already applied it — and 0009 drops the table. The overlay never owned user data (it only referenced configs and custom nodes), so the drop loses nothing; existing `source='custom'` node records and their vault credentials are unaffected.
+
+`mihomo_proxy_group_custom_members` stored **user-added** memberships: a `source = 'custom'` node attached to a native proxy-group of an imported config. It was strictly separate from the imported members (`mihomo_proxy_group_members`, which mirrored the source document):
+
+- Primary key `(config_id, group_name, proxy_id)`; groups were addressed by **name**, because a subscription refresh deleted and recreated the group rows themselves — the name was the identity that survived a refresh.
+- `config_id` and `proxy_id` were `ON DELETE CASCADE` foreign keys: deleting a config or a custom node removed only its overlay rows; nothing ever cascaded into nodes, configs or imported members.
+- That the node was really `source = 'custom'` and that `(config_id, group_name)` named a group the config actually had was validated by the service layer inside the write transaction (a CHECK cannot express cross-table conditions).
+- Refresh/re-import rebuilt only the imported structures and never touched this table: after a refresh the attachment reappeared in the same-named group; if the group had vanished upstream the row was kept and reported as orphaned, and it took effect again when the group returned.
+
+All of the above is migration history only: migration 0009 dropped this table, and none of the described machinery exists in the current code.
+
+### Scope cleanup note (PR #9, 2026-11-15)
+
+The PR #9 scope cleanup removed the proxy/subscription/Mihomo product features in code only. **No migration was added, removed, renamed or edited**: migrations 0001–0009 remain byte-identical, no table or column was dropped, and no row was deleted. Existing databases — including ones holding proxy, subscription, imported-config and vault-reference data — upgrade and start exactly as before; the populated-fixture upgrade tests for every stage (0004–0009) continue to run unchanged.
+
+The final review round of PR #9 converged the data layer further, still without touching stored data: the store's proxy/subscription/config repositories lost every create/update/delete method and now expose only the vault reference queries over those tables (`SecretRefInUse`, `AllSecretRefs`); instance create/update can no longer set or change `proxy_id` (creation writes NULL, updates preserve the stored value verbatim — pinned by `TestInstanceUpdatePreservesHistoricalProxyID`), and the instance UI carries no proxy column or selector.
 
 ## Backup before migration
 

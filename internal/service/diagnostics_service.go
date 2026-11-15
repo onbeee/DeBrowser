@@ -15,8 +15,12 @@ import (
 	"sync"
 	"time"
 
+	"runtime/debug"
+	"sort"
+
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
+	"github.com/onbeee/DeBrowser/internal/store"
 	"github.com/onbeee/DeBrowser/internal/version"
 )
 
@@ -74,13 +78,19 @@ type ExportSummary struct {
 	Bytes int64  `json:"bytes"`
 }
 
-// DiagnosticsView is everything the diagnostics page shows.
+// DiagnosticsView is everything the data-management page shows:
+// application and database state, the data directory, instance
+// counts and the logging-system categories (run / operation /
+// error), plus the last export summary.
 type DiagnosticsView struct {
 	AppName        string         `json:"appName"`
 	AppVersion     string         `json:"appVersion"`
 	SchemaVersion  int            `json:"schemaVersion"`
 	DatabaseStatus string         `json:"databaseStatus"`
 	UptimeSeconds  int64          `json:"uptimeSeconds"`
+	DataDir        string         `json:"dataDir"`
+	DatabaseBytes  int64          `json:"databaseBytes"`
+	InstanceCount  int            `json:"instanceCount"`
 	LogDir         string         `json:"logDir"`
 	Categories     []CategoryView `json:"categories"`
 	LastExport     *ExportSummary `json:"lastExport"`
@@ -101,7 +111,19 @@ func (s *DiagnosticsService) GetDiagnostics() (DiagnosticsView, error) {
 		SchemaVersion:  schema,
 		DatabaseStatus: status.Database,
 		UptimeSeconds:  status.UptimeSeconds,
+		DataDir:        s.app.cfg.Layout.Data,
 		LogDir:         s.logs.Dir(),
+	}
+	// Data overview (data management): the database file size
+	// (main file plus its WAL sidecar) and the instance count are
+	// read directly, never estimated.
+	for _, suffix := range []string{"", "-wal"} {
+		if fi, err := os.Stat(s.app.cfg.Layout.DatabaseFile + suffix); err == nil {
+			view.DatabaseBytes += fi.Size()
+		}
+	}
+	if instances, err := store.New(s.db).ListInstances(ctx); err == nil {
+		view.InstanceCount = len(instances)
 	}
 	for _, st := range s.logs.Stats() {
 		view.Categories = append(view.Categories, CategoryView{
@@ -144,7 +166,7 @@ func (s *DiagnosticsService) ExportDiagnostics() (ExportResult, error) {
 	if dest == "" {
 		return ExportResult{Cancelled: true}, nil
 	}
-	summary, err := s.exportTo(dest)
+	summary, err := s.exportTo(dest, nil)
 	auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
 	if err != nil {
 		return ExportResult{}, err
@@ -159,7 +181,7 @@ func (s *DiagnosticsService) ExportDiagnostics() (ExportResult, error) {
 // written to a temporary file in the same directory and renamed
 // into place, so a failure never leaves a partial export behind and
 // never touches existing data.
-func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
+func (s *DiagnosticsService) exportTo(dest string, extras map[string][]byte) (ExportSummary, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	schema, err := s.db.AppliedVersion(ctx)
 	cancel()
@@ -221,6 +243,30 @@ func (s *DiagnosticsService) exportTo(dest string) (ExportSummary, error) {
 		})
 		totalFiles += len(files)
 		totalBytes += catBytes
+	}
+
+	// Extra documents (fault report): same treatment as the log
+	// streams — path redaction, sensitivity scan, manifest entry
+	// with the SHA-256 of exactly the archived bytes.
+	if len(extras) > 0 {
+		names := make([]string, 0, len(extras))
+		for name := range extras {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			data := redactPaths(extras[name])
+			if err := ScanForSecrets(data); err != nil {
+				return ExportSummary{}, fmt.Errorf("敏感信息检查未通过（%s）：%w", name, err)
+			}
+			sum := sha256.Sum256(data)
+			pending = append(pending, pendingFile{arcName: name, data: data, sha256: hex.EncodeToString(sum[:])})
+			manifestFiles = append(manifestFiles, map[string]any{
+				"path": name, "size": len(data), "sha256": hex.EncodeToString(sum[:]),
+			})
+			totalFiles++
+			totalBytes += int64(len(data))
+		}
 	}
 
 	manifest := map[string]any{
@@ -351,4 +397,82 @@ func ScanForSecrets(data []byte) error {
 	default:
 		return nil
 	}
+}
+
+// ExportFaultReport builds the extended ZIP a user can hand
+// straight to support/ChatGPT: everything the diagnostics
+// export carries, plus fault-report.json (app/build/OS info,
+// migration version, database status and instance counts).
+// All content passes the same path redaction and fail-closed
+// sensitivity scan as the log streams; the database, the
+// vault, browser data and raw user configs are never included.
+func (s *DiagnosticsService) ExportFaultReport() (ExportResult, error) {
+	start := time.Now()
+	if s.SavePathPicker == nil {
+		return ExportResult{}, fmt.Errorf("保存对话框不可用")
+	}
+	defaultName := "debrowser-fault-report-" + time.Now().Format("20060102-150405") + ".zip"
+	dest, err := s.SavePathPicker(defaultName)
+	if err != nil {
+		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		return ExportResult{}, fmt.Errorf("打开保存对话框失败：%w", err)
+	}
+	if dest == "" {
+		return ExportResult{Cancelled: true}, nil
+	}
+	extras, err := s.buildFaultReportExtras()
+	if err != nil {
+		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		return ExportResult{}, err
+	}
+	summary, err := s.exportTo(dest, extras)
+	auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+	if err != nil {
+		return ExportResult{}, err
+	}
+	s.mu.Lock()
+	s.lastExport = &summary
+	s.mu.Unlock()
+	return ExportResult{Path: summary.Path, Files: summary.Files, Bytes: summary.Bytes}, nil
+}
+
+func (s *DiagnosticsService) buildFaultReportExtras() (map[string][]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	schema, err := s.db.AppliedVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取数据库结构版本失败：%w", err)
+	}
+	report := map[string]any{
+		"reportKind":    "fault-report",
+		"generatedAt":   time.Now().Format(time.RFC3339),
+		"appName":       version.Name,
+		"appVersion":    version.Version,
+		"platform":      runtime.GOOS + "/" + runtime.GOARCH,
+		"schemaVersion": schema,
+		"database":      s.app.GetStatus().Database,
+		"correlation":   "审计日志（logs/operation）按操作名与目标 ID 记录每次操作，可据此在日志中定位完整阶段记录。",
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				report["gitCommit"] = setting.Value
+			}
+		}
+	}
+	if instances, err := store.New(s.db).ListInstances(ctx); err == nil {
+		byStatus := map[string]int{}
+		for _, in := range instances {
+			byStatus[string(in.Status)]++
+		}
+		report["instances"] = map[string]any{
+			"total":    len(instances),
+			"byStatus": byStatus,
+		}
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]byte{"fault-report.json": data}, nil
 }

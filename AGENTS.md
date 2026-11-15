@@ -30,7 +30,6 @@ The application must prioritize:
 - SQLite driver: modernc.org/sqlite
 - State management: Zustand
 - Browser control: Chrome DevTools Protocol (CDP)
-- Proxy engine: Mihomo
 
 Use stable, compatible, pinned dependency versions. Do not upgrade major dependencies without approval.
 
@@ -42,7 +41,6 @@ Go owns all core business logic:
 - Browser process management
 - Instance lifecycle
 - Profile isolation
-- Proxy management
 - Kernel management
 - Bookmark management
 - Synchronization
@@ -68,7 +66,6 @@ Each browser instance must have:
 - An independent user data directory
 - An independent configuration
 - An independently managed browser process
-- An optional independent proxy assignment
 
 Never share a Chromium user data directory between running instances.
 

@@ -16,7 +16,9 @@ import (
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
+	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/paths"
+	"github.com/onbeee/DeBrowser/internal/store"
 )
 
 type diagFixture struct {
@@ -66,7 +68,7 @@ func TestGetDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDiagnostics: %v", err)
 	}
-	if view.AppVersion == "" || view.SchemaVersion != 6 {
+	if view.AppVersion == "" || view.SchemaVersion != 9 {
 		t.Fatalf("view = %+v, want version set and schema 5", view)
 	}
 	if len(view.Categories) != 3 {
@@ -83,7 +85,7 @@ func TestExportDiagnosticsZipStructureAndHashes(t *testing.T) {
 	f.logs.Audit(logging.AuditEvent{Operation: "proxy.create", TargetType: "proxy", TargetID: "p1", OK: true})
 
 	dest := filepath.Join(t.TempDir(), "diag.zip")
-	summary, err := f.svc.exportTo(dest)
+	summary, err := f.svc.exportTo(dest, nil)
 	if err != nil {
 		t.Fatalf("exportTo: %v", err)
 	}
@@ -121,7 +123,7 @@ func TestExportDiagnosticsZipStructureAndHashes(t *testing.T) {
 	if err := json.Unmarshal(mf, &manifest); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
-	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 6 {
+	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 9 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	if len(manifest.Files) == 0 {
@@ -173,7 +175,7 @@ func TestExportFailsClosedOnPoisonedLog(t *testing.T) {
 	_ = fh.Close()
 
 	dest := filepath.Join(t.TempDir(), "diag.zip")
-	if _, err := f.svc.exportTo(dest); err == nil {
+	if _, err := f.svc.exportTo(dest, nil); err == nil {
 		t.Fatal("exportTo succeeded despite a poisoned log file")
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
@@ -191,7 +193,7 @@ func TestExportFailsClosedOnPoisonedLog(t *testing.T) {
 func TestExportUnwritableDestination(t *testing.T) {
 	f := newDiagFixture(t)
 	dest := filepath.Join(t.TempDir(), "missing-dir", "diag.zip")
-	if _, err := f.svc.exportTo(dest); err == nil {
+	if _, err := f.svc.exportTo(dest, nil); err == nil {
 		t.Fatal("exportTo succeeded with an unwritable destination")
 	}
 }
@@ -316,7 +318,7 @@ func TestExportRedactsAbsolutePaths(t *testing.T) {
 
 	before := hashDirFiles(t, f.layout.Logs)
 	dest := filepath.Join(t.TempDir(), "diag.zip")
-	if _, err := f.svc.exportTo(dest); err != nil {
+	if _, err := f.svc.exportTo(dest, nil); err != nil {
 		t.Fatalf("exportTo: %v", err)
 	}
 	// The original log files must be byte-identical after export.
@@ -433,13 +435,13 @@ func TestExportReplacesExistingDestination(t *testing.T) {
 	f := newDiagFixture(t)
 	f.logs.Logger().Info("first")
 	dest := filepath.Join(t.TempDir(), "diag.zip")
-	if _, err := f.svc.exportTo(dest); err != nil {
+	if _, err := f.svc.exportTo(dest, nil); err != nil {
 		t.Fatalf("first exportTo: %v", err)
 	}
 	f.logs.Logger().Info("second")
 	// Second export to the SAME path exercises the platform
 	// replace (MoveFileExW REPLACE_EXISTING on Windows CI).
-	summary, err := f.svc.exportTo(dest)
+	summary, err := f.svc.exportTo(dest, nil)
 	if err != nil {
 		t.Fatalf("second exportTo (replace): %v", err)
 	}
@@ -473,7 +475,7 @@ func TestExportReplaceFailureKeepsExistingDest(t *testing.T) {
 	f.svc.replaceFile = func(string, string) error {
 		return errors.New("injected replace failure")
 	}
-	if _, err := f.svc.exportTo(dest); err == nil {
+	if _, err := f.svc.exportTo(dest, nil); err == nil {
 		t.Fatal("exportTo succeeded despite injected replace failure")
 	}
 	data, err := os.ReadFile(dest)
@@ -499,7 +501,7 @@ func TestExportReplaceFailureWithoutDest(t *testing.T) {
 	f.svc.replaceFile = func(string, string) error {
 		return errors.New("injected replace failure")
 	}
-	if _, err := f.svc.exportTo(dest); err == nil {
+	if _, err := f.svc.exportTo(dest, nil); err == nil {
 		t.Fatal("exportTo succeeded despite injected replace failure")
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
@@ -512,4 +514,103 @@ func TestExportReplaceFailureWithoutDest(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("temporary files left behind: %v", entries)
 	}
+}
+
+// ---- Fault report (data management; generic content only) ----
+
+func zipNames(t *testing.T, path string) map[string]string {
+	t.Helper()
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	out := map[string]string{}
+	for _, f := range r.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		out[f.Name] = string(data)
+	}
+	return out
+}
+
+func TestFaultReportContentsAndRedaction(t *testing.T) {
+	f := newDiagFixture(t)
+	// Seed an instance row: the fault report carries only its
+	// count/status summary, never profile data.
+	st := store.New(f.db)
+	if _, err := st.CreateInstance(context.Background(), model.Instance{
+		Name: "诊断实例", UserDataDir: "profiles/diag-1", Status: model.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "fault.zip")
+	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
+	res, err := f.svc.ExportFaultReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != dest || res.Files == 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	files := zipNames(t, dest)
+	report, ok := files["fault-report.json"]
+	if !ok {
+		t.Fatalf("fault-report.json missing; entries: %v", keysOf(files))
+	}
+	for _, want := range []string{`"schemaVersion": 9`, `"appVersion"`, `"instances"`, `"total": 1`} {
+		if !strings.Contains(report, want) {
+			t.Errorf("fault report missing %q:\n%s", want, report)
+		}
+	}
+	// No proxy/subscription/Mihomo-specific content may remain.
+	for _, forbidden := range []string{"mihomo", "Mihomo", "subscription", "proxy", "Proxy"} {
+		if strings.Contains(report, forbidden) {
+			t.Errorf("fault report still contains %q:\n%s", forbidden, report)
+		}
+	}
+	if _, ok := files["mihomo-core.log"]; ok {
+		t.Error("mihomo-core.log must not be in the fault report")
+	}
+	if _, ok := files["manifest.json"]; !ok {
+		t.Error("manifest.json missing")
+	}
+	// Nothing sensitive or bulky may ride along.
+	for name, content := range files {
+		if strings.Contains(name, ".db") || strings.Contains(name, "vault") || strings.Contains(name, "profiles/") {
+			t.Errorf("forbidden entry in fault report: %s", name)
+		}
+		if strings.Contains(content, "secret_ref") || strings.Contains(content, "diag-1") {
+			t.Errorf("entry %s leaks sensitive content", name)
+		}
+	}
+}
+
+func TestFaultReportFailsClosedOnSecretInLog(t *testing.T) {
+	f := newDiagFixture(t)
+	f.logs.Logger().Info("clean line")
+	_ = f.logs.Close()
+	// Poison a run log file: the fault report export must refuse
+	// rather than ship the secret-shaped content.
+	appendToCategoryFile(t, f.layout.Logs, "run", `{"leak":"secret_ref = abc"}`)
+	dest := filepath.Join(t.TempDir(), "fault.zip")
+	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
+	if _, err := f.svc.ExportFaultReport(); err == nil {
+		t.Fatal("fault report exported despite a secret in a log file")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatal("a partial fault report file was left behind")
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

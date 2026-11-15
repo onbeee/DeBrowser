@@ -134,46 +134,35 @@ func run() error {
 		return err
 	}
 
-	// The credential vault opens after the database: proxy rows
-	// reference vault entries, and the proxy service's startup
-	// garbage collection needs both. A vault that cannot be opened
-	// at all (permissions cannot be established, I/O failure)
-	// aborts startup — silently continuing would risk treating
-	// stored credentials as absent. A vault recovered from its
-	// backup, or quarantined as unrecoverable, is reported loudly
-	// and surfaces per-proxy as credential-unavailable.
-	vault, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
+	// The credential vault opens after the database: existing
+	// rows reference vault entries, and opening it at startup
+	// preserves the established recovery behaviour (a vault
+	// recovered from its backup, or quarantined as
+	// unrecoverable, is reported loudly). The vault is a
+	// data-compatibility layer only — no product feature in
+	// the current scope reads or writes credentials through a
+	// user-facing service, and the file is never deleted or
+	// cleared by this cleanup.
+	_, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
 	if err != nil {
 		logger.Error("open credential vault failed", "error", err)
 		return err
 	}
 	if vaultRecovery.Unrecoverable {
-		logger.Warn("credential vault unrecoverable; corrupt files quarantined, affected proxies report credential-unavailable",
+		logger.Warn("credential vault unrecoverable; corrupt files quarantined",
 			"quarantined", vaultRecovery.Quarantined)
 	} else if vaultRecovery.RecoveredFromBackup {
 		logger.Warn("credential vault recovered from its backup snapshot")
-	}
-
-	proxyService, err := service.NewProxyService(db, vault, logger)
-	if err != nil {
-		logger.Error("proxy service failed", "error", err)
-		return err
 	}
 
 	// Operation audit (Stage 5B): user-initiated mutations in these
 	// services record whitelist entries in the operation log.
 	appService.Auditor = logSystem
 	instanceService.Auditor = logSystem
-	proxyService.Auditor = logSystem
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
 
-	// Stage 6: subscriptions and Mihomo config import, sharing
-	// the ProxyService's store, vault and mutex by construction.
-	subscriptionService := service.NewSubscriptionService(proxyService, cfg.Layout, logger)
-	subscriptionService.Auditor = logSystem
-
-	wailsApp := app.New(cfg, appService, instanceService, proxyService, diagnosticsService, subscriptionService, logger, assets)
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, logger, assets)
 	runErr := wailsApp.Run()
 
 	// The app has fully stopped and its background loops are drained:

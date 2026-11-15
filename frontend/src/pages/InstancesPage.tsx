@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AppWindow, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
 import { InstanceService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
-import type { Instance, Proxy } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
+import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -13,13 +13,12 @@ const STATUS_LABEL: Record<string, string> = {
 interface FormState {
   id?: string;
   name: string;
-  proxyId: string; // "" = 不使用代理
   startUrl: string;
   kernelName: string;
   kernelVersion: string;
 }
 
-const EMPTY_FORM: FormState = { name: "", proxyId: "", startUrl: "", kernelName: "", kernelVersion: "" };
+const EMPTY_FORM: FormState = { name: "", startUrl: "", kernelName: "", kernelVersion: "" };
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
@@ -32,7 +31,6 @@ type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 export default function InstancesPage() {
   const log = useAppStore((state) => state.log);
   const [instances, setInstances] = useState<Instance[]>([]);
-  const [proxies, setProxies] = useState<Proxy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
@@ -42,12 +40,8 @@ export default function InstancesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [list, proxyList] = await Promise.all([
-        InstanceService.ListInstances(),
-        InstanceService.ListProxies(),
-      ]);
+      const list = await InstanceService.ListInstances();
       setInstances(list ?? []);
-      setProxies(proxyList ?? []);
       setError(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -62,19 +56,14 @@ export default function InstancesPage() {
     void load();
   }, [load]);
 
-  const proxyName = (id?: string | null) =>
-    id ? (proxies.find((p) => p.id === id)?.name ?? "未知代理") : "不使用代理";
-
   const submitForm = async () => {
     if (!form) return;
     setBusy(true);
     try {
-      const proxyId = form.proxyId === "" ? null : form.proxyId;
       if (form.id) {
         await InstanceService.UpdateInstance({
           id: form.id,
           name: form.name,
-          proxyId,
           startUrl: form.startUrl,
           kernelName: form.kernelName,
           kernelVersion: form.kernelVersion,
@@ -84,7 +73,6 @@ export default function InstancesPage() {
       } else {
         const created = await InstanceService.CreateInstance({
           name: form.name,
-          proxyId,
           startUrl: form.startUrl,
           kernelName: form.kernelName,
           kernelVersion: form.kernelVersion,
@@ -181,7 +169,6 @@ export default function InstancesPage() {
                 <th className="px-4 py-2.5 font-medium">名称</th>
                 <th className="px-4 py-2.5 font-medium">状态</th>
                 <th className="px-4 py-2.5 font-medium">内核</th>
-                <th className="px-4 py-2.5 font-medium">代理</th>
                 <th className="px-4 py-2.5 font-medium">数据目录</th>
                 <th className="px-4 py-2.5 text-right font-medium">操作</th>
               </tr>
@@ -200,7 +187,6 @@ export default function InstancesPage() {
                       ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
                       : "未指定"}
                   </td>
-                  <td className="px-4 py-2.5 text-(--text-dim)">{proxyName(inst.proxyId)}</td>
                   <td className="px-4 py-2.5 font-mono text-xs text-(--text-faint)">{inst.userDataDir}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex justify-end gap-1">
@@ -211,7 +197,6 @@ export default function InstancesPage() {
                           setForm({
                             id: inst.id,
                             name: inst.name,
-                            proxyId: inst.proxyId ?? "",
                             startUrl: inst.startUrl,
                             kernelName: inst.kernelName,
                             kernelVersion: inst.kernelVersion,
@@ -251,21 +236,6 @@ export default function InstancesPage() {
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                   placeholder="例如：工作号"
                 />
-              </div>
-              <div>
-                <label className={labelCls}>代理</label>
-                <select
-                  className={inputCls}
-                  value={form.proxyId}
-                  onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
-                >
-                  <option value="">不使用代理</option>
-                  {proxies.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}（{p.protocol}）
-                    </option>
-                  ))}
-                </select>
               </div>
               <div>
                 <label className={labelCls}>起始页（可选）</label>
