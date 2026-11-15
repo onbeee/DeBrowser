@@ -5,22 +5,25 @@
  * BrowserService is the Stage 9A browser and kernel management
  * service exposed to the frontend over Wails bindings.
  * 
- * Product decision (revised): DeBrowser does NOT detect browsers
+ * Product decision: DeBrowser does NOT detect browsers
  * automatically — no registry scanning, no disk scanning, no
  * auto-discovery of any kind. A browser becomes available only
  * when the user explicitly adds it, in one of two ways:
  * 
- *   - Manual: the user picks an installed Google Chrome or Brave
- *     executable in the file picker. The file passes the full
- *     identity/version/Authenticode-publisher verification and
- *     the registration is persisted (migration 0011). DeBrowser
- *     never copies, modifies, uninstalls or deletes the browser
- *     or reads its everyday profile; removing a registration
- *     deletes only the database row.
+ *   - Manual: the user picks a program executable in the file
+ *     picker and DeBrowser registers ONLY its path (migration
+ *     0011, reshaped by 0012). There is NO identity, version,
+ *     signature or publisher check on the chosen file — the
+ *     user chose it, and judging or launching it is not this
+ *     stage's business. DeBrowser never copies, modifies,
+ *     uninstalls or deletes the registered program or reads its
+ *     profile; removing a registration deletes only the
+ *     database row.
  *   - Managed: the user explicitly downloads a Chrome for
  *     Testing build that DeBrowser installs under
- *     kernels/<version> (migration 0010). Only managed kernels
- *     can be deleted from disk, through the guarded path here.
+ *     kernels/<version> (migration 0010) and verifies as part of
+ *     the installation. Only managed kernels can be deleted
+ *     from disk, through the guarded path here.
  * 
  * This stage never launches a browser process.
  * @module
@@ -35,14 +38,14 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
- * AddBrowserManually lets the user point at a browser executable
- * through the native file picker. The chosen file must pass the
- * full verification (identity from its version resource, version,
- * Authenticode signature and publisher) and must be Google Chrome
- * Stable or Brave Stable; anything else is rejected with the
- * reason and nothing is recorded. A verified browser is persisted
- * so it survives restarts. Adding the same executable twice
- * refreshes its registration instead of duplicating it.
+ * AddBrowserManually lets the user point at a program executable
+ * through the native file picker and registers ONLY the chosen
+ * path. There is deliberately NO check of any kind on the file:
+ * no identity, product, version, signature or publisher
+ * verification, and the file is not even required to be read —
+ * the picker already guarantees the user picked it deliberately.
+ * Registering the same path twice returns the existing
+ * registration instead of duplicating it.
  */
 export function AddBrowserManually(): $CancellablePromise<$models.BrowserView> {
     return $Call.ByID(4106159291);
@@ -62,9 +65,9 @@ export function DeleteManagedKernel(id: string): $CancellablePromise<void> {
 
 /**
  * GetBrowserDetails returns one browser by ID. A manual
- * registration is re-verified live before it is shown (and the
- * outcome persisted); a managed kernel is returned from its
- * registration.
+ * registration is returned exactly as stored (it is a pure path
+ * record — there is nothing to re-verify); a managed kernel is
+ * returned from its registration.
  */
 export function GetBrowserDetails(id: string): $CancellablePromise<$models.BrowserView> {
     return $Call.ByID(1520246943, id);
@@ -115,11 +118,14 @@ export function RemoveBrowserRegistration(id: string): $CancellablePromise<void>
 }
 
 /**
- * VerifyBrowser re-verifies one manually registered browser and
- * records the outcome.
+ * UpdateBrowserPath re-points one manual registration at a newly
+ * picked executable path (the "重新选择路径" action). Like
+ * AddBrowserManually it performs no check on the chosen file; it
+ * only refuses to steal a path another registration already
+ * holds.
  */
-export function VerifyBrowser(id: string): $CancellablePromise<$models.BrowserView> {
-    return $Call.ByID(3087262306, id);
+export function UpdateBrowserPath(id: string): $CancellablePromise<$models.BrowserView> {
+    return $Call.ByID(3881955469, id);
 }
 
 /**

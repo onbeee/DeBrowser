@@ -145,26 +145,20 @@ type Kernel struct {
 	UpdatedAt      string `json:"updatedAt"`
 }
 
-// ExternalBrowser is a browser the user added by hand (Stage 9A,
-// revised): an installed Google Chrome or Brave whose executable
-// the user picked in the file picker and which passed identity,
-// version and Authenticode publisher verification. Only the
-// registration is stored — the browser binary is never copied,
-// its install directory never modified, and removing the
-// registration deletes only this record. ExecutablePath is
-// absolute and is re-verified before every use.
+// ExternalBrowser is a browser the user added by hand (Stage 9A):
+// a PURE PATH REGISTRATION. The user picks a program executable
+// in the file picker and DeBrowser stores only the chosen path
+// and a display name derived from the file name. DeBrowser
+// performs NO identity, version, signature or publisher check on
+// the chosen file, never launches it in this stage, and never
+// copies, moves, modifies or deletes it; removing the
+// registration deletes only this record.
 type ExternalBrowser struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	BrowserType        string `json:"browserType"` // "chrome" | "brave"
-	Version            string `json:"version"`
-	ExecutablePath     string `json:"executablePath"`
-	SignatureStatus    string `json:"signatureStatus"`
-	SignaturePublisher string `json:"signaturePublisher"`
-	Status             string `json:"status"` // "verified" | "invalid"
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
-	LastVerifiedAt     string `json:"lastVerifiedAt"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	ExecutablePath string `json:"executablePath"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
 }
 
 // Bookmark is a single bookmark. A nil InstanceID means the bookmark

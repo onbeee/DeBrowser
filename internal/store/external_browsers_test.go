@@ -8,25 +8,25 @@ import (
 	"github.com/onbeee/DeBrowser/internal/model"
 )
 
+// Manual browser registrations are pure path records: any name
+// and any path can be stored — the store performs no identity or
+// signature checks (there are no such fields anymore).
 func TestExternalBrowserCRUD(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	b, err := s.CreateExternalBrowser(ctx, model.ExternalBrowser{
-		Name: "Google Chrome", BrowserType: "chrome", Version: "142.0.7444.162",
-		ExecutablePath:     `C:\Program Files\Google\Chrome\Application\chrome.exe`,
-		SignatureStatus:    "verified",
-		SignaturePublisher: "Google LLC",
-		LastVerifiedAt:     "2026-11-15T00:00:00Z",
+		Name:           "totally-not-a-browser",
+		ExecutablePath: `C:\Users\one\Programs\totally-not-a-browser.exe`,
 	})
 	if err != nil {
 		t.Fatalf("CreateExternalBrowser: %v", err)
 	}
-	if b.ID == "" || b.Status != "verified" {
+	if b.ID == "" || b.Name != "totally-not-a-browser" || b.CreatedAt == "" {
 		t.Fatalf("browser = %+v", b)
 	}
 	// Duplicate path must be rejected by the unique index.
 	if _, err := s.CreateExternalBrowser(ctx, model.ExternalBrowser{
-		Name: "Google Chrome", BrowserType: "chrome", ExecutablePath: b.ExecutablePath,
+		Name: "other", ExecutablePath: b.ExecutablePath,
 	}); err == nil {
 		t.Fatal("duplicate executable_path must fail")
 	}
@@ -34,16 +34,16 @@ func TestExternalBrowserCRUD(t *testing.T) {
 	if err != nil || byPath.ID != b.ID {
 		t.Fatalf("GetExternalBrowserByPath = %+v, %v", byPath, err)
 	}
-	// Re-verification outcome updates identity + status.
-	b.Status = "invalid"
-	b.SignatureStatus = "invalid"
-	b.LastVerifiedAt = "2026-11-16T00:00:00Z"
-	if err := s.UpdateExternalBrowserVerification(ctx, b); err != nil {
-		t.Fatalf("UpdateExternalBrowserVerification: %v", err)
+	// Re-selecting a path updates name + path in place.
+	if err := s.UpdateExternalBrowserPath(ctx, b.ID, "renamed", `D:\elsewhere\renamed.exe`); err != nil {
+		t.Fatalf("UpdateExternalBrowserPath: %v", err)
 	}
 	got, err := s.GetExternalBrowser(ctx, b.ID)
-	if err != nil || got.Status != "invalid" || got.LastVerifiedAt != "2026-11-16T00:00:00Z" {
+	if err != nil || got.Name != "renamed" || got.ExecutablePath != `D:\elsewhere\renamed.exe` {
 		t.Fatalf("after update: %+v, %v", got, err)
+	}
+	if err := s.UpdateExternalBrowserPath(ctx, "missing-id", "x", `D:\x.exe`); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing err = %v, want ErrNotFound", err)
 	}
 	list, err := s.ListExternalBrowsers(ctx)
 	if err != nil || len(list) != 1 {

@@ -118,7 +118,6 @@ func testBrowserFixture(t *testing.T) *browserFixture {
 // call simulates an application restart.
 func (fx *browserFixture) newService() *BrowserService {
 	svc := NewBrowserService(fx.db, fx.cfg.Layout, slog.Default())
-	svc.inspector = fx.insp
 	svc.manager = &kernels.Manager{
 		Fetcher:   &fakeFetcher{metadata: []byte(testMetadata), zipBytes: testZipForFixture()},
 		Inspector: fx.insp,
@@ -166,129 +165,141 @@ func TestManualAddPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddBrowserManually: %v", err)
 	}
-	if added.Source != "manual" || added.Kind != "chrome" || added.DetectionStatus != "verified" || added.LastVerifiedAt == "" {
+	// Pure path registration: the view carries the chosen path and
+	// a display name derived from the file name — and nothing else
+	// (no kind, version, signature or verification fields).
+	if added.Source != "manual" || added.Name != "chrome" || added.ExecutablePath != fx.chromePath {
 		t.Fatalf("added = %+v", added)
+	}
+	if added.Kind != "" || added.Version != "" || added.SignatureStatus != "" || added.Publisher != "" || added.DetectionStatus != "" {
+		t.Fatalf("manual view must not carry verification data: %+v", added)
 	}
 	// The browser file must NOT be copied into DeBrowser's folders.
 	if strings.Contains(added.ExecutablePath, fx.cfg.Layout.Kernels) || strings.Contains(added.ExecutablePath, fx.cfg.Layout.Data) {
 		t.Fatalf("browser path points inside DeBrowser data: %s", added.ExecutablePath)
 	}
 	// A fresh service over the same DB (simulated restart) still
-	// lists the registration.
+	// lists the registration, read back from SQLite unchanged.
 	restarted := fx.newService()
 	got, err := restarted.ListBrowsers()
-	if err != nil || len(got) != 1 || got[0].ID != added.ID {
+	if err != nil || len(got) != 1 || got[0].ID != added.ID || got[0].ExecutablePath != fx.chromePath {
 		t.Fatalf("after restart ListBrowsers = %+v, %v", got, err)
 	}
-	// Adding the same browser again refreshes, not duplicates.
+	details, err := restarted.GetBrowserDetails(added.ID)
+	if err != nil || details.ExecutablePath != fx.chromePath {
+		t.Fatalf("GetBrowserDetails = %+v, %v", details, err)
+	}
+	// Adding the same path again returns the same registration,
+	// not a duplicate.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	if _, err := fx.svc.AddBrowserManually(); err != nil {
-		t.Fatal(err)
+	again, err := fx.svc.AddBrowserManually()
+	if err != nil || again.ID != added.ID {
+		t.Fatalf("duplicate add = %+v, %v", again, err)
 	}
 	got, _ = fx.svc.ListBrowsers()
 	if len(got) != 1 {
 		t.Fatalf("duplicate add produced %d records", len(got))
 	}
-	// Brave can be added too.
+	// Any other program can be added the same way.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.bravePath, nil }
 	brave, err := fx.svc.AddBrowserManually()
-	if err != nil || brave.Kind != "brave" {
+	if err != nil || brave.Name != "brave" {
 		t.Fatalf("brave add = %+v, %v", brave, err)
 	}
 }
 
-func TestManualAddRejections(t *testing.T) {
+// TestManualAddAcceptsAnyExecutable proves the manual flow
+// performs NO identity or security checks: files whose name,
+// product identity, signature or publisher would previously have
+// been rejected — and even a path that does not exist on disk at
+// all (so no inspection of it could possibly have happened) —
+// are all registered as plain paths.
+func TestManualAddAcceptsAnyExecutable(t *testing.T) {
 	fx := testBrowserFixture(t)
-	cases := []struct {
-		name  string
-		setup func() string
-	}{
-		{"chromium is not accepted manually", func() string {
-			p := filepath.Join(fx.cfg.Layout.Root, "other", "chromium.exe")
-			writeExe(t, p)
-			fx.insp.versions[p] = browserprobe.VersionInfo{ProductName: "Chromium", FileVersion: "142.0"}
-			return p
-		}},
-		{"publisher mismatch", func() string {
-			p := filepath.Join(fx.cfg.Layout.Root, "other", "fake-chrome.exe")
-			writeExe(t, p)
-			fx.insp.versions[p] = browserprobe.VersionInfo{ProductName: "Google Chrome", FileVersion: "1.0"}
-			fx.insp.sigs[p] = browserprobe.Signature{Status: "valid", Publisher: "Evil Corp"}
-			return p
-		}},
-		{"unsigned", func() string {
-			p := filepath.Join(fx.cfg.Layout.Root, "other", "unsigned.exe")
-			writeExe(t, p)
-			fx.insp.versions[p] = browserprobe.VersionInfo{ProductName: "Google Chrome", FileVersion: "1.0"}
-			fx.insp.sigs[p] = browserprobe.Signature{Status: "unsigned"}
-			return p
-		}},
-		{"unknown product", func() string {
-			p := filepath.Join(fx.cfg.Layout.Root, "other", "thing.exe")
-			writeExe(t, p)
-			fx.insp.versions[p] = browserprobe.VersionInfo{ProductName: "Some Tool", FileVersion: "1.0"}
-			return p
-		}},
-		{"missing file", func() string {
-			return filepath.Join(fx.cfg.Layout.Root, "other", "gone.exe")
-		}},
+	mk := func(name string) string {
+		p := filepath.Join(fx.cfg.Layout.Root, "other", name)
+		writeExe(t, p)
+		return p
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			path := tc.setup()
-			fx.svc.ExecutablePicker = func() (string, error) { return path, nil }
-			if _, err := fx.svc.AddBrowserManually(); err == nil {
-				t.Fatal("add must be rejected")
-			}
-		})
+	paths := []string{
+		mk("chromium.exe"),       // a Chromium-named program
+		mk("fake-chrome.exe"),    // any name at all
+		mk("unsigned-tool.exe"),  // unsigned, unknown product
+		mk("totally-random.exe"), // garbage content, random name
+		filepath.Join(fx.cfg.Layout.Root, "other", "never-existed.exe"), // not on disk
 	}
-	// Picker cancelled: no record either.
-	fx.svc.ExecutablePicker = func() (string, error) { return "", nil }
-	if _, err := fx.svc.AddBrowserManually(); err == nil {
-		t.Fatal("cancelled picker must error")
+	for _, p := range paths {
+		path := p
+		fx.svc.ExecutablePicker = func() (string, error) { return path, nil }
+		v, err := fx.svc.AddBrowserManually()
+		if err != nil {
+			t.Fatalf("AddBrowserManually(%s): %v", path, err)
+		}
+		if v.ExecutablePath != path || v.Source != "manual" {
+			t.Fatalf("registered view = %+v, want path %s", v, path)
+		}
 	}
 	got, _ := fx.svc.ListBrowsers()
+	if len(got) != len(paths) {
+		t.Fatalf("registered %d browsers, want %d", len(got), len(paths))
+	}
+	// Picker cancelled: no record.
+	fx2 := testBrowserFixture(t)
+	fx2.svc.ExecutablePicker = func() (string, error) { return "", nil }
+	if _, err := fx2.svc.AddBrowserManually(); err == nil {
+		t.Fatal("cancelled picker must error")
+	}
+	got, _ = fx2.svc.ListBrowsers()
 	if len(got) != 0 {
-		t.Fatalf("rejected adds left records: %+v", got)
+		t.Fatalf("cancelled picker left records: %+v", got)
 	}
 }
 
-func TestVerifyBrowserLifecycle(t *testing.T) {
+func TestUpdateBrowserPath(t *testing.T) {
 	fx := testBrowserFixture(t)
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
 	added, err := fx.svc.AddBrowserManually()
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := fx.svc.VerifyBrowser(added.ID)
-	if err != nil || v.DetectionStatus != "verified" {
-		t.Fatalf("verify ok case = %+v, %v", v, err)
+	// Re-select a different path: the record updates in place.
+	fx.svc.ExecutablePicker = func() (string, error) { return fx.bravePath, nil }
+	updated, err := fx.svc.UpdateBrowserPath(added.ID)
+	if err != nil {
+		t.Fatalf("UpdateBrowserPath: %v", err)
 	}
-	// Signature goes bad: re-verification marks the record invalid
-	// and the outcome persists.
-	fx.insp.sigs[fx.chromePath] = browserprobe.Signature{Status: "invalid"}
-	v, err = fx.svc.VerifyBrowser(added.ID)
-	if err != nil || v.DetectionStatus != "verification_failed" {
-		t.Fatalf("verify bad-sig case = %+v, %v", v, err)
+	if updated.ID != added.ID || updated.ExecutablePath != fx.bravePath || updated.Name != "brave" {
+		t.Fatalf("updated = %+v", updated)
 	}
+	// The update persists across a simulated restart.
 	restarted := fx.newService()
 	got, _ := restarted.ListBrowsers()
-	if len(got) != 1 || got[0].DetectionStatus != "verification_failed" {
-		t.Fatalf("invalid status did not persist: %+v", got)
+	if len(got) != 1 || got[0].ExecutablePath != fx.bravePath {
+		t.Fatalf("after restart = %+v", got)
 	}
-	// File disappears (user uninstalled/moved it): list shows the
-	// path as invalid, and verify records it — without searching
-	// for a new location.
-	if err := os.Remove(fx.chromePath); err != nil {
+	// A path already held by another registration cannot be taken.
+	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
+	other, err := fx.svc.AddBrowserManually()
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ = fx.svc.ListBrowsers()
-	if len(got) != 1 || got[0].DetectionStatus != "verification_failed" || got[0].StatusReason == "" {
-		t.Fatalf("missing file display = %+v", got)
+	fx.svc.ExecutablePicker = func() (string, error) { return fx.bravePath, nil }
+	if _, err := fx.svc.UpdateBrowserPath(other.ID); err == nil {
+		t.Fatal("taking another registration's path must fail")
 	}
-	v, err = fx.svc.VerifyBrowser(added.ID)
-	if err != nil || v.DetectionStatus != "verification_failed" {
-		t.Fatalf("verify missing case = %+v, %v", v, err)
+	// Unknown registration ID errors.
+	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
+	if _, err := fx.svc.UpdateBrowserPath("no-such-id"); err == nil {
+		t.Fatal("updating a missing registration must error")
+	}
+	// The registered programs themselves were never launched,
+	// moved or modified by any of this: both files still exist
+	// with their original content.
+	for _, p := range []string{fx.chromePath, fx.bravePath} {
+		body, err := os.ReadFile(p)
+		if err != nil || string(body) != "MZ" {
+			t.Fatalf("registered file changed: %s (%v)", p, err)
+		}
 	}
 }
 
@@ -375,6 +386,11 @@ func TestKernelLifecycleAndCrossProtection(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162")); !os.IsNotExist(err) {
 		t.Fatal("kernel directory should be removed")
+	}
+	// Deleting the kernel must not affect the manual registration.
+	remaining, err := fx.svc.ListBrowsers()
+	if err != nil || len(remaining) != 1 || remaining[0].ID != manual.ID {
+		t.Fatalf("manual registration after kernel delete = %+v, %v", remaining, err)
 	}
 }
 
