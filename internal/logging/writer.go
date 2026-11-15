@@ -114,7 +114,13 @@ func (w *categoryWriter) scanLocked() []fileEntry {
 		if m[2] != "" {
 			fmt.Sscanf(m[2], "%d", &vol)
 		}
-		info, err := e.Info()
+		// The size must come from os.Stat, not DirEntry.Info: on
+		// Windows the size carried by a directory entry can lag
+		// behind writes to a still-open file, which would make
+		// capacity accounting (and enforcement) read a stale,
+		// smaller size right after heavy writing. Stat queries
+		// the file itself and is always current.
+		info, err := os.Stat(filepath.Join(w.dir, e.Name()))
 		if err != nil {
 			continue
 		}
