@@ -68,8 +68,8 @@ func TestGetDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDiagnostics: %v", err)
 	}
-	if view.AppVersion == "" || view.SchemaVersion != 9 {
-		t.Fatalf("view = %+v, want version set and schema 5", view)
+	if view.AppVersion == "" || view.SchemaVersion != 10 {
+		t.Fatalf("view = %+v, want version set and schema 10", view)
 	}
 	if len(view.Categories) != 3 {
 		t.Fatalf("categories = %d, want 3", len(view.Categories))
@@ -123,7 +123,7 @@ func TestExportDiagnosticsZipStructureAndHashes(t *testing.T) {
 	if err := json.Unmarshal(mf, &manifest); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
-	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 9 {
+	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 10 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	if len(manifest.Files) == 0 {
@@ -562,7 +562,7 @@ func TestFaultReportContentsAndRedaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("fault-report.json missing; entries: %v", keysOf(files))
 	}
-	for _, want := range []string{`"schemaVersion": 9`, `"appVersion"`, `"instances"`, `"total": 1`} {
+	for _, want := range []string{`"schemaVersion": 10`, `"appVersion"`, `"instances"`, `"total": 1`} {
 		if !strings.Contains(report, want) {
 			t.Errorf("fault report missing %q:\n%s", want, report)
 		}

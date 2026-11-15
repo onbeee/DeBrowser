@@ -77,9 +77,13 @@ Indexes: `proxy_id`, `status`.
 
 `instance_id` FK → `browser_instances(id)`, `ON DELETE CASCADE`: deleting an instance deletes its bookmarks. A NULL `instance_id` means a **global** bookmark that applies to every instance. Uniqueness is one URL per scope, enforced by a unique index on `(IFNULL(instance_id, ''), url)` — a plain `UNIQUE(instance_id, url)` would not work because SQLite treats NULLs as distinct. Index on `(instance_id, sort_order)` for ordered listing.
 
+### `kernels` (Stage 9A, migration 0010)
+
+DeBrowser-managed standalone Chromium builds only: `id`, `version`, `channel` (default `stable`), `platform` (default `win64`), `install_path` and `executable_path` (both stored **relative to the portable application root**, e.g. `kernels/142.0.7444.162`, and resolved + re-validated on every use), `status` (`ready` / `verification_failed` / `missing`, CHECK-enforced), timestamps. A unique index on `(version, platform)` prevents duplicate registration. System browsers (an installed Chrome or Brave) are **never** written to this table: they are detected live at runtime, are not DeBrowser's to persist, and their records would go stale outside DeBrowser's control. The store exposes kernel CRUD (`CreateKernel`/`GetKernel`/`GetKernelByVersion`/`ListKernels`/`UpdateKernelStatus`/`DeleteKernel`) used by `BrowserService`.
+
 ### `app_settings`
 
-Application-level key/value settings (Stage 1, migration 0001), accessed through the repository's `GetSetting`/`SetSetting`/`DeleteSetting`. One historical key: `proxy.port_range` (for example `19000-19499`) — the instance listener range the cancelled Stage 7 would have consumed. No current code reads or writes it; the key is mentioned only so existing databases' stored values are understood as historical data. The user-facing `config/settings.json` file (language/theme) is separate and unrelated.
+Application-level key/value settings (Stage 1, migration 0001). One historical key: `proxy.port_range` (for example `19000-19499`) — the instance listener range the cancelled Stage 7 would have consumed. No current code reads or writes this table (its store accessors were removed in the PR #9 cleanup); the key is mentioned only so existing databases' stored values are understood as historical data. The user-facing `config/settings.json` file (language/theme) is separate and unrelated.
 
 ## Rules (AGENTS.md section 5)
 
@@ -107,6 +111,7 @@ Application-level key/value settings (Stage 1, migration 0001), accessed through
 | 7 | `0007_proxy_source_vocabulary.sql` | Stage 6C: rebuilds `proxies` with the unified source vocabulary `custom` / `file` / `subscription` (values mapped `manual` → `custom`, `file_import` → `file`); link rescue preserves instance bindings and group members (see below) |
 | 8 | `0008_proxy_group_custom_members.sql` | Stage 6C review fix: user custom-member overlay for native proxy-groups (superseded the same day — see 0009) |
 | 9 | `0009_drop_custom_members_overlay.sql` | Stage 6C redo: drops the 0008 overlay table; the custom-member feature was withdrawn before release (see below) |
+| 10 | `0010_kernels.sql` | Stage 9A: `kernels` — DeBrowser-managed Chromium builds only (relative portable paths, status CHECK, unique `(version, platform)`); system browsers are never persisted |
 
 ### Migration 0005: removing groups and tags (Stage 4A correction)
 

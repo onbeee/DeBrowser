@@ -1,0 +1,35 @@
+//go:build !windows
+
+package browserprobe
+
+import (
+	"fmt"
+	"os"
+)
+
+// System browsing is a Windows feature (DeBrowser's only target
+// platform). On other platforms — used only for development and
+// unit tests — there are no candidate sources, and the inspector
+// can still stat files and report signatures as unavailable so the
+// platform-neutral pipeline behaves predictably.
+
+// Sources returns no candidate sources on non-Windows platforms.
+func Sources() []CandidateSource { return nil }
+
+// NewInspector returns the non-Windows inspector.
+func NewInspector() Inspector { return otherInspector{} }
+
+type otherInspector struct{}
+
+func (otherInspector) Exists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
+}
+
+func (otherInspector) VersionInfo(string) (VersionInfo, error) {
+	return VersionInfo{}, fmt.Errorf("version information is only available on Windows")
+}
+
+func (otherInspector) Signature(string) (Signature, error) {
+	return Signature{Status: "unavailable"}, nil
+}

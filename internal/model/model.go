@@ -126,6 +126,25 @@ type MihomoProxyGroupMember struct {
 	TargetGroupID *string `json:"targetGroupId,omitempty"`
 }
 
+// Kernel is one DeBrowser-managed standalone Chromium build
+// (Stage 9A): a Chrome for Testing download that DeBrowser fetched,
+// verified and installed under <root>/kernels/<version>. Only
+// managed kernels are persisted; system browsers are detected live
+// and never stored. InstallPath and ExecutablePath are relative to
+// the portable application root and are resolved and re-validated
+// on every use.
+type Kernel struct {
+	ID             string `json:"id"`
+	Version        string `json:"version"`
+	Channel        string `json:"channel"`
+	Platform       string `json:"platform"`
+	InstallPath    string `json:"installPath"`
+	ExecutablePath string `json:"executablePath"`
+	Status         string `json:"status"` // "ready" | "verification_failed" | "missing"
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
 // Bookmark is a single bookmark. A nil InstanceID means the bookmark
 // is global and applies to every instance.
 type Bookmark struct {

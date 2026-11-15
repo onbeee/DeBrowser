@@ -7,6 +7,7 @@ import TopBar from "./components/layout/TopBar";
 import StatusBar from "./components/layout/StatusBar";
 import DataManagementPage from "./pages/DataManagementPage";
 import InstancesPage from "./pages/InstancesPage";
+import KernelsPage from "./pages/KernelsPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
 import ProxyConfigPage from "./pages/ProxyConfigPage";
@@ -65,6 +66,8 @@ export default function App() {
             <SettingsPage />
           ) : page === "instances" ? (
             <InstancesPage />
+          ) : page === "kernels" ? (
+            <KernelsPage />
           ) : page === "proxyconfig" ? (
             <ProxyConfigPage />
           ) : page === "datamanagement" ? (

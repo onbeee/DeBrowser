@@ -17,7 +17,7 @@ DeBrowser is a modular monolith: one Go binary embedding a React frontend, shipp
 ├────────────────────────────────────────────────────────┤
 │ Services (internal/service)                            │
 │  AppService · InstanceService · DiagnosticsService     │
-│  (kernel / bookmark services arrive with Stage 9)      │
+│  BrowserService (Stage 9A; bookmark wiring in Stage 9C) │
 ├────────────────────────────────────────────────────────┤
 │ Foundation (internal/)                                 │
 │  paths · config · settings · logging                   │
@@ -61,6 +61,15 @@ Ownership rules from AGENTS.md: Go owns browser process management, instance lif
 - `src/pages/` — one page per navigation entry. Modules not yet delivered render an explicit "planned for Stage N" state instead of fake data.
 - `src/stores/` — Zustand store for UI state (current page, backend status, theme, session log lines).
 - Styling is Tailwind CSS v4 through the `@tailwindcss/vite` plugin (`src/index.css`).
+
+## Browser discovery and kernel management (Stage 9A)
+
+Stage 9A adds `BrowserService` (bindings: `DetectSystemBrowsers`, `RedetectBrowsers`, `ListBrowsers`, `GetBrowserDetails`, `AddBrowserManually`, `GetOfficialStableVersion`, `InstallManagedKernel`, `ListManagedKernels`, `VerifyManagedKernel`, `DeleteManagedKernel`) over two new packages:
+
+- `internal/browserprobe` detects browsers the user already has installed — Google Chrome Stable and Brave Stable on Windows 11 x64 — from regular system information only: registry App Paths, registry uninstall records and the well-known install directories, for both per-user and machine-wide installs, deduplicated by canonical path. The disk is never scanned and no detected executable is ever launched during detection. A candidate is only reported as a verified browser after its version resource identifies the product and its Authenticode signature verifies against the expected publisher (Google LLC / Brave Software, Inc.); a file merely named chrome.exe proves nothing, and signature absence, invalidity or publisher mismatch yields an explicit verification-failed record. Detection results are runtime data: they are never written to the database, and DeBrowser never copies, modifies, uninstalls or deletes a system browser or reads its everyday profile. Manual registration (native file picker) runs the identical verification and is held in memory for the session only.
+- `internal/kernels` manages DeBrowser's own optional Chromium builds from the official Chrome for Testing Stable metadata. The metadata endpoint is a fixed constant; downloads are accepted only over HTTPS from Google's official hosts with every redirect hop re-validated, and there is no user-supplied URL anywhere. The official metadata publishes no SHA-256 for these builds, so integrity rests on HTTPS + host whitelist + bounded, path-safe ZIP extraction (file-count/size caps, no absolute or `..` entries, no symlinks) + extracted `chrome.exe` version match + Authenticode verification (Google LLC) — no hash check is claimed that does not exist. Installation is atomic (temp directory on the same volume, renamed into `kernels/<version>` only after every check passes; failures clean up). Only managed kernels are persisted (migration 0010, relative portable paths, unique per version+platform); deletion resolves and re-validates the real directory strictly inside the kernels root before removing files and then the row, marking the row `missing` if the row delete fails after the files are gone. Install progress is reported to the frontend on the typed `kernel:install-progress` event.
+
+Stage 9A launches no browser process; real start/stop, profile creation and CDP arrive in Stage 9B.
 
 ## Browser isolation (foundations in Stage 3, runtime in Stage 9)
 

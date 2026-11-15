@@ -43,6 +43,7 @@ var assets embed.FS
 
 func init() {
 	application.RegisterEvent[service.Status](service.StatusEvent)
+	application.RegisterEvent[service.InstallProgress](service.InstallProgressEvent)
 }
 
 func main() {
@@ -133,6 +134,7 @@ func run() error {
 		logger.Error("instance service failed", "error", err)
 		return err
 	}
+	browserService := service.NewBrowserService(db, cfg.Layout, logger)
 
 	// The credential vault opens after the database: existing
 	// rows reference vault entries, and opening it at startup
@@ -159,10 +161,11 @@ func run() error {
 	// services record whitelist entries in the operation log.
 	appService.Auditor = logSystem
 	instanceService.Auditor = logSystem
+	browserService.Auditor = logSystem
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
 
-	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, logger, assets)
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, logger, assets)
 	runErr := wailsApp.Run()
 
 	// The app has fully stopped and its background loops are drained:

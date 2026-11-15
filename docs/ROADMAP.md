@@ -104,6 +104,12 @@ Cancelled in the PR #9 scope cleanup, together with the proxy scope it depended 
 - Bookmark management delivered with this stage
 - No proxy wiring: instances no longer expose any proxy binding in the UI or service API (a historical `proxy_id` value stored on old rows is preserved as data only)
 
+Stage 9 is delivered in parts:
+
+- **Stage 9A — browser discovery and kernel management** (delivered in this stage's first PR): the app first detects and uses the user's already-installed Google Chrome and Brave (registry App Paths and uninstall records plus well-known install directories; version-resource identity plus Authenticode publisher verification; results are live-only and never persisted, and system browsers are never copied, modified or deleted). Downloading a DeBrowser-managed Chromium is optional, never a first-run prerequisite: managed builds come only from the official Chrome for Testing Stable metadata (HTTPS + host whitelist, per-hop redirect validation), are verified (ZIP structure, version match, Authenticode/Google LLC) and installed atomically under `kernels/<version>` (migration 0010 `kernels` table, managed kernels only), with guarded deletion. No browser is launched in 9A.
+- **Stage 9B — real instance launch** (next): real browser start/stop and process lifecycle, per-instance profile creation and isolation, per-instance CDP ports.
+- **Stage 9C — bookmarks** (after 9B): bookmark frontend wiring on the existing store CRUD.
+
 ## Stage 10 — Multi-window synchronization
 
 - Synchronized actions across multiple running instances, with an explicit synchronization scope, failure handling and instance-isolation boundaries
