@@ -128,12 +128,16 @@ func (s *InstanceService) GetInstance(id string) (model.Instance, error) {
 // CreateInstance validates and creates an instance. The default
 // profile directory is profiles/<id>; an explicit directory must be
 // a relative path inside profiles/.
-// CreateInstance creates an instance (audited, Stage 5B).
-func (s *InstanceService) CreateInstance(input CreateInstanceInput) (model.Instance, error) {
-	start := time.Now()
+// CreateInstance creates an instance (recorded, unified recording).
+func (s *InstanceService) CreateInstance(operationID string, input CreateInstanceInput) (model.Instance, error) {
+	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.create", "instance", "")
 	inst, err := s.createInstance(input)
-	auditOp(s.Auditor, "instance.create", "instance", inst.ID, start, err)
-	return inst, err
+	if err != nil {
+		finishOp(op, err)
+		return inst, err
+	}
+	op.Succeed(map[string]string{"created_id": inst.ID})
+	return inst, nil
 }
 
 func (s *InstanceService) createInstance(input CreateInstanceInput) (model.Instance, error) {
@@ -175,11 +179,11 @@ func (s *InstanceService) createInstance(input CreateInstanceInput) (model.Insta
 }
 
 // UpdateInstance validates and updates an instance's editable fields.
-// UpdateInstance updates an instance (audited, Stage 5B).
-func (s *InstanceService) UpdateInstance(input UpdateInstanceInput) (model.Instance, error) {
-	start := time.Now()
+// UpdateInstance updates an instance (recorded, unified recording).
+func (s *InstanceService) UpdateInstance(operationID string, input UpdateInstanceInput) (model.Instance, error) {
+	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.update", "instance", input.ID)
 	inst, err := s.updateInstance(input)
-	auditOp(s.Auditor, "instance.update", "instance", input.ID, start, err)
+	finishOp(op, err)
 	return inst, err
 }
 
@@ -215,11 +219,12 @@ func (s *InstanceService) updateInstance(input UpdateInstanceInput) (model.Insta
 // schema cascade, its bookmarks). The profile directory on disk is
 // deliberately left untouched: browser data is never deleted as a
 // side effect of removing a record.
-// DeleteInstance deletes instance metadata only (audited, Stage 5B).
-func (s *InstanceService) DeleteInstance(id string) error {
-	start := time.Now()
+// DeleteInstance deletes instance metadata only (recorded,
+// unified recording).
+func (s *InstanceService) DeleteInstance(operationID string, id string) error {
+	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.delete", "instance", id)
 	err := s.deleteInstance(id)
-	auditOp(s.Auditor, "instance.delete", "instance", id, start, err)
+	finishOp(op, err)
 	return err
 }
 
@@ -262,15 +267,15 @@ func (s *InstanceService) deleteInstance(id string) error {
 //
 // A persisted "running" instance is refused before any of this.
 // DeleteInstanceAndProfile deletes an instance and its profile
-// directory (audited, Stage 5B).
-func (s *InstanceService) DeleteInstanceAndProfile(id string) error {
-	start := time.Now()
-	err := s.deleteInstanceAndProfile(id)
-	auditOp(s.Auditor, "instance.delete_with_profile", "instance", id, start, err)
+// directory (recorded with per-phase steps, unified recording).
+func (s *InstanceService) DeleteInstanceAndProfile(operationID string, id string) error {
+	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.delete_with_profile", "instance", id)
+	err := s.deleteInstanceAndProfile(id, op)
+	finishOp(op, err)
 	return err
 }
 
-func (s *InstanceService) deleteInstanceAndProfile(id string) error {
+func (s *InstanceService) deleteInstanceAndProfile(id string, op *logging.Operation) error {
 	c, cancel := ctx()
 	defer cancel()
 	in, err := s.store.GetInstance(c, id)
@@ -285,8 +290,10 @@ func (s *InstanceService) deleteInstanceAndProfile(id string) error {
 	}
 	target, err := s.verifiedProfileTarget(in.UserDataDir)
 	if err != nil {
+		op.Step("校验 Profile 路径", logging.StatusFailed, nil)
 		return err
 	}
+	op.Step("校验 Profile 路径", logging.StatusSuccess, nil)
 	if target == "" {
 		// Nothing on disk: only the record needs to go.
 		if err := s.store.DeleteInstance(c, id); err != nil {
@@ -295,6 +302,7 @@ func (s *InstanceService) deleteInstanceAndProfile(id string) error {
 			}
 			return err
 		}
+		op.Step("删除数据库记录", logging.StatusSuccess, nil)
 		s.log.Info("instance deleted (no profile directory on disk)", "id", id)
 		return nil
 	}
@@ -304,11 +312,14 @@ func (s *InstanceService) deleteInstanceAndProfile(id string) error {
 
 	q, err := s.moveToQuarantine(target)
 	if err != nil {
+		op.Step("移动 Profile 到隔离区", logging.StatusFailed, nil)
 		return err
 	}
+	op.Step("移动 Profile 到隔离区", logging.StatusSuccess, nil)
 	defer func() { _ = q.Close() }()
 
 	if err := s.deleteRecord(c, id); err != nil {
+		op.Step("删除数据库记录", logging.StatusFailed, nil)
 		// Restore the object to its original location through the
 		// same anchor; the operation must leave the world exactly
 		// as it found it.
@@ -323,13 +334,16 @@ func (s *InstanceService) deleteInstanceAndProfile(id string) error {
 		}
 		return err
 	}
+	op.Step("删除数据库记录", logging.StatusSuccess, nil)
 	wipe := s.wipeQuarantine
 	if wipe == nil {
 		wipe = func(q *pfiles.Quarantine) error { return q.Wipe() }
 	}
 	if err := wipe(q); err != nil {
+		op.Step("安全擦除 Profile 数据", logging.StatusFailed, nil)
 		return fmt.Errorf("实例记录已删除，但 Profile 数据清理不完全（残留在隔离目录 %s）：%w", q.Path(), err)
 	}
+	op.Step("安全擦除 Profile 数据", logging.StatusSuccess, nil)
 	s.log.Info("instance and profile deleted", "id", id, "dir", in.UserDataDir)
 	return nil
 }

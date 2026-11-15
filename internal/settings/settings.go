@@ -30,12 +30,26 @@ const (
 type Settings struct {
 	Language string `json:"language"`
 	Theme    string `json:"theme"`
+	// LogCapacityBytes is the user's total log capacity limit
+	// (unified recording system). Zero means "not configured":
+	// the logging default (100 MB) applies. The field is absent
+	// from settings files written before it existed, which decode
+	// as zero — fully backward compatible.
+	LogCapacityBytes int64 `json:"logCapacityBytes,omitempty"`
 }
 
 // Default returns the first-run settings: Simplified Chinese, dark.
 func Default() Settings {
 	return Settings{Language: LanguageZhCN, Theme: ThemeDark}
 }
+
+// Log capacity bounds mirrored from internal/logging (kept as
+// literals here so the settings package stays dependency-free;
+// internal/logging enforces the same bounds again).
+const (
+	minLogCapacityBytes = 1 << 20
+	maxLogCapacityBytes = 1024 << 30
+)
 
 // Validate reports whether the settings hold supported values.
 func (s Settings) Validate() error {
@@ -44,10 +58,14 @@ func (s Settings) Validate() error {
 	}
 	switch s.Theme {
 	case ThemeDark, ThemeLight, ThemeWarm:
-		return nil
 	default:
 		return fmt.Errorf("unsupported theme %q", s.Theme)
 	}
+	if s.LogCapacityBytes != 0 &&
+		(s.LogCapacityBytes < minLogCapacityBytes || s.LogCapacityBytes > maxLogCapacityBytes) {
+		return fmt.Errorf("unsupported log capacity %d", s.LogCapacityBytes)
+	}
+	return nil
 }
 
 // Load reads settings from file. A missing file yields the defaults

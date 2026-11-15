@@ -19,6 +19,15 @@ import * as settings$0 from "../settings/models.js";
 import * as $models from "./models.js";
 
 /**
+ * EffectiveLogCapacityBytes returns the total log capacity to
+ * enforce: the user's persisted setting, or the logging default
+ * when none was configured.
+ */
+export function EffectiveLogCapacityBytes(): $CancellablePromise<number> {
+    return $Call.ByID(622933680);
+}
+
+/**
  * GetSettings returns the current user settings. The language is
  * always Simplified Chinese (zh-CN); the theme is user-selectable.
  */
@@ -36,12 +45,20 @@ export function GetStatus(): $CancellablePromise<$models.Status> {
 }
 
 /**
+ * SaveLogCapacity persists a new total log capacity in the user
+ * settings (config/settings.json), so it survives restarts.
+ */
+export function SaveLogCapacity(bytes: number): $CancellablePromise<void> {
+    return $Call.ByID(1434213961, bytes);
+}
+
+/**
  * SaveTheme persists a new appearance theme ("dark" | "light" |
  * "warm") and returns the full settings. The change is stored in
  * <root>/config/settings.json so it survives restarts and travels
- * with the portable folder.
- * SaveTheme persists a new appearance theme (audited, Stage 5B).
+ * with the portable folder. The operation is recorded in the
+ * unified recording system under the caller-provided operation ID.
  */
-export function SaveTheme(theme: string): $CancellablePromise<settings$0.Settings> {
-    return $Call.ByID(577347262, theme);
+export function SaveTheme(operationID: string, theme: string): $CancellablePromise<settings$0.Settings> {
+    return $Call.ByID(577347262, operationID, theme);
 }

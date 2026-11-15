@@ -122,6 +122,7 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 		}
 	}))
 
+	log.Info("background loops started", "loops", len(a.loops))
 	log.Info("application assembled", "name", version.Name, "version", version.Version)
 	return a
 }
@@ -155,5 +156,6 @@ func (a *App) Run() error {
 	lifecycle.WaitForever(5*time.Second, func() {
 		a.log.Warn("background loops still draining after 5s; waiting for them to finish before shutdown continues")
 	}, a.loops...)
+	a.log.Info("background loops stopped")
 	return err
 }

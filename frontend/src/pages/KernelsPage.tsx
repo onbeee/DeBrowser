@@ -18,6 +18,7 @@ import {
   type StableVersionView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { KernelInstallProgress } from "../../bindings/events";
+import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -89,67 +90,96 @@ export default function KernelsPage() {
     };
   }, []);
 
-  const run = async (key: string, fn: () => Promise<void>) => {
+  // run executes one user operation: it generates the operation
+  // ID the backend records under, passes it to the operation, and
+  // afterwards records the exact feedback shown to the user under
+  // the same ID. action identifies the operation in the records;
+  // read-only queries (action "") are not recorded as operations.
+  const run = async (
+    key: string,
+    action: string,
+    fn: (opId: string) => Promise<string | void>,
+  ) => {
     setBusy(key);
     setError(null);
     setNotice(null);
+    const opId = newOperationId();
     try {
-      await fn();
+      const feedback = await fn(opId);
+      if (action && feedback) {
+        recordOperationFeedback(opId, true, feedback, "浏览器内核", action);
+      }
     } catch (e) {
-      setError(errText(e));
+      const message = errText(e);
+      setError(message);
+      if (action) {
+        recordOperationFeedback(opId, false, message, "浏览器内核", action);
+      }
     } finally {
       setBusy(null);
     }
   };
 
   const addManual = () =>
-    run("add-manual", async () => {
-      const added = await BrowserService.AddBrowserManually();
-      setNotice(`已添加浏览器：${added.name}`);
+    run("add-manual", "browser.add_manual", async (opId) => {
+      const added = await BrowserService.AddBrowserManually(opId);
+      const msg = `已添加浏览器：${added.name}`;
+      setNotice(msg);
       await reload();
+      return msg;
     });
 
   const reselectPath = (b: BrowserView) =>
-    run(`reselect-${b.id}`, async () => {
-      const v = await BrowserService.UpdateBrowserPath(b.id);
-      setNotice(`已更新路径：${v.name}`);
+    run(`reselect-${b.id}`, "browser.update_path", async (opId) => {
+      const v = await BrowserService.UpdateBrowserPath(opId, b.id);
+      const msg = `已更新路径：${v.name}`;
+      setNotice(msg);
       await reload();
+      return msg;
     });
 
   const removeRegistration = (b: BrowserView) =>
-    run(`remove-${b.id}`, async () => {
-      await BrowserService.RemoveBrowserRegistration(b.id);
+    run(`remove-${b.id}`, "browser.remove_registration", async (opId) => {
+      await BrowserService.RemoveBrowserRegistration(opId, b.id);
       setConfirmRemove(null);
-      setNotice(`已移除登记：${b.name}（浏览器本身未被删除或修改）`);
+      const msg = `已移除登记：${b.name}（浏览器本身未被删除或修改）`;
+      setNotice(msg);
       await reload();
+      return msg;
     });
 
   const fetchStable = () =>
-    run("stable", async () => {
+    run("stable", "", async () => {
       setStable(await BrowserService.GetOfficialStableVersion());
     });
 
   const install = () =>
-    run("install", async () => {
+    run("install", "kernel.install", async (opId) => {
       setProgress(null);
-      const k = await BrowserService.InstallManagedKernel();
-      setNotice(`已安装独立内核：${k.version}`);
+      const k = await BrowserService.InstallManagedKernel(opId);
+      const msg = `已安装独立内核：${k.version}`;
+      setNotice(msg);
       await reload();
+      return msg;
     });
 
   const verifyKernel = (k: KernelView) =>
-    run(`verify-k-${k.id}`, async () => {
-      const v = await BrowserService.VerifyManagedKernel(k.id);
-      setNotice(`内核 ${v.version} 状态：${kernelStatusLabels[v.status] ?? v.status}`);
+    run(`verify-k-${k.id}`, "kernel.verify", async (opId) => {
+      const v = await BrowserService.VerifyManagedKernel(opId, k.id);
+      const msg = `内核 ${v.version} 状态：${kernelStatusLabels[v.status] ?? v.status}`;
+      setNotice(msg);
       await reload();
+      return msg;
     });
 
   const deleteKernel = (k: KernelView) =>
-    run(`delete-k-${k.id}`, async () => {
-      await BrowserService.DeleteManagedKernel(k.id);
+    run(`delete-k-${k.id}`, "kernel.delete", async (opId) => {
+      await BrowserService.DeleteManagedKernel(opId, k.id);
       setConfirmDelete(null);
-      setNotice(`已删除独立内核：${k.version}`);
+      const msg = `已删除独立内核：${k.version}`;
+      setNotice(msg);
       await reload();
+      return msg;
     });
 
   const stableInstalled = stable != null && kernels.some((k) => k.version === stable.version);

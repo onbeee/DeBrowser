@@ -153,16 +153,21 @@ func TestSystemStatsAndPolicies(t *testing.T) {
 	for _, st := range stats {
 		switch st.Category {
 		case CategoryRun:
-			if st.Policy.RetentionDays != 30 || st.Policy.CapBytes != 20<<20 {
+			if st.Policy.RetentionDays != 30 || st.Policy.CapBytes != 0 {
 				t.Fatalf("run policy = %+v", st.Policy)
 			}
 			if st.Files < 1 {
 				t.Fatalf("run stats files = %d", st.Files)
 			}
 		case CategoryOperation, CategoryError:
-			if st.Policy.RetentionDays != 90 || st.Policy.CapBytes != 50<<20 {
+			if st.Policy.RetentionDays != 90 || st.Policy.CapBytes != 0 {
 				t.Fatalf("%s policy = %+v", st.Category, st.Policy)
 			}
 		}
+	}
+	// Byte capacity is a single global limit now (default 100 MB),
+	// not per-category caps.
+	if got := sys.CapacityLimit(); got != DefaultCapacityBytes {
+		t.Fatalf("default capacity limit = %d, want %d", got, DefaultCapacityBytes)
 	}
 }

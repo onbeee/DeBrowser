@@ -84,7 +84,7 @@ GitHub Actions（`.github/workflows/ci.yml`）在 Windows x64 runner（`windows-
 
 - **应用图标**：`build/appicon.png` 与 `build/windows/icon.ico` 是二进制资源，尚未提交（两者都作为生成文件被 git 忽略）。CI 与本地构建生成 Wails 的示例图标作为占位，使完整构建（包括 `.syso` 版本资源）能端到端跑通；占位图标不是 DeBrowser 的正式品牌图标。正式图标就绪后，用 `git add -f build/appicon.png` 添加，并从 `.gitignore` 中移除两行图标规则。
 - NSIS 安装包任务（`task package`）已定义，但尚未在 CI 中实际运行。
-- 业务模块现状：实例元数据管理与浏览器内核管理已交付（Stage 3、Stage 9A）；书签前端、多开同步、备份界面属于后续阶段——见 `docs/ROADMAP.md`。代理相关功能已在 PR #9 范围清理中移除，不再是后续阶段内容。
+- 业务模块现状：实例元数据管理与浏览器内核管理已交付（Stage 3、Stage 9A）；统一自动记录系统已交付（随 PR #10：统一事件模型与 operation_id 关联、用户可配置的日志总容量与最旧优先自动清理、数据管理页四类记录导出，见 `docs/ARCHITECTURE.md` 的日志与诊断一节）；书签前端、多开同步、备份界面属于后续阶段——见 `docs/ROADMAP.md`。代理相关功能已在 PR #9 范围清理中移除，不再是后续阶段内容。
 
 ## 构建产物内容
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Events } from "@wailsio/runtime";
 import { AppService } from "../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { AppStatus } from "../bindings/events";
@@ -13,6 +13,7 @@ import PlannedPage from "./pages/PlannedPage";
 import ProxyConfigPage from "./pages/ProxyConfigPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
+import { recordPageNavigation } from "./lib/operations";
 
 export default function App() {
   const page = useAppStore((state) => state.page);
@@ -53,6 +54,16 @@ export default function App() {
       if (typeof cancel === "function") cancel();
     };
   }, [refreshStatus, setStatus, setTheme, log]);
+
+  // 页面访问记录（统一记录系统）：打开/离开页面写入运行记录。
+  const prevPage = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevPage.current && prevPage.current !== page) {
+      recordPageNavigation("离开页面", prevPage.current);
+    }
+    recordPageNavigation("打开页面", page);
+    prevPage.current = page;
+  }, [page]);
 
   return (
     <div className="flex h-full">

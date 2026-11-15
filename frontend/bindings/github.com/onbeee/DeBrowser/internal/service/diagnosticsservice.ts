@@ -28,8 +28,8 @@ import * as $models from "./models.js";
  * dialog) and writes the diagnostic ZIP there. Cancelling the
  * dialog is a normal outcome, not an error.
  */
-export function ExportDiagnostics(): $CancellablePromise<$models.ExportResult> {
-    return $Call.ByID(1929809407);
+export function ExportDiagnostics(operationID: string): $CancellablePromise<$models.ExportResult> {
+    return $Call.ByID(1929809407, operationID);
 }
 
 /**
@@ -41,8 +41,22 @@ export function ExportDiagnostics(): $CancellablePromise<$models.ExportResult> {
  * sensitivity scan as the log streams; the database, the
  * vault, browser data and raw user configs are never included.
  */
-export function ExportFaultReport(): $CancellablePromise<$models.ExportResult> {
-    return $Call.ByID(1661260969);
+export function ExportFaultReport(operationID: string): $CancellablePromise<$models.ExportResult> {
+    return $Call.ByID(1661260969, operationID);
+}
+
+/**
+ * ExportRecords exports one record category (or all) as a ZIP:
+ * the selected records inside the chosen date range, a manifest
+ * with counts, the actual earliest/latest event times and SHA-256
+ * of every file, and a README. When the primary selection is
+ * errors (or operations), the linked records of the counterpart
+ * stream for the same operation IDs are attached as clearly
+ * separated context files — they are never counted or presented
+ * as primary records of the chosen category.
+ */
+export function ExportRecords(operationID: string, category: string, startDate: string, endDate: string): $CancellablePromise<$models.ExportResult> {
+    return $Call.ByID(1127778917, operationID, category, startDate, endDate);
 }
 
 /**
@@ -50,4 +64,35 @@ export function ExportFaultReport(): $CancellablePromise<$models.ExportResult> {
  */
 export function GetDiagnostics(): $CancellablePromise<$models.DiagnosticsView> {
     return $Call.ByID(3751611563);
+}
+
+/**
+ * GetLogExportInfo returns the live date range for one export
+ * category ("all" | "operation" | "error" | "runtime"). Because
+ * old records are cleaned up automatically, the range is read
+ * from the retained records on every call — never fixed.
+ */
+export function GetLogExportInfo(category: string): $CancellablePromise<$models.LogExportInfo> {
+    return $Call.ByID(3255741495, category);
+}
+
+/**
+ * RecordClientEvent records one frontend-originated event. It is
+ * fire-and-forget for the UI: recording problems never surface as
+ * business failures (an invalid category is the only error).
+ */
+export function RecordClientEvent(input: $models.ClientEventInput): $CancellablePromise<void> {
+    return $Call.ByID(3499212527, input);
+}
+
+/**
+ * SetLogCapacity persists a new total log capacity and applies it
+ * immediately: the setting is saved first (so it survives
+ * restarts), then the logging system enforces the new limit right
+ * away, cleaning up the oldest records when current usage exceeds
+ * it. A cleanup failure is returned as an explicit error — the
+ * operation never pretends to have succeeded.
+ */
+export function SetLogCapacity(operationID: string, bytes: number): $CancellablePromise<$models.LogCapacityView> {
+    return $Call.ByID(2942773117, operationID, bytes);
 }

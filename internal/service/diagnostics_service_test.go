@@ -201,7 +201,7 @@ func TestExportUnwritableDestination(t *testing.T) {
 func TestExportCancelledDialog(t *testing.T) {
 	f := newDiagFixture(t)
 	f.svc.SavePathPicker = func(string) (string, error) { return "", nil }
-	res, err := f.svc.ExportDiagnostics()
+	res, err := f.svc.ExportDiagnostics("")
 	if err != nil {
 		t.Fatalf("ExportDiagnostics: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestFaultReportContentsAndRedaction(t *testing.T) {
 	}
 	dest := filepath.Join(t.TempDir(), "fault.zip")
 	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
-	res, err := f.svc.ExportFaultReport()
+	res, err := f.svc.ExportFaultReport("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +599,7 @@ func TestFaultReportFailsClosedOnSecretInLog(t *testing.T) {
 	appendToCategoryFile(t, f.layout.Logs, "run", `{"leak":"secret_ref = abc"}`)
 	dest := filepath.Join(t.TempDir(), "fault.zip")
 	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
-	if _, err := f.svc.ExportFaultReport(); err == nil {
+	if _, err := f.svc.ExportFaultReport(""); err == nil {
 		t.Fatal("fault report exported despite a secret in a log file")
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {

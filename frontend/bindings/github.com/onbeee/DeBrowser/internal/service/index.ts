@@ -15,12 +15,15 @@ export {
 export type {
     BrowserView,
     CategoryView,
+    ClientEventInput,
     CreateInstanceInput,
     DiagnosticsView,
     ExportResult,
     ExportSummary,
     InstallProgress,
     KernelView,
+    LogCapacityView,
+    LogExportInfo,
     StableVersionView,
     Status,
     UpdateInstanceInput

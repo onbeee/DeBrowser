@@ -194,11 +194,11 @@ func displayNameForPath(path string) string {
 // the picker already guarantees the user picked it deliberately.
 // Registering the same path twice returns the existing
 // registration instead of duplicating it.
-func (s *BrowserService) AddBrowserManually() (BrowserView, error) {
-	start := time.Now()
+func (s *BrowserService) AddBrowserManually(operationID string) (BrowserView, error) {
 	var out BrowserView
 	var err error
-	defer func() { auditOp(s.Auditor, "browser.add_manual", "browser", out.ID, start, err) }()
+	op := beginOp(s.Auditor, operationID, "浏览器内核", "browser.add_manual", "browser", "")
+	defer func() { finishOp(op, err) }()
 	if s.ExecutablePicker == nil {
 		err = fmt.Errorf("文件选择器不可用")
 		return BrowserView{}, err
@@ -214,13 +214,16 @@ func (s *BrowserService) AddBrowserManually() (BrowserView, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	op.Step("用户选择文件", logging.StatusSuccess, nil)
 	if existing, gerr := s.store.GetExternalBrowserByPath(ctx, path); gerr == nil {
+		op.Step("路径已登记，返回现有记录", logging.StatusSuccess, nil)
 		out = s.manualView(existing)
 		return out, nil
 	} else if !errors.Is(gerr, store.ErrNotFound) {
 		err = gerr
 		return BrowserView{}, err
 	}
+	op.Step("保存路径登记", logging.StatusInfo, nil)
 	created, cerr := s.store.CreateExternalBrowser(ctx, model.ExternalBrowser{
 		Name:           displayNameForPath(path),
 		ExecutablePath: path,
@@ -238,11 +241,11 @@ func (s *BrowserService) AddBrowserManually() (BrowserView, error) {
 // AddBrowserManually it performs no check on the chosen file; it
 // only refuses to steal a path another registration already
 // holds.
-func (s *BrowserService) UpdateBrowserPath(id string) (BrowserView, error) {
-	start := time.Now()
+func (s *BrowserService) UpdateBrowserPath(operationID string, id string) (BrowserView, error) {
 	var out BrowserView
 	var err error
-	defer func() { auditOp(s.Auditor, "browser.update_path", "browser", id, start, err) }()
+	op := beginOp(s.Auditor, operationID, "浏览器内核", "browser.update_path", "browser", id)
+	defer func() { finishOp(op, err) }()
 	if s.ExecutablePicker == nil {
 		err = fmt.Errorf("文件选择器不可用")
 		return BrowserView{}, err
@@ -274,6 +277,7 @@ func (s *BrowserService) UpdateBrowserPath(id string) (BrowserView, error) {
 		err = oerr
 		return BrowserView{}, err
 	}
+	op.Step("用户重新选择文件", logging.StatusSuccess, nil)
 	name := displayNameForPath(path)
 	if uerr := s.store.UpdateExternalBrowserPath(ctx, id, name, path); uerr != nil {
 		err = uerr
@@ -288,10 +292,10 @@ func (s *BrowserService) UpdateBrowserPath(id string) (BrowserView, error) {
 // RemoveBrowserRegistration removes one manual browser
 // registration. It deletes only the database record — the browser
 // file itself is never deleted, moved or modified.
-func (s *BrowserService) RemoveBrowserRegistration(id string) error {
-	start := time.Now()
+func (s *BrowserService) RemoveBrowserRegistration(operationID string, id string) error {
 	var err error
-	defer func() { auditOp(s.Auditor, "browser.remove_registration", "browser", id, start, err) }()
+	op := beginOp(s.Auditor, operationID, "浏览器内核", "browser.remove_registration", "browser", id)
+	defer func() { finishOp(op, err) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if derr := s.store.DeleteExternalBrowser(ctx, id); derr != nil {
@@ -372,11 +376,11 @@ func (s *BrowserService) GetOfficialStableVersion() (StableVersionView, error) {
 // then registers it. If registration fails after installation, the
 // installed directory is removed again so disk and database never
 // disagree.
-func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
-	start := time.Now()
+func (s *BrowserService) InstallManagedKernel(operationID string) (KernelView, error) {
 	var out KernelView
 	var err error
-	defer func() { auditOp(s.Auditor, "kernel.install", "kernel", out.ID, start, err) }()
+	op := beginOp(s.Auditor, operationID, "浏览器内核", "kernel.install", "kernel", "")
+	defer func() { finishOp(op, err) }()
 
 	// ONE controlled context governs the entire installation —
 	// metadata fetch, ZIP download, extraction, verification and
@@ -400,6 +404,7 @@ func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
 		err = fmt.Errorf("解析官方版本信息失败：%w", perr)
 		return KernelView{}, err
 	}
+	op.Step("获取官方版本信息", logging.StatusSuccess, map[string]string{"version": rel.Version})
 
 	emit := func(phase string, percent int) {
 		if s.OnProgress != nil {
@@ -418,6 +423,7 @@ func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
 		}
 		return KernelView{}, err
 	}
+	op.Step("下载、解压与安装验证", logging.StatusSuccess, nil)
 	relInstall, rerr := filepath.Rel(s.layout.Root, dir)
 	if rerr != nil {
 		_ = kernels.RemoveManaged(s.layout.Kernels, rel.Version)
@@ -437,6 +443,7 @@ func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
 		err = fmt.Errorf("登记内核失败：%w", cerr)
 		return KernelView{}, err
 	}
+	op.Step("登记内核", logging.StatusSuccess, nil)
 	if s.OnProgress != nil {
 		s.OnProgress(InstallProgress{Version: rel.Version, Phase: "done", Percent: 100})
 	}
@@ -462,11 +469,11 @@ func (s *BrowserService) ListManagedKernels() ([]KernelView, error) {
 // VerifyManagedKernel re-validates one managed kernel in place
 // (files present, version match, signature) and records the
 // outcome as its status.
-func (s *BrowserService) VerifyManagedKernel(id string) (KernelView, error) {
-	start := time.Now()
+func (s *BrowserService) VerifyManagedKernel(operationID string, id string) (KernelView, error) {
 	var out KernelView
 	var err error
-	defer func() { auditOp(s.Auditor, "kernel.verify", "kernel", id, start, err) }()
+	op := beginOp(s.Auditor, operationID, "浏览器内核", "kernel.verify", "kernel", id)
+	defer func() { finishOp(op, err) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	k, gerr := s.store.GetKernel(ctx, id)
@@ -485,6 +492,7 @@ func (s *BrowserService) VerifyManagedKernel(id string) (KernelView, error) {
 	} else if verr := s.manager.VerifyInstalled(dir, k.Version); verr != nil {
 		status = "verification_failed"
 	}
+	op.Step("验证安装结果", logging.StatusSuccess, map[string]string{"status": status})
 	if uerr := s.store.UpdateKernelStatus(ctx, id, status); uerr != nil {
 		err = uerr
 		return KernelView{}, err
@@ -500,10 +508,10 @@ func (s *BrowserService) VerifyManagedKernel(id string) (KernelView, error) {
 // kernels and can never be deleted through this method. If the
 // registration delete fails after the files are gone, the row is
 // marked missing so the database and the disk stay consistent.
-func (s *BrowserService) DeleteManagedKernel(id string) error {
-	start := time.Now()
+func (s *BrowserService) DeleteManagedKernel(operationID string, id string) error {
 	var err error
-	defer func() { auditOp(s.Auditor, "kernel.delete", "kernel", id, start, err) }()
+	op := beginOp(s.Auditor, operationID, "浏览器内核", "kernel.delete", "kernel", id)
+	defer func() { finishOp(op, err) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	k, gerr := s.store.GetKernel(ctx, id)
@@ -519,6 +527,7 @@ func (s *BrowserService) DeleteManagedKernel(id string) error {
 		err = fmt.Errorf("删除内核文件失败：%w", rerr)
 		return err
 	}
+	op.Step("删除内核文件", logging.StatusSuccess, nil)
 	if derr := s.store.DeleteKernel(ctx, id); derr != nil {
 		_ = s.store.UpdateKernelStatus(ctx, id, "missing")
 		err = fmt.Errorf("删除内核登记失败：%w", derr)

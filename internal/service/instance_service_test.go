@@ -45,10 +45,10 @@ func testInstanceService(t *testing.T) (*InstanceService, config.Config) {
 func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
 	svc, _ := testInstanceService(t)
 
-	if _, err := svc.CreateInstance(CreateInstanceInput{Name: "  "}); err == nil {
+	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "  "}); err == nil {
 		t.Error("empty name accepted, want error")
 	}
-	created, err := svc.CreateInstance(CreateInstanceInput{Name: "工作号"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "工作号"})
 	if err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
@@ -59,18 +59,18 @@ func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
 		t.Errorf("status = %q, want stopped", created.Status)
 	}
 	// Duplicate name -> friendly Chinese error.
-	if _, err := svc.CreateInstance(CreateInstanceInput{Name: "工作号"}); err == nil ||
+	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "工作号"}); err == nil ||
 		!strings.Contains(err.Error(), "实例名称已存在") {
 		t.Errorf("duplicate name error = %v, want 实例名称已存在", err)
 	}
 	// Duplicate explicit dir -> friendly error.
-	if _, err := svc.CreateInstance(CreateInstanceInput{Name: "x", UserDataDir: created.UserDataDir}); err == nil ||
+	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "x", UserDataDir: created.UserDataDir}); err == nil ||
 		!strings.Contains(err.Error(), "数据目录已被") {
 		t.Errorf("duplicate dir error = %v, want 数据目录已被占用", err)
 	}
 	// Unsafe explicit dirs are refused.
 	for _, bad := range []string{"/abs/path", "../escape", "profiles/../secret", "profiles", "elsewhere/x"} {
-		if _, err := svc.CreateInstance(CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
+		if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
 			t.Errorf("unsafe dir %q accepted, want error", bad)
 		}
 	}
@@ -90,7 +90,7 @@ func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
 		"profiles/conin$", "profiles/CONOUT$", "profiles/conout$.txt",
 		"profiles/nul.tar.gz",
 	} {
-		if _, err := svc.CreateInstance(CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
+		if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
 			t.Errorf("windows-unsafe dir %q accepted, want error", bad)
 		}
 	}
@@ -139,14 +139,14 @@ func TestInstanceUpdatePreservesHistoricalProxyID(t *testing.T) {
 	}
 
 	// Edit the name, then the start URL: proxy_id must not move.
-	renamed, err := svc.UpdateInstance(UpdateInstanceInput{ID: historical.ID, Name: "改名后的历史实例"})
+	renamed, err := svc.UpdateInstance("", UpdateInstanceInput{ID: historical.ID, Name: "改名后的历史实例"})
 	if err != nil {
 		t.Fatalf("rename update: %v", err)
 	}
 	if renamed.ProxyID == nil || *renamed.ProxyID != proxyID {
 		t.Fatalf("proxy_id after rename = %v, want %q preserved", renamed.ProxyID, proxyID)
 	}
-	moved, err := svc.UpdateInstance(UpdateInstanceInput{
+	moved, err := svc.UpdateInstance("", UpdateInstanceInput{
 		ID: historical.ID, Name: "改名后的历史实例", StartURL: "https://example.org",
 	})
 	if err != nil {
@@ -174,7 +174,7 @@ func TestInstanceUpdatePreservesHistoricalProxyID(t *testing.T) {
 
 func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance(CreateInstanceInput{Name: "可删"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "可删"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := svc.UpdateInstance(UpdateInstanceInput{
+	updated, err := svc.UpdateInstance("", UpdateInstanceInput{
 		ID: created.ID, Name: "改名后", StartURL: "https://example.com",
 	})
 	if err != nil {
@@ -197,12 +197,12 @@ func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 	if updated.Name != "改名后" || updated.StartURL != "https://example.com" {
 		t.Errorf("updated = %+v", updated)
 	}
-	if _, err := svc.UpdateInstance(UpdateInstanceInput{ID: "missing", Name: "x"}); err == nil {
+	if _, err := svc.UpdateInstance("", UpdateInstanceInput{ID: "missing", Name: "x"}); err == nil {
 		t.Error("update of missing instance accepted, want error")
 	}
 
 	// Metadata-only delete must keep the profile files.
-	if err := svc.DeleteInstance(created.ID); err != nil {
+	if err := svc.DeleteInstance("", created.ID); err != nil {
 		t.Fatalf("DeleteInstance: %v", err)
 	}
 	if _, err := svc.GetInstance(created.ID); err == nil {
@@ -211,14 +211,14 @@ func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("profile file was removed by metadata-only delete: %v", err)
 	}
-	if err := svc.DeleteInstance(created.ID); err == nil {
+	if err := svc.DeleteInstance("", created.ID); err == nil {
 		t.Error("second metadata delete accepted, want 实例不存在")
 	}
 }
 
 func TestDeleteInstanceAndProfileSafety(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance(CreateInstanceInput{Name: "连删"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "连删"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestDeleteInstanceAndProfileSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.DeleteInstanceAndProfile(created.ID); err != nil {
+	if err := svc.DeleteInstanceAndProfile("", created.ID); err != nil {
 		t.Fatalf("DeleteInstanceAndProfile: %v", err)
 	}
 	if _, err := os.Stat(profileDir); !errors.Is(err, os.ErrNotExist) {
@@ -265,7 +265,7 @@ func TestDeleteProfileRefusesRunningAndEscapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed running: %v", err)
 	}
-	if err := svc.DeleteInstanceAndProfile(running.ID); err == nil ||
+	if err := svc.DeleteInstanceAndProfile("", running.ID); err == nil ||
 		!strings.Contains(err.Error(), "正在运行") {
 		t.Errorf("purge of running instance error = %v, want refusal", err)
 	}
@@ -277,7 +277,7 @@ func TestDeleteProfileRefusesRunningAndEscapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed escape: %v", err)
 	}
-	if err := svc.DeleteInstanceAndProfile(esc.ID); err == nil ||
+	if err := svc.DeleteInstanceAndProfile("", esc.ID); err == nil ||
 		!strings.Contains(err.Error(), "不在 profiles 目录之内") {
 		t.Errorf("purge of escaping path error = %v, want refusal", err)
 	}
@@ -310,7 +310,7 @@ func TestPurgeRefusesSymlinkProfileDir(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
-	err := svc.DeleteInstanceAndProfile(in.ID)
+	err := svc.DeleteInstanceAndProfile("", in.ID)
 	if err == nil || !strings.Contains(err.Error(), "符号链接") {
 		t.Fatalf("purge of symlink profile dir error = %v, want 符号链接 refusal", err)
 	}
@@ -339,7 +339,7 @@ func TestPurgeRefusesIntermediateSymlinkEscape(t *testing.T) {
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
 	in := seedInstance(t, cfg, "中间链接", "profiles/mid/inner")
-	err := svc.DeleteInstanceAndProfile(in.ID)
+	err := svc.DeleteInstanceAndProfile("", in.ID)
 	if err == nil || !strings.Contains(err.Error(), "不在 profiles 目录之内") {
 		t.Fatalf("purge through intermediate symlink error = %v, want containment refusal", err)
 	}
@@ -350,7 +350,7 @@ func TestPurgeRefusesIntermediateSymlinkEscape(t *testing.T) {
 		t.Errorf("metadata removed despite refusal: %v", err)
 	}
 	// The metadata-only delete still works for the same instance.
-	if err := svc.DeleteInstance(in.ID); err != nil {
+	if err := svc.DeleteInstance("", in.ID); err != nil {
 		t.Errorf("metadata-only delete after refusal: %v", err)
 	}
 	if _, err := os.Stat(sentinel); err != nil {
@@ -374,7 +374,7 @@ func TestPurgeAllowsIntermediateSymlinkStayingInside(t *testing.T) {
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
 	in := seedInstance(t, cfg, "内部链接", "profiles/alias/inst")
-	if err := svc.DeleteInstanceAndProfile(in.ID); err != nil {
+	if err := svc.DeleteInstanceAndProfile("", in.ID); err != nil {
 		t.Fatalf("purge resolving inside profiles refused: %v", err)
 	}
 	if _, err := os.Stat(instDir); !errors.Is(err, os.ErrNotExist) {
@@ -384,7 +384,7 @@ func TestPurgeAllowsIntermediateSymlinkStayingInside(t *testing.T) {
 
 func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance(CreateInstanceInput{Name: "可恢复"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "可恢复"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
 	svc.deleteRecord = func(ctx context.Context, id string) error {
 		return errors.New("injected database failure")
 	}
-	if err := svc.DeleteInstanceAndProfile(created.ID); err == nil {
+	if err := svc.DeleteInstanceAndProfile("", created.ID); err == nil {
 		t.Fatal("purge with failing record delete succeeded, want error")
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -423,7 +423,7 @@ func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
 
 func TestPurgeWipeFailureReportsQuarantine(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance(CreateInstanceInput{Name: "清理失败"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "清理失败"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestPurgeWipeFailureReportsQuarantine(t *testing.T) {
 	svc.wipeQuarantine = func(q *pfiles.Quarantine) error {
 		return errors.New("injected wipe failure")
 	}
-	err = svc.DeleteInstanceAndProfile(created.ID)
+	err = svc.DeleteInstanceAndProfile("", created.ID)
 	if err == nil {
 		t.Fatal("purge with failing wipe succeeded, want error")
 	}

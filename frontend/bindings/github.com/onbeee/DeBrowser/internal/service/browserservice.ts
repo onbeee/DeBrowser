@@ -47,8 +47,8 @@ import * as $models from "./models.js";
  * Registering the same path twice returns the existing
  * registration instead of duplicating it.
  */
-export function AddBrowserManually(): $CancellablePromise<$models.BrowserView> {
-    return $Call.ByID(4106159291);
+export function AddBrowserManually(operationID: string): $CancellablePromise<$models.BrowserView> {
+    return $Call.ByID(4106159291, operationID);
 }
 
 /**
@@ -59,8 +59,8 @@ export function AddBrowserManually(): $CancellablePromise<$models.BrowserView> {
  * registration delete fails after the files are gone, the row is
  * marked missing so the database and the disk stay consistent.
  */
-export function DeleteManagedKernel(id: string): $CancellablePromise<void> {
-    return $Call.ByID(554467260, id);
+export function DeleteManagedKernel(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(554467260, operationID, id);
 }
 
 /**
@@ -88,8 +88,8 @@ export function GetOfficialStableVersion(): $CancellablePromise<$models.StableVe
  * installed directory is removed again so disk and database never
  * disagree.
  */
-export function InstallManagedKernel(): $CancellablePromise<$models.KernelView> {
-    return $Call.ByID(866392262);
+export function InstallManagedKernel(operationID: string): $CancellablePromise<$models.KernelView> {
+    return $Call.ByID(866392262, operationID);
 }
 
 /**
@@ -113,8 +113,8 @@ export function ListManagedKernels(): $CancellablePromise<$models.KernelView[] |
  * registration. It deletes only the database record — the browser
  * file itself is never deleted, moved or modified.
  */
-export function RemoveBrowserRegistration(id: string): $CancellablePromise<void> {
-    return $Call.ByID(2057492488, id);
+export function RemoveBrowserRegistration(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(2057492488, operationID, id);
 }
 
 /**
@@ -124,8 +124,8 @@ export function RemoveBrowserRegistration(id: string): $CancellablePromise<void>
  * only refuses to steal a path another registration already
  * holds.
  */
-export function UpdateBrowserPath(id: string): $CancellablePromise<$models.BrowserView> {
-    return $Call.ByID(3881955469, id);
+export function UpdateBrowserPath(operationID: string, id: string): $CancellablePromise<$models.BrowserView> {
+    return $Call.ByID(3881955469, operationID, id);
 }
 
 /**
@@ -133,6 +133,6 @@ export function UpdateBrowserPath(id: string): $CancellablePromise<$models.Brows
  * (files present, version match, signature) and records the
  * outcome as its status.
  */
-export function VerifyManagedKernel(id: string): $CancellablePromise<$models.KernelView> {
-    return $Call.ByID(3434634674, id);
+export function VerifyManagedKernel(operationID: string, id: string): $CancellablePromise<$models.KernelView> {
+    return $Call.ByID(3434634674, operationID, id);
 }

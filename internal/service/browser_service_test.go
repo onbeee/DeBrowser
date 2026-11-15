@@ -161,7 +161,7 @@ func TestNoAutoDetection(t *testing.T) {
 func TestManualAddPersistsAcrossRestart(t *testing.T) {
 	fx := testBrowserFixture(t)
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	added, err := fx.svc.AddBrowserManually()
+	added, err := fx.svc.AddBrowserManually("")
 	if err != nil {
 		t.Fatalf("AddBrowserManually: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestManualAddPersistsAcrossRestart(t *testing.T) {
 	// Adding the same path again returns the same registration,
 	// not a duplicate.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	again, err := fx.svc.AddBrowserManually()
+	again, err := fx.svc.AddBrowserManually("")
 	if err != nil || again.ID != added.ID {
 		t.Fatalf("duplicate add = %+v, %v", again, err)
 	}
@@ -202,7 +202,7 @@ func TestManualAddPersistsAcrossRestart(t *testing.T) {
 	}
 	// Any other program can be added the same way.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.bravePath, nil }
-	brave, err := fx.svc.AddBrowserManually()
+	brave, err := fx.svc.AddBrowserManually("")
 	if err != nil || brave.Name != "brave" {
 		t.Fatalf("brave add = %+v, %v", brave, err)
 	}
@@ -231,7 +231,7 @@ func TestManualAddAcceptsAnyExecutable(t *testing.T) {
 	for _, p := range paths {
 		path := p
 		fx.svc.ExecutablePicker = func() (string, error) { return path, nil }
-		v, err := fx.svc.AddBrowserManually()
+		v, err := fx.svc.AddBrowserManually("")
 		if err != nil {
 			t.Fatalf("AddBrowserManually(%s): %v", path, err)
 		}
@@ -246,7 +246,7 @@ func TestManualAddAcceptsAnyExecutable(t *testing.T) {
 	// Picker cancelled: no record.
 	fx2 := testBrowserFixture(t)
 	fx2.svc.ExecutablePicker = func() (string, error) { return "", nil }
-	if _, err := fx2.svc.AddBrowserManually(); err == nil {
+	if _, err := fx2.svc.AddBrowserManually(""); err == nil {
 		t.Fatal("cancelled picker must error")
 	}
 	got, _ = fx2.svc.ListBrowsers()
@@ -258,13 +258,13 @@ func TestManualAddAcceptsAnyExecutable(t *testing.T) {
 func TestUpdateBrowserPath(t *testing.T) {
 	fx := testBrowserFixture(t)
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	added, err := fx.svc.AddBrowserManually()
+	added, err := fx.svc.AddBrowserManually("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Re-select a different path: the record updates in place.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.bravePath, nil }
-	updated, err := fx.svc.UpdateBrowserPath(added.ID)
+	updated, err := fx.svc.UpdateBrowserPath("", added.ID)
 	if err != nil {
 		t.Fatalf("UpdateBrowserPath: %v", err)
 	}
@@ -279,17 +279,17 @@ func TestUpdateBrowserPath(t *testing.T) {
 	}
 	// A path already held by another registration cannot be taken.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	other, err := fx.svc.AddBrowserManually()
+	other, err := fx.svc.AddBrowserManually("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.bravePath, nil }
-	if _, err := fx.svc.UpdateBrowserPath(other.ID); err == nil {
+	if _, err := fx.svc.UpdateBrowserPath("", other.ID); err == nil {
 		t.Fatal("taking another registration's path must fail")
 	}
 	// Unknown registration ID errors.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	if _, err := fx.svc.UpdateBrowserPath("no-such-id"); err == nil {
+	if _, err := fx.svc.UpdateBrowserPath("", "no-such-id"); err == nil {
 		t.Fatal("updating a missing registration must error")
 	}
 	// The registered programs themselves were never launched,
@@ -306,11 +306,11 @@ func TestUpdateBrowserPath(t *testing.T) {
 func TestRemoveRegistrationKeepsBrowserFile(t *testing.T) {
 	fx := testBrowserFixture(t)
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	added, err := fx.svc.AddBrowserManually()
+	added, err := fx.svc.AddBrowserManually("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fx.svc.RemoveBrowserRegistration(added.ID); err != nil {
+	if err := fx.svc.RemoveBrowserRegistration("", added.ID); err != nil {
 		t.Fatalf("RemoveBrowserRegistration: %v", err)
 	}
 	// The browser binary itself must be completely untouched.
@@ -321,7 +321,7 @@ func TestRemoveRegistrationKeepsBrowserFile(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("registration should be gone: %+v", got)
 	}
-	if err := fx.svc.RemoveBrowserRegistration(added.ID); err == nil {
+	if err := fx.svc.RemoveBrowserRegistration("", added.ID); err == nil {
 		t.Fatal("removing a missing registration must error")
 	}
 }
@@ -332,7 +332,7 @@ func TestKernelLifecycleAndCrossProtection(t *testing.T) {
 	if err != nil || stable.Version != "142.0.7444.162" {
 		t.Fatalf("stable = %+v, %v", stable, err)
 	}
-	installed, err := fx.svc.InstallManagedKernel()
+	installed, err := fx.svc.InstallManagedKernel("")
 	if err != nil {
 		t.Fatalf("InstallManagedKernel: %v", err)
 	}
@@ -342,23 +342,23 @@ func TestKernelLifecycleAndCrossProtection(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162", "chrome.exe")); err != nil {
 		t.Fatalf("kernel chrome.exe missing: %v", err)
 	}
-	if _, err := fx.svc.InstallManagedKernel(); err == nil {
+	if _, err := fx.svc.InstallManagedKernel(""); err == nil {
 		t.Fatal("duplicate install must fail")
 	}
 	// Cross-protection: a kernel is not a manual registration and
 	// a manual browser is not a kernel.
 	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	manual, err := fx.svc.AddBrowserManually()
+	manual, err := fx.svc.AddBrowserManually("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fx.svc.RemoveBrowserRegistration(installed.ID); err == nil {
+	if err := fx.svc.RemoveBrowserRegistration("", installed.ID); err == nil {
 		t.Fatal("RemoveBrowserRegistration must refuse a kernel ID")
 	}
 	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162", "chrome.exe")); err != nil {
 		t.Fatalf("kernel was touched by registration removal: %v", err)
 	}
-	if err := fx.svc.DeleteManagedKernel(manual.ID); err == nil {
+	if err := fx.svc.DeleteManagedKernel("", manual.ID); err == nil {
 		t.Fatal("DeleteManagedKernel must refuse a manual browser ID")
 	}
 	if _, err := os.Stat(fx.chromePath); err != nil {
@@ -377,11 +377,11 @@ func TestKernelLifecycleAndCrossProtection(t *testing.T) {
 		t.Fatalf("sources = %v, want manual+managed", sources)
 	}
 	// Verify + delete the kernel properly.
-	v, err := fx.svc.VerifyManagedKernel(installed.ID)
+	v, err := fx.svc.VerifyManagedKernel("", installed.ID)
 	if err != nil || v.Status != "ready" {
 		t.Fatalf("verify kernel = %+v, %v", v, err)
 	}
-	if err := fx.svc.DeleteManagedKernel(installed.ID); err != nil {
+	if err := fx.svc.DeleteManagedKernel("", installed.ID); err != nil {
 		t.Fatalf("DeleteManagedKernel: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162")); !os.IsNotExist(err) {
@@ -408,7 +408,7 @@ func TestInstallTimeoutCleansUp(t *testing.T) {
 	fx := testBrowserFixture(t)
 	fx.svc.manager.Fetcher = &blockingFetcher{metadata: []byte(testMetadata)}
 	fx.svc.installTimeout = 100 * time.Millisecond
-	if _, err := fx.svc.InstallManagedKernel(); err == nil {
+	if _, err := fx.svc.InstallManagedKernel(""); err == nil {
 		t.Fatal("install with a stalled download must fail on timeout")
 	}
 	// No half-installed kernel directory (including temp dirs) and
@@ -432,14 +432,14 @@ func TestInstallTimeoutCleansUp(t *testing.T) {
 
 func TestVerifyManagedKernelDetectsMissingFiles(t *testing.T) {
 	fx := testBrowserFixture(t)
-	installed, err := fx.svc.InstallManagedKernel()
+	installed, err := fx.svc.InstallManagedKernel("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162")); err != nil {
 		t.Fatal(err)
 	}
-	v, err := fx.svc.VerifyManagedKernel(installed.ID)
+	v, err := fx.svc.VerifyManagedKernel("", installed.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AppService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { useAppStore, type Theme } from "../stores/useAppStore";
+import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 const THEME_OPTIONS: { value: Theme; label: string }[] = [
   { value: "dark", label: "深色" },
@@ -33,15 +34,18 @@ export default function SettingsPage() {
 
   const changeTheme = (next: Theme) => {
     setTheme(next); // 即时生效
-    AppService.SaveTheme(next)
+    const opId = newOperationId();
+    AppService.SaveTheme(opId, next)
       .then(() => {
         setSaveError(null);
         log("info", `主题已切换并保存：${next}`);
+        recordOperationFeedback(opId, true, `主题已切换并保存：${next}`, "设置", "settings.update_theme");
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         setSaveError(message);
         log("error", `保存主题失败：${message}`);
+        recordOperationFeedback(opId, false, `保存主题失败：${message}`, "设置", "settings.update_theme");
       });
   };
 

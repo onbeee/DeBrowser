@@ -31,8 +31,26 @@ export interface CategoryView {
     "files": number;
     "bytes": number;
     "retentionDays": number;
-    "capBytes": number;
     "cleanupErrors": number;
+}
+
+/**
+ * ClientEventInput is one client-side record sent by the frontend:
+ * page openings/closings and the exact feedback message a user
+ * action produced in the UI. The backend validates the category
+ * and sanitizes every field before recording.
+ */
+export interface ClientEventInput {
+    "category": string;
+    "eventType": string;
+    "module": string;
+    "action": string;
+    "targetType": string;
+    "targetId": string;
+    "operationId": string;
+    "status": string;
+    "userMessage": string;
+    "metadata": { [_ in string]?: string } | null;
 }
 
 /**
@@ -68,6 +86,16 @@ export interface DiagnosticsView {
     "logDir": string;
     "categories": CategoryView[] | null;
     "lastExport": ExportSummary | null;
+
+    /**
+     * Unified log capacity (one total limit across all streams):
+     * the configured limit, the actual on-disk usage and the
+     * remaining space, all measured from the real files.
+     */
+    "logCapacityLimitBytes": number;
+    "logUsedBytes": number;
+    "logRemainingBytes": number;
+    "logWriteErrors": number;
 }
 
 /**
@@ -123,6 +151,35 @@ export interface KernelView {
     "updatedAt": string;
     "absInstallPath": string;
     "absExecutablePath": string;
+}
+
+/**
+ * LogCapacityView is the capacity state shown by the UI.
+ */
+export interface LogCapacityView {
+    "limitBytes": number;
+    "usedBytes": number;
+    "remainingBytes": number;
+}
+
+/**
+ * LogExportInfo is the dynamic date range of one export category,
+ * computed from the records currently on disk.
+ */
+export interface LogExportInfo {
+    "category": string;
+    "hasRecords": boolean;
+
+    /**
+     * YYYY-MM-DD, local
+     */
+    "earliestDate": string;
+
+    /**
+     * YYYY-MM-DD, local
+     */
+    "latestDate": string;
+    "recordCount": number;
 }
 
 /**

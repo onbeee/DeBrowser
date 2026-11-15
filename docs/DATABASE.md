@@ -89,7 +89,7 @@ Stage 6（migration 0006）增加：`config_id`（外键 → `mihomo_configs`，
 
 ### `app_settings`
 
-应用级键值设置（Stage 1，migration 0001）。一个历史键：`proxy.port_range`（例如 `19000-19499`）——已取消的 Stage 7 本应消费的实例监听范围。当前没有任何代码读写此表（它的 store 访问器已在 PR #9 清理中移除）；提及该键只是为了让既有数据库中存储的值被理解为历史数据。面向用户的 `config/settings.json` 文件（语言/主题）是独立的、无关的。
+应用级键值设置（Stage 1，migration 0001）。一个历史键：`proxy.port_range`（例如 `19000-19499`）——已取消的 Stage 7 本应消费的实例监听范围。当前没有任何代码读写此表（它的 store 访问器已在 PR #9 清理中移除）；提及该键只是为了让既有数据库中存储的值被理解为历史数据。面向用户的 `config/settings.json` 文件（语言/主题，以及统一记录系统的日志总容量 `logCapacityBytes`——缺失或为 0 表示未配置、采用默认 100 MB）是独立的、无关的。日志记录本身不进数据库：三类记录以 JSON Lines 文件存放在 `data/logs/`（见 `docs/ARCHITECTURE.md`）。
 
 ## 规则（AGENTS.md 第 5 节）
 
