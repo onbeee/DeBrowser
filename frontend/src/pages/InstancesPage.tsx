@@ -42,6 +42,12 @@ export default function InstancesPage() {
   const setPage = useAppStore((state) => state.setPage);
   const [instances, setInstances] = useState<Instance[]>([]);
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
+  // browsersLoaded is true only after ListBrowsers has succeeded.
+  // While it is false (still loading, or the load failed), editing
+  // is disabled: judging an association against a not-yet-loaded
+  // list would mistake it for a missing registration, and saving
+  // would then clear the association in the database.
+  const [browsersLoaded, setBrowsersLoaded] = useState(false);
   const [browsersError, setBrowsersError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,11 +69,16 @@ export default function InstancesPage() {
     } finally {
       setLoading(false);
     }
+    setBrowsersLoaded(false);
     try {
       const regs = await BrowserService.ListBrowsers();
       setBrowsers(regs ?? []);
       setBrowsersError(null);
+      setBrowsersLoaded(true);
     } catch (err) {
+      // A failed load is NOT "no registrations": browsersLoaded
+      // stays false, editing stays disabled, and nothing about
+      // existing associations is inferred or touched.
       setBrowsersError(err instanceof Error ? err.message : String(err));
     }
   }, [log]);
@@ -78,6 +89,12 @@ export default function InstancesPage() {
 
   const submitForm = async () => {
     if (!form) return;
+    if (form.id && !browsersLoaded) {
+      // Never let an edit save carry a browserId that was derived
+      // from an incompletely loaded registration list.
+      setError("内核列表尚未加载完成，无法保存编辑。请等待加载完成或重新加载页面。");
+      return;
+    }
     setBusy(true);
     const opId = newOperationId();
     const action = form.id ? "instance.update" : "instance.create";
@@ -171,6 +188,22 @@ export default function InstancesPage() {
         </div>
       )}
 
+      {browsersError && (
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
+          <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+          <span className="flex-1">
+            内核列表加载失败：{browsersError}。编辑功能已暂停，以免误清除实例的内核关联。
+          </span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="shrink-0 font-medium underline underline-offset-2"
+          >
+            重新加载
+          </button>
+        </div>
+      )}
+
       <div className="mt-5 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (
           <p className="px-4 py-10 text-center text-sm text-(--text-faint)">加载中…</p>
@@ -214,7 +247,9 @@ export default function InstancesPage() {
                     <div className="flex justify-end gap-1">
                       <button
                         type="button"
-                        title="编辑"
+                        title={browsersLoaded ? "编辑" : "内核列表加载完成后可编辑"}
+                        disabled={!browsersLoaded}
+                        className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
                         onClick={() => {
                           setEditing(inst);
                           setForm({
@@ -230,7 +265,6 @@ export default function InstancesPage() {
                               : "",
                           });
                         }}
-                        className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg)"
                       >
                         <Pencil size={14} />
                       </button>
@@ -279,6 +313,7 @@ export default function InstancesPage() {
                 <select
                   className={inputCls}
                   value={form.browserId}
+                  disabled={!browsersLoaded}
                   onChange={(e) => setForm({ ...form, browserId: e.target.value })}
                 >
                   <option value="">不选择内核</option>
@@ -290,6 +325,8 @@ export default function InstancesPage() {
                 </select>
                 {browsersError ? (
                   <p className="mt-1 text-xs text-(--danger)">内核列表加载失败：{browsersError}</p>
+                ) : !browsersLoaded ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">内核列表加载中…</p>
                 ) : browsers.length === 0 ? (
                   <p className="mt-1 text-xs text-(--text-faint)">
                     尚未登记任何浏览器内核。
