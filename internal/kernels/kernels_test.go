@@ -197,10 +197,17 @@ func TestResolveAndRemoveManaged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ver, "chrome.exe"), []byte("MZ"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// rel is relative to the kernels root itself:
+	// rel is relative to the kernels root itself. The result is a
+	// fully resolved real path, so compare against the resolved
+	// form of the expectation (temp dirs may contain alias
+	// components, e.g. Windows 8.3 short names).
+	want, err := filepath.EvalSymlinks(ver)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := ResolveManagedDir(root, "142.0.7444.162")
-	if err != nil || got != ver {
-		t.Fatalf("resolve = %s, %v", got, err)
+	if err != nil || got != want {
+		t.Fatalf("resolve = %s, %v (want %s)", got, err, want)
 	}
 	for _, bad := range []string{"", ".", "..", "../outside", "/abs/path"} {
 		if _, err := ResolveManagedDir(root, bad); err == nil {
