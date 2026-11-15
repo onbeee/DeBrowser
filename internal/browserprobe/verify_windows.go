@@ -27,13 +27,8 @@ var (
 
 	procWinVerifyTrust = wintrustDLL.NewProc("WinVerifyTrust")
 
-	procCryptMsgGetParam    = crypt32DLL.NewProc("CryptMsgGetParam")
-	procCryptMsgClose       = crypt32DLL.NewProc("CryptMsgClose")
-	procCryptDecodeObjectEx = crypt32DLL.NewProc("CryptDecodeObjectEx")
-	procCertRDNValueToStr   = crypt32DLL.NewProc("CertRDNValueToStrW")
-
-	kernel32DLL   = windows.NewLazySystemDLL("kernel32.dll")
-	procLocalFree = kernel32DLL.NewProc("LocalFree")
+	procCryptMsgGetParam = crypt32DLL.NewProc("CryptMsgGetParam")
+	procCryptMsgClose    = crypt32DLL.NewProc("CryptMsgClose")
 )
 
 // NewInspector returns the Windows inspector.
@@ -146,9 +141,6 @@ const (
 	certQueryContentFlagPKCS7SignedEmbed = 1 << 10
 	cmsgSignerCountParam                 = 5
 	cmsgSignerInfoParam                  = 6
-	x509Name                             = 7 // MAKEINTRESOURCE(7)
-	cryptDecodeAllocFlag                 = 0x8000
-	x509ASNEncoding                      = 1
 )
 
 func (windowsInspector) Signature(path string) (Signature, error) {
@@ -376,101 +368,20 @@ type certNameInfoRaw struct {
 	rgRDN *certRDNRaw
 }
 
-// rdnStringValueTypes are the CERT_RDN character-string value
-// types this code knows how to convert. Anything else (binary
-// types are filtered by the caller; unknown types) fails closed
-// rather than being guessed at.
-var rdnStringValueTypes = map[uint32]bool{
-	3:  true, // CERT_RDN_NUMERIC_STRING
-	4:  true, // CERT_RDN_PRINTABLE_STRING
-	5:  true, // CERT_RDN_TELETEX_STRING
-	6:  true, // CERT_RDN_VIDEOTEX_STRING
-	7:  true, // CERT_RDN_IA5_STRING
-	8:  true, // CERT_RDN_GRAPHIC_STRING
-	9:  true, // CERT_RDN_VISIBLE_STRING
-	10: true, // CERT_RDN_GENERAL_STRING
-	11: true, // CERT_RDN_UNIVERSAL_STRING
-	12: true, // CERT_RDN_INT4_STRING
-	13: true, // CERT_RDN_BMP_STRING (= CERT_RDN_UNICODE_STRING)
-	14: true, // CERT_RDN_UTF8_STRING
-}
-
-// rdnValueToString converts one RDN attribute value to a Unicode
-// string with CertRDNValueToStrW, which converts according to the
-// attribute's own dwValueType (PrintableString, UTF8String,
-// BMPString/UnicodeString, TeletexString, IA5String, …). The
-// input blob is the value in the decoded form produced by
-// CryptDecodeObjectEx — the exact form the API consumes (character
-// strings as UTF-16LE, with the documented exception that
-// CERT_RDN_UTF8_STRING values remain UTF-8 bytes). No encoding is
-// assumed by this code and no length is guessed: the buffer size
-// comes from the API itself (first call). A failed conversion is
-// an error — callers fail closed.
-func rdnValueToString(valueType uint32, b dataBlob) (string, error) {
-	if !rdnStringValueTypes[valueType] {
-		return "", fmt.Errorf("unsupported RDN value type %d", valueType)
-	}
-	if b.cbData == 0 || b.pbData == nil {
-		return "", fmt.Errorf("empty RDN attribute value (type %d)", valueType)
-	}
-	n, _, _ := procCertRDNValueToStr.Call(
-		uintptr(valueType), uintptr(unsafe.Pointer(&b)), 0, 0)
-	if n == 0 {
-		return "", fmt.Errorf("CertRDNValueToStrW sizing failed for value type %d", valueType)
-	}
-	buf := make([]uint16, n)
-	m, _, _ := procCertRDNValueToStr.Call(
-		uintptr(valueType), uintptr(unsafe.Pointer(&b)),
-		uintptr(unsafe.Pointer(&buf[0])), n)
-	if m == 0 {
-		return "", fmt.Errorf("CertRDNValueToStrW failed for value type %d", valueType)
-	}
-	return windows.UTF16ToString(buf), nil
-}
-
-// decodeSubjectName decodes a DER X.509 name via CryptDecodeObjectEx
-// (X509_NAME) into individual attributes — the reliable X.500
-// attribute parsing path; no rendered-name string splitting is
-// involved. Each attribute VALUE is converted by CertRDNValueToStrW
-// according to its own value type (see rdnValueToString); any
-// conversion failure aborts the decode (fail closed). Binary value
-// types (1 = encoded blob, 2 = octet string) carry no text and are
-// recorded with an empty value — an organization attribute of a
-// binary type therefore yields an empty organization, which the
-// signer-matching layer rejects.
+// decodeSubjectName parses the DER-encoded subject name carried
+// by a certificate (CERT_NAME_BLOB content) with the strict,
+// platform-neutral DER parser in nameparse.go, which converts
+// every X.500 string type by its own encoding rules. (The earlier
+// CertRDNValueToStrW approach was abandoned after the real
+// Crypt32, exercised on the Windows CI runners, returned
+// first-character-only results for UTF-16LE-fed ASCII string
+// types and byte-widened mojibake for UTF-8 input — see
+// nameparse.go.)
 func decodeSubjectName(data *byte, size uint32) ([]nameAttribute, error) {
 	if data == nil || size == 0 {
 		return nil, fmt.Errorf("empty certificate subject")
 	}
-	var outPtr unsafe.Pointer
-	var outSize uint32
-	r, _, callErr := procCryptDecodeObjectEx.Call(
-		x509ASNEncoding, x509Name,
-		uintptr(unsafe.Pointer(data)), uintptr(size),
-		cryptDecodeAllocFlag, 0,
-		uintptr(unsafe.Pointer(&outPtr)), uintptr(unsafe.Pointer(&outSize)))
-	if r == 0 || outPtr == nil {
-		return nil, fmt.Errorf("decode certificate subject failed: %w", callErr)
-	}
-	defer func() { _, _, _ = procLocalFree.Call(uintptr(outPtr)) }()
-	info := (*certNameInfoRaw)(outPtr)
-	var attrs []nameAttribute
-	rdns := unsafe.Slice(info.rgRDN, info.cRDN)
-	for _, rdn := range rdns {
-		rawAttrs := unsafe.Slice(rdn.rgRDNAttr, rdn.cRDNAttr)
-		for _, ra := range rawAttrs {
-			attr := nameAttribute{OID: cString(ra.pszObjId)}
-			if ra.dwValueType != 1 && ra.dwValueType != 2 {
-				v, verr := rdnValueToString(ra.dwValueType, ra.value)
-				if verr != nil {
-					return nil, verr
-				}
-				attr.Value = v
-			}
-			attrs = append(attrs, attr)
-		}
-	}
-	return attrs, nil
+	return parseDERName(blobBytes(dataBlob{cbData: size, pbData: data}))
 }
 
 func cString(p *byte) string {
