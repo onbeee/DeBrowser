@@ -7,14 +7,12 @@ import (
 	"os"
 )
 
-// System browsing is a Windows feature (DeBrowser's only target
+// File verification is a Windows feature (DeBrowser's only target
 // platform). On other platforms — used only for development and
-// unit tests — there are no candidate sources, and the inspector
-// can still stat files and report signatures as unavailable so the
-// platform-neutral pipeline behaves predictably.
-
-// Sources returns no candidate sources on non-Windows platforms.
-func Sources() []CandidateSource { return nil }
+// unit tests — the inspector can still stat files, and version and
+// signature reads report themselves unavailable so the
+// platform-neutral verification logic behaves predictably. There
+// is deliberately no browser discovery on any platform.
 
 // NewInspector returns the non-Windows inspector.
 func NewInspector() Inspector { return otherInspector{} }

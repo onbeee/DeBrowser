@@ -1,33 +1,27 @@
-// Package browserprobe detects browsers that are already installed
-// on the machine (Stage 9A) and verifies their identity.
+// Package browserprobe verifies the identity of ONE browser
+// executable that the user has explicitly chosen (Stage 9A,
+// revised product decision).
 //
-// Detection is deliberately conservative:
-//   - Candidates come only from regular system information — the
-//     Windows registry (App Paths and the uninstall keys) and the
-//     well-known per-browser install directories. The disk is never
-//     scanned and no detected executable is ever launched.
-//   - A candidate becomes a browser record only after verification:
-//     the file must exist, its version resource must identify the
-//     product, and its Authenticode signature must be valid AND
-//     issued to the expected publisher. A file merely NAMED
-//     chrome.exe proves nothing.
-//   - Detection results are runtime data. They are never written
-//     to the database and DeBrowser never modifies, copies or
-//     deletes the detected installations or their profiles.
+// DeBrowser does NOT detect browsers automatically: there is no
+// registry scanning, no disk scanning, no list of well-known
+// install directories anywhere in this package or its callers.
+// The only entry point is Verify, applied to a file the user
+// picked by hand (or to a previously registered file being
+// re-verified, or to a managed kernel's chrome.exe).
 //
-// The detection pipeline is platform-neutral: candidate sources and
-// the file inspector are interfaces, so the full decision logic is
-// unit-tested with fakes on any OS. The Windows implementations
-// live in probe_windows.go; other platforms report no candidates.
+// Verification is conservative:
+//   - The file must exist.
+//   - Its version resource must identify the product (Google
+//     Chrome, Brave or Chromium). A file merely NAMED chrome.exe
+//     proves nothing.
+//   - Its Authenticode signature must be valid AND issued to the
+//     expected publisher (Google LLC / Brave Software, Inc.).
+//   - The file is never executed.
 package browserprobe
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -41,16 +35,7 @@ const (
 	KindChromium Kind = "chromium"
 )
 
-// Scope is where a browser installation lives.
-type Scope string
-
-const (
-	ScopeUser    Scope = "user"    // current-user installation
-	ScopeSystem  Scope = "system"  // machine-wide installation
-	ScopeManaged Scope = "managed" // installed by DeBrowser itself
-)
-
-// Signature statuses reported for a candidate file.
+// Signature statuses reported for a verified file.
 const (
 	SignatureVerified          = "verified"           // valid signature, expected publisher
 	SignaturePublisherMismatch = "publisher_mismatch" // valid signature, wrong publisher
@@ -59,28 +44,12 @@ const (
 	SignatureUnavailable       = "unavailable"        // platform cannot verify
 )
 
-// Detection statuses for a record.
+// Detection statuses for a verification result.
 const (
 	DetectionVerified           = "verified"            // identity and signature confirmed
 	DetectionVerificationFailed = "verification_failed" // identity or signature rejected
 	DetectionUnverifiable       = "unverifiable"        // platform cannot perform verification
 )
-
-// Candidate is one possible executable location from a source. The
-// KindHint records which browser the SOURCE expected; the verified
-// kind is always decided from the file itself, never from the hint.
-type Candidate struct {
-	Path     string
-	Scope    Scope
-	KindHint Kind
-}
-
-// CandidateSource yields candidate executable paths from one
-// information source (registry App Paths, uninstall records,
-// well-known directories).
-type CandidateSource interface {
-	Candidates(ctx context.Context) ([]Candidate, error)
-}
 
 // VersionInfo is the identity data read from a file's version
 // resource.
@@ -92,7 +61,7 @@ type VersionInfo struct {
 // Signature is the Authenticode verdict for one file.
 type Signature struct {
 	// Status is one of: "valid", "invalid", "unsigned",
-	// "unavailable" (raw platform verdicts; Detect maps them onto
+	// "unavailable" (raw platform verdicts; Verify maps them onto
 	// the Signature* constants using the expected publisher).
 	Status    string
 	Publisher string
@@ -110,20 +79,17 @@ type Inspector interface {
 	Signature(path string) (Signature, error)
 }
 
-// Info is one detection record.
+// Info is the verification record for one executable.
 type Info struct {
-	ID              string `json:"id"`
 	Name            string `json:"name"`
 	Kind            Kind   `json:"kind"`
 	Version         string `json:"version"`
 	ExecutablePath  string `json:"executablePath"`
-	Source          string `json:"source"` // "system" | "managed"
-	Scope           Scope  `json:"scope"`
 	SignatureStatus string `json:"signatureStatus"`
 	Publisher       string `json:"publisher"`
 	DetectionStatus string `json:"detectionStatus"`
 	StatusReason    string `json:"statusReason"`
-	DetectedAt      string `json:"detectedAt"`
+	VerifiedAt      string `json:"verifiedAt"`
 }
 
 // ExpectedPublisher returns the Authenticode publisher a browser
@@ -166,74 +132,17 @@ func kindFromProductName(product string) (Kind, bool) {
 	return "", false
 }
 
-// canonical normalizes a candidate path for deduplication: cleaned,
-// absolute, and compared case-insensitively (Windows paths).
-func canonical(path string) (clean, key string) {
-	clean = filepath.Clean(path)
+// Verify verifies one user-chosen executable and builds its
+// record. Manual selection never bypasses verification: the same
+// checks apply to a hand-picked file as to any other candidate.
+func Verify(path string, insp Inspector) Info {
+	clean := filepath.Clean(path)
 	if abs, err := filepath.Abs(clean); err == nil {
 		clean = abs
 	}
-	return clean, strings.ToLower(clean)
-}
-
-// SystemID derives the stable runtime ID of a system browser from
-// its canonical path. System browsers have no database row; this
-// ID exists only so the UI can address one detection record.
-func SystemID(canonicalPath string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(canonicalPath)))
-	return "sys-" + hex.EncodeToString(sum[:])[:16]
-}
-
-// Detect runs every source, deduplicates candidates and verifies
-// each surviving executable. Candidates whose file does not exist
-// are dropped silently (stale registry entries are normal). Source
-// errors are tolerated: one broken source must not hide the
-// browsers another source found.
-func Detect(ctx context.Context, sources []CandidateSource, insp Inspector) []Info {
-	seen := map[string]bool{}
-	var cands []Candidate
-	for _, src := range sources {
-		list, err := src.Candidates(ctx)
-		if err != nil {
-			continue
-		}
-		for _, c := range list {
-			clean, key := canonical(c.Path)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			c.Path = clean
-			cands = append(cands, c)
-		}
-	}
-	out := []Info{}
-	for _, c := range cands {
-		if !insp.Exists(c.Path) {
-			continue
-		}
-		out = append(out, Verify(c.Path, c.Scope, insp))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
-		}
-		return out[i].ExecutablePath < out[j].ExecutablePath
-	})
-	return out
-}
-
-// Verify verifies one executable and builds its record. It is used
-// for automatic candidates and for a manually chosen file alike:
-// manual selection never bypasses verification.
-func Verify(path string, scope Scope, insp Inspector) Info {
-	clean, _ := canonical(path)
 	info := Info{
-		ID:             SystemID(clean),
 		ExecutablePath: clean,
-		Source:         "system",
-		Scope:          scope,
-		DetectedAt:     time.Now().UTC().Format(time.RFC3339),
+		VerifiedAt:     time.Now().UTC().Format(time.RFC3339),
 	}
 	vi, err := insp.VersionInfo(clean)
 	if err != nil || vi.ProductName == "" {

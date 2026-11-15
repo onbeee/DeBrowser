@@ -3,7 +3,7 @@
 
 /**
  * BrowserView is the unified presentation record for one browser,
- * whether system-detected or DeBrowser-managed.
+ * whether manually registered or DeBrowser-managed.
  */
 export interface BrowserView {
     "id": string;
@@ -13,19 +13,14 @@ export interface BrowserView {
     "executablePath": string;
 
     /**
-     * "system" | "managed"
+     * "manual" | "managed"
      */
     "source": string;
-
-    /**
-     * "user" | "system" | "managed"
-     */
-    "scope": string;
     "signatureStatus": string;
     "publisher": string;
     "detectionStatus": string;
     "statusReason": string;
-    "detectedAt": string;
+    "lastVerifiedAt": string;
 }
 
 /**

@@ -4,6 +4,7 @@ package browserprobe
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"unsafe"
 
@@ -27,6 +28,17 @@ var (
 	procCertNameToStr  = crypt32DLL.NewProc("CertNameToStrW")
 	procWinVerifyTrust = wintrustDLL.NewProc("WinVerifyTrust")
 )
+
+// NewInspector returns the Windows inspector.
+func NewInspector() Inspector { return windowsInspector{} }
+
+type windowsInspector struct{}
+
+// Exists reports whether path is an existing regular file.
+func (windowsInspector) Exists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
+}
 
 // --- Version resource ----------------------------------------------
 

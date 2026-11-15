@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/browserprobe"
@@ -19,19 +17,25 @@ import (
 	"github.com/onbeee/DeBrowser/internal/store"
 )
 
-// BrowserService is the Stage 9A browser discovery and kernel
-// management service exposed to the frontend over Wails bindings.
+// BrowserService is the Stage 9A browser and kernel management
+// service exposed to the frontend over Wails bindings.
 //
-// Two kinds of browsers are presented through one view type:
-//   - System browsers (Google Chrome, Brave) that the user already
-//     has installed. They are detected live on every call, are
-//     never written to the database, and this service offers no
-//     way to modify, copy, uninstall or delete them or to touch
-//     their profiles.
-//   - Managed kernels: Chrome for Testing builds DeBrowser itself
-//     downloaded, verified and installed under kernels/<version>.
-//     Only these are persisted (migration 0010) and only these can
-//     be deleted, through the guarded path in this service.
+// Product decision (revised): DeBrowser does NOT detect browsers
+// automatically — no registry scanning, no disk scanning, no
+// auto-discovery of any kind. A browser becomes available only
+// when the user explicitly adds it, in one of two ways:
+//
+//   - Manual: the user picks an installed Google Chrome or Brave
+//     executable in the file picker. The file passes the full
+//     identity/version/Authenticode-publisher verification and
+//     the registration is persisted (migration 0011). DeBrowser
+//     never copies, modifies, uninstalls or deletes the browser
+//     or reads its everyday profile; removing a registration
+//     deletes only the database row.
+//   - Managed: the user explicitly downloads a Chrome for
+//     Testing build that DeBrowser installs under
+//     kernels/<version> (migration 0010). Only managed kernels
+//     can be deleted from disk, through the guarded path here.
 //
 // This stage never launches a browser process.
 type BrowserService struct {
@@ -56,12 +60,8 @@ type BrowserService struct {
 
 	// Platform seams (production values set by the constructor;
 	// tests substitute fakes).
-	sources   []browserprobe.CandidateSource
 	inspector browserprobe.Inspector
 	manager   *kernels.Manager
-
-	mu     sync.Mutex
-	manual []browserprobe.Info // session-only manual additions, never persisted
 }
 
 // InstallProgress is one managed-kernel install progress update.
@@ -75,20 +75,19 @@ type InstallProgress struct {
 const InstallProgressEvent = "kernel:install-progress"
 
 // BrowserView is the unified presentation record for one browser,
-// whether system-detected or DeBrowser-managed.
+// whether manually registered or DeBrowser-managed.
 type BrowserView struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
 	Kind            string `json:"kind"`
 	Version         string `json:"version"`
 	ExecutablePath  string `json:"executablePath"`
-	Source          string `json:"source"` // "system" | "managed"
-	Scope           string `json:"scope"`  // "user" | "system" | "managed"
+	Source          string `json:"source"` // "manual" | "managed"
 	SignatureStatus string `json:"signatureStatus"`
 	Publisher       string `json:"publisher"`
 	DetectionStatus string `json:"detectionStatus"`
 	StatusReason    string `json:"statusReason"`
-	DetectedAt      string `json:"detectedAt"`
+	LastVerifiedAt  string `json:"lastVerifiedAt"`
 }
 
 // KernelView is one managed kernel with its resolved absolute
@@ -114,26 +113,8 @@ func NewBrowserService(db *database.DB, layout paths.Layout, log *slog.Logger) *
 		store:     store.New(db),
 		layout:    layout,
 		log:       log,
-		sources:   browserprobe.Sources(),
 		inspector: insp,
 		manager:   &kernels.Manager{Fetcher: kernels.HTTPFetcher{}, Inspector: insp},
-	}
-}
-
-func browserViewFromInfo(info browserprobe.Info) BrowserView {
-	return BrowserView{
-		ID:              info.ID,
-		Name:            info.Name,
-		Kind:            string(info.Kind),
-		Version:         info.Version,
-		ExecutablePath:  info.ExecutablePath,
-		Source:          info.Source,
-		Scope:           string(info.Scope),
-		SignatureStatus: info.SignatureStatus,
-		Publisher:       info.Publisher,
-		DetectionStatus: info.DetectionStatus,
-		StatusReason:    info.StatusReason,
-		DetectedAt:      info.DetectedAt,
 	}
 }
 
@@ -153,8 +134,7 @@ func (s *BrowserService) managedView(k model.Kernel) BrowserView {
 		Version:        k.Version,
 		ExecutablePath: filepath.Join(s.layout.Root, k.ExecutablePath),
 		Source:         "managed",
-		Scope:          "managed",
-		DetectedAt:     k.UpdatedAt,
+		LastVerifiedAt: k.UpdatedAt,
 	}
 	switch k.Status {
 	case "ready":
@@ -173,90 +153,42 @@ func (s *BrowserService) managedView(k model.Kernel) BrowserView {
 	return v
 }
 
-// detectSystem runs live detection and merges the session's manual
-// additions (deduplicated by executable path).
-func (s *BrowserService) detectSystem() []browserprobe.Info {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	found := browserprobe.Detect(ctx, s.sources, s.inspector)
-	s.mu.Lock()
-	manual := append([]browserprobe.Info(nil), s.manual...)
-	s.mu.Unlock()
-	seen := map[string]bool{}
-	for _, f := range found {
-		seen[strings.ToLower(f.ExecutablePath)] = true
+// manualView renders one persisted manual registration. If the
+// registered file has disappeared, the view reports it as invalid
+// (the stored record is updated on the next explicit verify).
+func (s *BrowserService) manualView(b model.ExternalBrowser) BrowserView {
+	v := BrowserView{
+		ID:              b.ID,
+		Name:            b.Name,
+		Kind:            b.BrowserType,
+		Version:         b.Version,
+		ExecutablePath:  b.ExecutablePath,
+		Source:          "manual",
+		SignatureStatus: b.SignatureStatus,
+		Publisher:       b.SignaturePublisher,
+		LastVerifiedAt:  b.LastVerifiedAt,
 	}
-	for _, m := range manual {
-		if !seen[strings.ToLower(m.ExecutablePath)] {
-			found = append(found, m)
-		}
+	switch {
+	case !s.inspector.Exists(b.ExecutablePath):
+		v.DetectionStatus = browserprobe.DetectionVerificationFailed
+		v.StatusReason = "浏览器文件不存在（可能已被移动或卸载）"
+	case b.Status == "verified":
+		v.DetectionStatus = browserprobe.DetectionVerified
+	default:
+		v.DetectionStatus = browserprobe.DetectionVerificationFailed
+		v.StatusReason = "最近一次验证未通过"
 	}
-	return found
-}
-
-// DetectSystemBrowsers detects the installed system browsers
-// (Chrome, Brave) without persisting anything.
-func (s *BrowserService) DetectSystemBrowsers() ([]BrowserView, error) {
-	out := []BrowserView{}
-	for _, info := range s.detectSystem() {
-		out = append(out, browserViewFromInfo(info))
-	}
-	return out, nil
-}
-
-// RedetectBrowsers re-runs system browser detection on explicit
-// user request. Detection is live by construction, so this is the
-// same fresh scan; the separate method keeps the UI action (and
-// its audit semantics) explicit.
-func (s *BrowserService) RedetectBrowsers() ([]BrowserView, error) {
-	return s.DetectSystemBrowsers()
-}
-
-// ListBrowsers returns the unified list: live-detected system
-// browsers plus all managed kernels.
-func (s *BrowserService) ListBrowsers() ([]BrowserView, error) {
-	out, err := s.DetectSystemBrowsers()
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	ks, err := s.store.ListKernels(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("读取内核列表失败：%w", err)
-	}
-	for _, k := range ks {
-		out = append(out, s.managedView(k))
-	}
-	return out, nil
-}
-
-// GetBrowserDetails returns one browser by ID: a system detection
-// record (re-detected live) or a managed kernel.
-func (s *BrowserService) GetBrowserDetails(id string) (BrowserView, error) {
-	for _, info := range s.detectSystem() {
-		if info.ID == id {
-			return browserViewFromInfo(info), nil
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	k, err := s.store.GetKernel(ctx, id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return BrowserView{}, fmt.Errorf("未找到该浏览器记录")
-		}
-		return BrowserView{}, err
-	}
-	return s.managedView(k), nil
+	return v
 }
 
 // AddBrowserManually lets the user point at a browser executable
-// through the native file picker. The chosen file goes through the
-// exact same identity, version and signature verification as an
-// auto-detected one; a file that does not verify is rejected and
-// never registered. A verified browser is remembered for this
-// session only — system browsers are not persisted.
+// through the native file picker. The chosen file must pass the
+// full verification (identity from its version resource, version,
+// Authenticode signature and publisher) and must be Google Chrome
+// Stable or Brave Stable; anything else is rejected with the
+// reason and nothing is recorded. A verified browser is persisted
+// so it survives restarts. Adding the same executable twice
+// refreshes its registration instead of duplicating it.
 func (s *BrowserService) AddBrowserManually() (BrowserView, error) {
 	start := time.Now()
 	var out BrowserView
@@ -279,25 +211,172 @@ func (s *BrowserService) AddBrowserManually() (BrowserView, error) {
 		err = fmt.Errorf("所选文件不存在")
 		return BrowserView{}, err
 	}
-	info := browserprobe.Verify(path, browserprobe.ScopeUser, s.inspector)
+	info := browserprobe.Verify(path, s.inspector)
 	if info.DetectionStatus != browserprobe.DetectionVerified {
 		err = fmt.Errorf("该文件未通过浏览器验证：%s", info.StatusReason)
 		return BrowserView{}, err
 	}
-	s.mu.Lock()
-	replaced := false
-	for i, m := range s.manual {
-		if strings.EqualFold(m.ExecutablePath, info.ExecutablePath) {
-			s.manual[i] = info
-			replaced = true
+	if info.Kind != browserprobe.KindChrome && info.Kind != browserprobe.KindBrave {
+		err = fmt.Errorf("仅支持手动添加 Google Chrome 或 Brave，该文件是 %s", info.Name)
+		return BrowserView{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	record := model.ExternalBrowser{
+		Name:               info.Name,
+		BrowserType:        string(info.Kind),
+		Version:            info.Version,
+		ExecutablePath:     info.ExecutablePath,
+		SignatureStatus:    info.SignatureStatus,
+		SignaturePublisher: info.Publisher,
+		Status:             "verified",
+		LastVerifiedAt:     info.VerifiedAt,
+	}
+	if existing, gerr := s.store.GetExternalBrowserByPath(ctx, info.ExecutablePath); gerr == nil {
+		record.ID = existing.ID
+		record.CreatedAt = existing.CreatedAt
+		if uerr := s.store.UpdateExternalBrowserVerification(ctx, record); uerr != nil {
+			err = uerr
+			return BrowserView{}, err
+		}
+		out = s.manualView(record)
+		return out, nil
+	}
+	created, cerr := s.store.CreateExternalBrowser(ctx, record)
+	if cerr != nil {
+		err = cerr
+		return BrowserView{}, err
+	}
+	out = s.manualView(created)
+	return out, nil
+}
+
+// reverify re-checks one manual registration against the real
+// file (existence, identity, version, signature, publisher),
+// persists the outcome and returns the fresh view.
+func (s *BrowserService) reverify(ctx context.Context, b model.ExternalBrowser) (BrowserView, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if !s.inspector.Exists(b.ExecutablePath) {
+		b.Status = "invalid"
+		b.SignatureStatus = browserprobe.SignatureUnavailable
+		b.LastVerifiedAt = now
+		if err := s.store.UpdateExternalBrowserVerification(ctx, b); err != nil {
+			return BrowserView{}, err
+		}
+		v := s.manualView(b)
+		v.StatusReason = "浏览器文件不存在（可能已被移动或卸载）"
+		return v, nil
+	}
+	info := browserprobe.Verify(b.ExecutablePath, s.inspector)
+	b.Name = info.Name
+	b.Version = info.Version
+	b.SignatureStatus = info.SignatureStatus
+	b.SignaturePublisher = info.Publisher
+	b.LastVerifiedAt = info.VerifiedAt
+	if info.DetectionStatus == browserprobe.DetectionVerified && string(info.Kind) == b.BrowserType {
+		b.Status = "verified"
+	} else {
+		b.Status = "invalid"
+	}
+	if err := s.store.UpdateExternalBrowserVerification(ctx, b); err != nil {
+		return BrowserView{}, err
+	}
+	v := s.manualView(b)
+	if b.Status != "verified" {
+		v.StatusReason = info.StatusReason
+		if info.DetectionStatus == browserprobe.DetectionVerified && string(info.Kind) != b.BrowserType {
+			v.StatusReason = "浏览器类型与登记记录不一致"
 		}
 	}
-	if !replaced {
-		s.manual = append(s.manual, info)
+	return v, nil
+}
+
+// VerifyBrowser re-verifies one manually registered browser and
+// records the outcome.
+func (s *BrowserService) VerifyBrowser(id string) (BrowserView, error) {
+	start := time.Now()
+	var out BrowserView
+	var err error
+	defer func() { auditOp(s.Auditor, "browser.verify", "browser", id, start, err) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	b, gerr := s.store.GetExternalBrowser(ctx, id)
+	if gerr != nil {
+		if errors.Is(gerr, store.ErrNotFound) {
+			err = fmt.Errorf("未找到该浏览器登记")
+		} else {
+			err = gerr
+		}
+		return BrowserView{}, err
 	}
-	s.mu.Unlock()
-	out = browserViewFromInfo(info)
+	out, err = s.reverify(ctx, b)
+	return out, err
+}
+
+// RemoveBrowserRegistration removes one manual browser
+// registration. It deletes only the database record — the browser
+// file itself is never deleted, moved or modified.
+func (s *BrowserService) RemoveBrowserRegistration(id string) error {
+	start := time.Now()
+	var err error
+	defer func() { auditOp(s.Auditor, "browser.remove_registration", "browser", id, start, err) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if derr := s.store.DeleteExternalBrowser(ctx, id); derr != nil {
+		if errors.Is(derr, store.ErrNotFound) {
+			err = fmt.Errorf("未找到该浏览器登记")
+		} else {
+			err = derr
+		}
+		return err
+	}
+	return nil
+}
+
+// ListBrowsers returns the unified list: the user's persisted
+// manual registrations plus all managed kernels. Nothing is
+// auto-detected; both parts come from explicit user actions.
+func (s *BrowserService) ListBrowsers() ([]BrowserView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out := []BrowserView{}
+	bs, err := s.store.ListExternalBrowsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取浏览器登记失败：%w", err)
+	}
+	for _, b := range bs {
+		out = append(out, s.manualView(b))
+	}
+	ks, err := s.store.ListKernels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取内核列表失败：%w", err)
+	}
+	for _, k := range ks {
+		out = append(out, s.managedView(k))
+	}
 	return out, nil
+}
+
+// GetBrowserDetails returns one browser by ID. A manual
+// registration is re-verified live before it is shown (and the
+// outcome persisted); a managed kernel is returned from its
+// registration.
+func (s *BrowserService) GetBrowserDetails(id string) (BrowserView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if b, err := s.store.GetExternalBrowser(ctx, id); err == nil {
+		return s.reverify(ctx, b)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return BrowserView{}, err
+	}
+	k, err := s.store.GetKernel(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return BrowserView{}, fmt.Errorf("未找到该浏览器记录")
+		}
+		return BrowserView{}, err
+	}
+	return s.managedView(k), nil
 }
 
 // GetOfficialStableVersion fetches the official Chrome for Testing
@@ -435,10 +514,10 @@ func (s *BrowserService) VerifyManagedKernel(id string) (KernelView, error) {
 
 // DeleteManagedKernel removes one DeBrowser-managed kernel: the
 // directory (after the full managed-path verification) and then
-// its registration. System browsers have no registration, so this
-// method can never delete one. If the registration delete fails
-// after the files are gone, the registration is restored so the
-// database and the disk stay consistent.
+// its registration. Manually registered system browsers are not
+// kernels and can never be deleted through this method. If the
+// registration delete fails after the files are gone, the row is
+// marked missing so the database and the disk stay consistent.
 func (s *BrowserService) DeleteManagedKernel(id string) error {
 	start := time.Now()
 	var err error
@@ -448,7 +527,7 @@ func (s *BrowserService) DeleteManagedKernel(id string) error {
 	k, gerr := s.store.GetKernel(ctx, id)
 	if gerr != nil {
 		if errors.Is(gerr, store.ErrNotFound) {
-			err = fmt.Errorf("未找到该内核（系统浏览器不能通过此操作删除）")
+			err = fmt.Errorf("未找到该内核（手动添加的浏览器请使用移除登记）")
 		} else {
 			err = gerr
 		}
@@ -459,9 +538,6 @@ func (s *BrowserService) DeleteManagedKernel(id string) error {
 		return err
 	}
 	if derr := s.store.DeleteKernel(ctx, id); derr != nil {
-		// Files are gone but the row remains: try to keep the pair
-		// consistent by reporting loudly; the row's status is set
-		// to missing so the UI reflects the real disk state.
 		_ = s.store.UpdateKernelStatus(ctx, id, "missing")
 		err = fmt.Errorf("删除内核登记失败：%w", derr)
 		return err
