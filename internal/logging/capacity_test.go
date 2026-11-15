@@ -240,7 +240,12 @@ func TestCapacityUnreachableReportsError(t *testing.T) {
 	if _, err := w.Write([]byte(huge)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := sys.SetCapacityLimit(MinCapacityBytes)
+	for _, f := range sys.Files(CategoryRun) {
+		st, _ := os.Stat(f.Path)
+		t.Logf("DIAG pre-enforce run file %s size=%d total=%d", f.Path, st.Size(), sys.TotalBytes())
+	}
+	used, err := sys.SetCapacityLimit(MinCapacityBytes)
+	t.Logf("DIAG SetCapacityLimit used=%d err=%v total=%d", used, err, sys.TotalBytes())
 	if err == nil {
 		t.Fatal("expected an explicit cleanup-failure error")
 	}
