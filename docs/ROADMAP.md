@@ -73,7 +73,7 @@ Stage numbering evolved during 2026-11-13 as the product definition was revised 
 
 - Four import formats through one pipeline: full Clash/Mihomo YAML, proxies-only YAML, V2Ray/Base64 URI lists, local config files; unsupported content errors explicitly, never silently dropped
 - Native Mihomo `proxy-groups` parsed into structured storage; members resolve by stable node identity (rendered names unique per node), never silently rebound to a same-named node from another subscription
-- Full-config management: original artifacts stored with credentials stripped into the vault; Stage 6 records a security report of risky settings (allow-lan, external listeners/controller, missing controller secret, TUN, external DNS listen) — the safe defaults themselves (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) are enforced when Stage 7 renders a runnable config, with every adjustment reported to the user
+- Full-config management: original artifacts stored with credentials stripped into the vault; Stage 6 records a security report of risky settings (allow-lan, external listeners/controller, missing controller secret, TUN, external DNS listen) — the safe defaults themselves (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) were planned to be enforced when Stage 7 rendered a runnable config; Stage 7 has since been cancelled, so that enforcement is no longer part of the product plan
 
 ## Stage 6C / PR #9 — Product scope cleanup (project-owner decision, 2026-11-15)
 

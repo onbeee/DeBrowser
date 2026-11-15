@@ -344,23 +344,3 @@ func (db *DB) snapshotTo(ctx context.Context, target string) error {
 	}
 	return nil
 }
-
-// BackupNow writes a verified snapshot of the current database into
-// the configured backup directory and returns its path. It gives later
-// stages (manual backups, Stage 7) the same WAL-safe mechanism the
-// migration path uses.
-func (db *DB) BackupNow(ctx context.Context) (string, error) {
-	if db.backupDir == "" {
-		return "", fmt.Errorf("database: no backup directory configured")
-	}
-	version, err := db.AppliedVersion(ctx)
-	if err != nil {
-		return "", err
-	}
-	stamp := time.Now().UTC().Format("20060102-150405.000")
-	target := filepath.Join(db.backupDir, fmt.Sprintf("debrowser-backup-%s-v%d.db", stamp, version))
-	if err := db.snapshotTo(ctx, target); err != nil {
-		return "", err
-	}
-	return target, nil
-}

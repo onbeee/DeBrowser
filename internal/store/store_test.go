@@ -24,8 +24,6 @@ func newTestStore(t *testing.T) *Store {
 	return New(db)
 }
 
-func intPtr(v int) *int { return &v }
-
 // seedHistoricalProxy inserts a proxies row directly with SQL. The
 // store deliberately exposes no proxy write API any more (PR #9
 // scope cleanup), so tests seed historical rows exactly the way a

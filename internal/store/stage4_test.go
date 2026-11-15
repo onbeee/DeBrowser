@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/onbeee/DeBrowser/internal/model"
@@ -124,33 +123,6 @@ func TestSecretRefUsageQueries(t *testing.T) {
 	all, err := s.AllSecretRefs(ctx)
 	if err != nil || len(all) != 2 || !all["shared-ref"] || !all["sub-ref"] {
 		t.Fatalf("AllSecretRefs = %v, %v", all, err)
-	}
-}
-
-func TestSettingsKV(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	if _, err := s.GetSetting(ctx, "proxy.port_range"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("missing key = %v, want ErrNotFound", err)
-	}
-	if err := s.SetSetting(ctx, "proxy.port_range", "19000-19499"); err != nil {
-		t.Fatalf("SetSetting: %v", err)
-	}
-	v, err := s.GetSetting(ctx, "proxy.port_range")
-	if err != nil || v != "19000-19499" {
-		t.Fatalf("GetSetting = %q, %v", v, err)
-	}
-	if err := s.SetSetting(ctx, "proxy.port_range", "20000-20100"); err != nil {
-		t.Fatalf("SetSetting replace: %v", err)
-	}
-	if v, _ := s.GetSetting(ctx, "proxy.port_range"); v != "20000-20100" {
-		t.Fatalf("after replace = %q", v)
-	}
-	if err := s.DeleteSetting(ctx, "proxy.port_range"); err != nil {
-		t.Fatalf("DeleteSetting: %v", err)
-	}
-	if _, err := s.GetSetting(ctx, "proxy.port_range"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("after delete = %v, want ErrNotFound", err)
 	}
 }
 

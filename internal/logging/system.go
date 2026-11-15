@@ -33,9 +33,6 @@ var categoryPolicies = map[Category]Policy{
 	CategoryError:     {RetentionDays: 90, CapBytes: 50 << 20},
 }
 
-// Policy returns the retention policy of a category.
-func PolicyFor(c Category) Policy { return categoryPolicies[c] }
-
 // System is the Stage 5B logging system: three categorized,
 // independently retained JSON Lines streams under data/logs/ plus
 // the *slog.Logger the application has always used (now writing to
