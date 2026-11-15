@@ -7,7 +7,7 @@ export default function Sidebar() {
   const setPage = useAppStore((state) => state.setPage);
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-(--border) bg-(--chrome-bg)">
+    <aside className="flex w-60 shrink-0 flex-col border-r border-(--border) bg-(--sidebar-bg)">
       <div className="flex items-center gap-2.5 px-5 pb-5 pt-6">
         <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-(--accent) text-(--accent-contrast)">
           <Globe size={20} strokeWidth={2.2} />

@@ -13,8 +13,3 @@ import "../github.com/wailsapp/wails/v3/internal/eventcreate.js";
  */
 export const AppStatus = "app:status";
 
-/**
- * Name of the custom event "kernel:install-progress".
- */
-export const KernelInstallProgress = "kernel:install-progress";
-

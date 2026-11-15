@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { AppWindow, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
+import { AppWindow, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { InstanceService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
@@ -125,34 +125,22 @@ export default function InstancesPage() {
   };
 
   const inputCls =
-    "w-full rounded-md border border-(--border) bg-(--app-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)";
+    "w-full rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)";
   const labelCls = "mb-1 block text-xs text-(--text-dim)";
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-6">
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">浏览器实例</h2>
-          <p className="mt-0.5 text-sm text-(--text-dim)">
-            管理浏览器实例的元数据。启动、停止浏览器进程将在后续阶段提供。
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="flex items-center gap-1.5 rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
-          >
-            <RefreshCw size={14} /> 刷新
-          </button>
-          <button
-            type="button"
-            onClick={() => setForm(EMPTY_FORM)}
-            className="flex items-center gap-1.5 rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
-          >
-            <Plus size={14} /> 新建实例
-          </button>
-        </div>
+        <p className="text-sm text-(--text-dim)">
+          管理浏览器实例的元数据。启动、停止浏览器进程将在后续阶段提供。
+        </p>
+        <button
+          type="button"
+          onClick={() => setForm(EMPTY_FORM)}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
+        >
+          <Plus size={14} /> 新建实例
+        </button>
       </div>
 
       {error && (
@@ -338,7 +326,7 @@ export default function InstancesPage() {
                 type="button"
                 disabled={busy}
                 onClick={() => void confirmDelete()}
-                className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-(--danger-contrast) hover:opacity-90 disabled:opacity-50"
               >
                 {pendingDelete.withProfile ? "确认删除并清理 Profile" : "确认删除记录"}
               </button>
