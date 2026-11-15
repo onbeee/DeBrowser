@@ -1,129 +1,129 @@
-# DeBrowser Roadmap
+# DeBrowser 路线图
 
-Development follows AGENTS.md section 9: small, testable stages, one Pull Request per stage, merged only after project-owner approval.
+开发遵循 AGENTS.md 第 9 节：小而可测试的阶段，每个阶段一个 Pull Request，仅在项目负责人批准后合并。
 
-Stage numbering evolved during 2026-11-13 as the product definition was revised several times (delivered Stages 1–3 and 4A were never renumbered). The FINAL order, fixed by product-owner decision on 2026-11-13, is the table below: the first-launch welcome page was cancelled (Stage 5A is direct startup), and full backup & restore is the LAST functional stage (Stage 12), implemented only after every other data-producing feature exists. Earlier intermediate numberings mentioned in dated historical notes are superseded by this table.
+阶段编号在 2026-11-13 期间随着产品定义多次修订而演变（已交付的 Stage 1–3 与 4A 从未重新编号）。下表是**最终**顺序，由项目负责人于 2026-11-13 固定：首次启动欢迎页被取消（Stage 5A 为直接启动），完整备份与恢复是**最后一个**功能阶段（Stage 12），只有在其他全部产生数据的功能都存在之后才实施。带日期的历史注记中提到的早期中间编号，均以本表为准。
 
-| Stage | Scope | Status |
+| 阶段 | 范围 | 状态 |
 | --- | --- | --- |
-| 1 | Repository foundation and application shell | Delivered (PR #1, #2) |
-| 2 | SQLite database and migrations | Delivered (PR #3) |
-| 3 | App lifecycle and instance management foundation | Delivered (PR #4) |
-| 4A | Proxy data foundation: credential vault, proxy schema, ProxyService, proxy UI | Delivered (PR #5, merged 2026-11-13) |
-| 5A | Direct startup and portable data directory stability | Delivered (PR #6, merged 2026-11-13) |
-| 5B | Logging and diagnostics (run/operation/error logs, retention, diagnostics export) | Delivered (PR #7, merged 2026-11-13) |
-| 6 | Subscription management and full Mihomo config import (incl. native proxy-groups) | Delivered (PR #8, squash-merged; main `44e96e42`) |
-| 6C | Unified proxy configuration — **superseded by the PR #9 scope cleanup (2026-11-15)**: the proxy/subscription/Mihomo features built in this PR were removed again by project-owner decision before merge; see the cleanup note below | Closed as a feature; PR #9 repurposed as the scope-cleanup PR |
-| 7 | Mihomo core integration and run modes — **cancelled with the proxy scope**; whether proxy capability returns is a future re-evaluation (see below) | Cancelled |
-| 8 | Rule management (airport / custom / mixed rule sources) — **cancelled with the proxy scope**; rules only made sense on top of a proxy runtime, which is no longer in the product plan | Cancelled |
-| 9 | Browser kernels, instance launch (per-instance profiles, CDP ports, lifecycle); bookmarks | Planned — current development focus |
-| 10 | Multi-window synchronization | Planned |
-| 11 | In-app update (after a code-signing / trusted-release solution) and release | Planned |
-| 12 | Full backup and restore (portable backup package, independent backup password) — final stage | Planned |
+| 1 | 仓库基础与应用外壳 | 已交付（PR #1、#2） |
+| 2 | SQLite 数据库与迁移 | 已交付（PR #3） |
+| 3 | 应用生命周期与实例管理基础 | 已交付（PR #4） |
+| 4A | 代理数据基础：凭据 Vault、代理数据结构、ProxyService、代理界面 | 已交付（PR #5，2026-11-13 合并） |
+| 5A | 直接启动与便携数据目录稳定化 | 已交付（PR #6，2026-11-13 合并） |
+| 5B | 日志与诊断（运行/操作/错误日志、保留策略、诊断导出） | 已交付（PR #7，2026-11-13 合并） |
+| 6 | 订阅管理与完整 Mihomo 配置导入（含原生 proxy-groups） | 已交付（PR #8，squash 合并；main `44e96e42`） |
+| 6C | 统一代理配置——**被 PR #9 范围清理取代（2026-11-15）**：本 PR 构建的代理/订阅/Mihomo 功能在合并前根据项目负责人决定再次移除；见下方清理说明 | 作为功能关闭；PR #9 改作范围清理 PR |
+| 7 | Mihomo 核心集成与运行模式——**随代理范围一并取消**；代理能力是否回归属于未来重新评估（见下） | 已取消 |
+| 8 | 规则管理（机场规则 / 自定规则 / 混合规则来源）——**随代理范围一并取消**；规则只有建立在代理运行时之上才有意义，而代理运行时已不在产品计划中 | 已取消 |
+| 9 | 浏览器内核、实例启动（每实例 Profile、进程生命周期；CDP 在 9C 接入）、书签 | 计划中——当前开发重点 |
+| 10 | 多窗口同步 | 计划中 |
+| 11 | 程序内更新（在代码签名 / 可信发布签名方案就绪后）与发布 | 计划中 |
+| 12 | 完整备份与恢复（便携备份包、独立备份口令）——最终阶段 | 计划中 |
 
-## Stage 1 — Repository foundation and application shell
+## Stage 1——仓库基础与应用外壳
 
-- Wails v3.0.0 + Go 1.26 + React 18 + TypeScript + Vite project, Windows 11 x64 target
-- Modular monolith layout (`internal/` backend modules, `frontend/` UI)
-- Configuration management and data-directory layout (portable layout next to the executable, adopted after Stage 1). Note: Stage 1 originally used `%AppData%\DeBrowser` with an automatic migration of existing data; that automatic migration conflicts with the first-launch rule decided on 2026-11-13 and is removed in Stage 5A.
-- Structured JSON logging infrastructure
-- SQLite infrastructure: WAL, foreign keys, transactional migrations (foundation schema only)
-- `AppService` with live status over bindings and the typed `app:status` event
-- Base desktop UI: sidebar navigation, top toolbar, main area, bottom status bar, console panel
-- Engineering docs and GitHub Actions CI on a Windows x64 runner
-- `.gitignore` rules keeping databases, profiles, cookies, secrets and build output out of git
+- Wails v3.0.0 + Go 1.26 + React 18 + TypeScript + Vite 项目，目标 Windows 11 x64
+- 模块化单体布局（`internal/` 后端模块、`frontend/` 界面）
+- 配置管理与数据目录布局（便携布局，位于可执行文件旁边，Stage 1 之后采用）。注：Stage 1 最初使用 `%AppData%\DeBrowser` 并自动迁移已有数据；该自动迁移与 2026-11-13 决定的首次启动规则冲突，已在 Stage 5A 移除。
+- 结构化 JSON 日志基础设施
+- SQLite 基础设施：WAL、外键、事务性迁移（仅基础结构）
+- `AppService`：通过 bindings 提供实时状态，并有类型化事件 `app:status`
+- 基础桌面界面：侧边栏导航、顶部工具栏、主区域、底部状态栏、控制台面板
+- 工程文档与在 Windows x64 runner 上运行的 GitHub Actions CI
+- `.gitignore` 规则：数据库、Profile、Cookie、密钥与构建产物不进入 git
 
-## Stage 2 — SQLite database and migrations
+## Stage 2——SQLite 数据库与迁移
 
-- Core schema (proxies, browser instances, bookmarks) as versioned migrations 0002/0003 on top of the Stage 1 foundation; the kernels table lands with kernel management in Stage 9
-- Repository layer (`internal/store`) over shared `internal/model` types, a `WithTx` transaction entry for cross-repository atomic work, and `synchronous=FULL`
-- Verified pre-migration backups (`VACUUM INTO`) that abort the upgrade when they fail
+- 核心结构（代理、浏览器实例、书签）以版本化 migration 0002/0003 落在 Stage 1 基础之上；kernels 表随 Stage 9 的内核管理落地
+- 仓储层（`internal/store`）建立在共享的 `internal/model` 类型之上，提供 `WithTx` 事务入口做跨仓储原子操作，并启用 `synchronous=FULL`
+- 经验证的迁移前备份（`VACUUM INTO`），备份失败时中止升级
 
-## Stage 3 — Application lifecycle and instance management foundation (delivered)
+## Stage 3——应用生命周期与实例管理基础（已交付）
 
-- App-level single-instance protection per portable installation, with stale-lock recovery and focus-the-running-window activation
-- Application lifecycle governance: context-owned background loops that drain on shutdown, `run() error` instead of mid-startup `log.Fatalf`, ordered resource release (loops → database → lock → log)
-- Instance management foundation: validated metadata CRUD over the Stage 2 store, startup status reconciliation, and a profile-deletion safety model that separates metadata deletion from profile data deletion
-- Still to come in later stages: kernel management (delivered in Stage 9A without any automatic browser detection — browsers are added by hand or downloaded explicitly), instance start/stop with managed Chromium processes and CDP wiring (localhost only, Stage 9B)
+- 按便携安装划分的应用级单实例保护，含陈旧锁恢复与「聚焦已运行窗口」的激活机制
+- 应用生命周期治理：由 context 拥有的后台循环在关闭时排空；以 `run() error` 代替启动中途的 `log.Fatalf`；资源按顺序释放（循环 → 数据库 → 锁 → 日志）
+- 实例管理基础：在 Stage 2 store 之上做带校验的元数据 CRUD、启动时状态对账，以及把元数据删除与 Profile 数据删除分开的 Profile 删除安全模型
+- 后续阶段交付：内核管理（已在 Stage 9A 交付，全程无任何自动浏览器检测——浏览器由用户手动添加或明确下载）、使用托管 Chromium 进程的实例启动/停止（Stage 9B）、CDP 接入（localhost only，Stage 9C）
 
-## Stage 4A — Proxy data foundation (PR #5)
+## Stage 4A——代理数据基础（PR #5）
 
-> **Superseded in part (2026-11-15)**: `ProxyService` and the proxy page were removed by the PR #9 scope cleanup. The credential vault, migration 0004 and the stored data remain as a compatibility layer.
+> **部分已被取代（2026-11-15）**：`ProxyService` 与代理页面已在 PR #9 范围清理中移除。凭据 Vault、migration 0004 与已存储的数据作为兼容层保留。
 
-- Credential vault (`internal/secrets`): DPAPI-protected file store in the portable directory, opaque references in SQLite, vault-first write protocol with guarded cleanup and orphan GC
-- Migration 0004: `subscriptions` metadata (URL only in the vault), proxy source/dedup/test fields, `browser_instances.proxy_listen_port`
-- `ProxyService` and the proxy management page: manual node CRUD, credential handling that never round-trips plaintext to the UI, TCP reachability test recorded per node
-- **Correction (2026-11-13)**: DeBrowser's own proxy groups and tags were removed again by migration 0005 (product decision — the feature is out of scope). This is unrelated to Mihomo's native `proxy-groups`, which are part of imported airport configurations and are kept for Stage 6.
+- 凭据 Vault（`internal/secrets`）：位于便携目录中、受 DPAPI 保护的文件存储；SQLite 中只存不透明引用；Vault 优先的写入协议，带受守卫的清理与孤儿回收
+- Migration 0004：`subscriptions` 元数据（URL 只存 Vault）、代理来源/去重/测试字段、`browser_instances.proxy_listen_port`
+- `ProxyService` 与代理管理页面：手动节点 CRUD、凭据处理永不把明文往返到界面、按节点记录 TCP 可达性测试结果
+- **更正（2026-11-13）**：DeBrowser 自有的代理分组与标签已由 migration 0005 再次移除（产品决定——该功能不在范围内）。这与 Mihomo 原生的 `proxy-groups` 无关；后者是导入的机场配置的一部分，为 Stage 6 保留。
 
-## Stage 5A — Direct startup and stable data directory
+## Stage 5A——直接启动与稳定的数据目录
 
-- Direct startup with automatic initialization: double-clicking `DeBrowser.exe` resolves the portable layout, creates any missing directories, opens (creating when needed) the SQLite database and applies pending schema migrations, opens the credential vault, loads settings and services, and opens the main window. There is NO first-launch welcome or choice page — no 「新用户 / 导入数据」 selection; backup import is not a startup feature (it belongs to the backup & restore stage, Stage 12)
-- The formal portable layout is unchanged (same `data/`, `config/`, `webview2-data/` paths); existing Stage 4A installations start exactly as before, with their data untouched, and replacing the executable never touches user data
-- No scanning, detection or automatic migration of legacy data anywhere (`internal/migration` and the automatic Roaming migration are removed); the SQLite schema migration mechanism is retained unchanged
+- 直接启动并自动初始化：双击 `DeBrowser.exe` 即解析便携布局、创建缺失的目录、打开（需要时创建）SQLite 数据库并应用待执行的 schema 迁移、打开凭据 Vault、加载设置与服务、打开主窗口。**没有**首次启动欢迎页或选择页——没有「新用户 / 导入数据」选项；备份导入不是启动功能（它属于备份与恢复阶段 Stage 12）
+- 正式便携布局不变（同样的 `data/`、`config/`、`webview2-data/` 路径）；已有的 Stage 4A 安装照常启动，数据不受影响，替换可执行文件永不触碰用户数据
+- 任何地方都不扫描、不检测、不自动迁移旧数据（`internal/migration` 与自动 Roaming 迁移已移除）；SQLite schema 迁移机制原样保留
 
-## Stage 5B — Logging and diagnostics (delivered, PR #7)
+## Stage 5B——日志与诊断（已交付，PR #7）
 
-- Run / operation / error log separation with retention (30 / 90 / 90 days) and size caps
-- Operation audit for instance changes, theme changes and diagnostic exports; no secrets in logs
-- In-app diagnostics view and one-click diagnostics/acceptance record export
+- 运行 / 操作 / 错误日志分离，带保留期（30 / 90 / 90 天）与容量上限
+- 针对实例变更、主题变更与诊断导出的操作审计；日志中不含密钥
+- 应用内诊断视图与一键导出诊断/验收记录
 
-## Stage 6 — Subscription and full configuration import (delivered, PR #8)
+## Stage 6——订阅与完整配置导入（已交付，PR #8）
 
-> **Superseded (2026-11-15)**: the features described in this section were removed again by the PR #9 scope cleanup (project-owner decision) — see the cleanup section below. The historical record of what PR #8 delivered is kept unchanged.
+> **已被取代（2026-11-15）**：本节描述的功能已在 PR #9 范围清理中再次移除（项目负责人决定）——见下方清理章节。本节保留 PR #8 当时交付内容的历史记录，不作改动。
 
-- Four import formats through one pipeline: full Clash/Mihomo YAML, proxies-only YAML, V2Ray/Base64 URI lists, local config files; unsupported content errors explicitly, never silently dropped
-- Native Mihomo `proxy-groups` parsed into structured storage; members resolve by stable node identity (rendered names unique per node), never silently rebound to a same-named node from another subscription
-- Full-config management: original artifacts stored with credentials stripped into the vault; Stage 6 records a security report of risky settings (allow-lan, external listeners/controller, missing controller secret, TUN, external DNS listen) — the safe defaults themselves (localhost-only listeners/DNS/controller, controller secret, TUN off, allow-lan off) were planned to be enforced when Stage 7 rendered a runnable config; Stage 7 has since been cancelled, so that enforcement is no longer part of the product plan
+- 四种导入格式走同一条管线：完整 Clash/Mihomo YAML、仅 proxies 的 YAML、V2Ray/Base64 URI 列表、本地配置文件；不支持的内容明确报错，永不静默丢弃
+- 原生 Mihomo `proxy-groups` 解析为结构化存储；成员按稳定的节点身份解析（渲染名称按节点唯一），永不静默重绑到另一个订阅中同名的节点
+- 完整配置管理：原始工件在把凭据剥离进 Vault 后存储；Stage 6 记录一份风险设置的安全报告（allow-lan、外部监听/控制器、控制器无密钥、TUN、外部 DNS 监听）——安全默认值本身（仅 localhost 的监听/DNS/控制器、控制器密钥、TUN 关闭、allow-lan 关闭）原计划在 Stage 7 渲染可运行配置时强制执行；Stage 7 此后已取消，因此该强制执行不再属于产品计划
 
-## Stage 6C / PR #9 — Product scope cleanup (project-owner decision, 2026-11-15)
+## Stage 6C / PR #9——产品范围清理（项目负责人决定，2026-11-15）
 
-PR #9 no longer delivers a proxy feature. By the project owner's decision it now removes one:
+PR #9 不再交付代理功能。根据项目负责人的决定，它改为移除一项功能：
 
-- **Removed**: basic proxy server management (page, `ProxyService`, bindings); subscription management and config import (subscription UI, `SubscriptionService`, the SSRF-guarded fetcher including the Fake-IP fallback, `internal/mihomoimport`, local YAML import); the unified 「代理配置」 page (cards, node list, group views); and the Mihomo core runtime (`internal/mihomocore`, `CoreService`, settings kernel section, CI bundling — the build artifact is the executable only; the app does not download, install or start a core).
-- **Sidebar fixed at eight entries**: 总览、浏览器实例、代理配置、浏览器内核、书签管理、多开同步、数据管理、系统设置. 「代理配置」 opens a placeholder page that only states the feature is not yet open.
-- **Data management**: logs, operation audit and diagnostics (formerly the standalone 「诊断」 entry) are unified under 「数据管理」, which also hosts the data overview and the (not yet open) backup & restore area. The fault report no longer contains any core, subscription or proxy fields.
-- **Data protection**: migrations 0001–0009 are untouched; no table, column or row was deleted; the vault file and entries are preserved and still opened at startup; existing instances and profiles are unaffected. The historical proxy/subscription/config tables remain in the schema and in `internal/model`; the `internal/store` layer over them was converged to read-only vault reference queries (no create/update/delete methods remain).
-- **Final review round**: the instance page's proxy column, form selector and `InstanceService.ListProxies` were removed as well — instance creation always writes `proxy_id` NULL and updates preserve a historical row's stored `proxy_id` verbatim, so no code path can create or change an instance proxy binding, while historical bindings stay readable as data.
-- **Current focus** (owner's phased route): (1) Chromium kernel download/install/version management, real instance launch/stop with isolated profiles and per-instance CDP ports, 3–5 instances verified on Windows 11; (2) bookmarks, browser basics, multi-window synchronization; (3) future re-evaluation of proxy capability; (4) in-app update, then full backup & restore (Stage 12, last).
+- **已移除**：基础代理服务器管理（页面、`ProxyService`、bindings）；订阅管理与配置导入（订阅界面、`SubscriptionService`、带 SSRF 防护的抓取器（含 Fake-IP 回退）、`internal/mihomoimport`、本地 YAML 导入）；统一的「代理配置」页面（卡片、节点列表、分组视图）；以及 Mihomo 核心运行时（`internal/mihomocore`、`CoreService`、设置中的内核小节、CI 打包——构建产物只有可执行文件；应用不下载、不安装、不启动任何核心）。
+- **侧边栏固定为八项**：总览、浏览器实例、代理配置、浏览器内核、书签管理、多开同步、数据管理、系统设置。「代理配置」打开一个占位页面，仅说明该功能暂未开放。
+- **数据管理**：日志、操作审计与诊断（原独立的「诊断」入口）统一归入「数据管理」，该页同时承载数据概览与（尚未开放的）备份与恢复区域。故障报告不再包含任何核心、订阅或代理字段。
+- **数据保护**：migration 0001–0009 未改动；没有删除任何表、列或行；Vault 文件与条目保留，启动时仍会打开；已有实例与 Profile 不受影响。历史代理/订阅/配置表保留在 schema 与 `internal/model` 中；其上的 `internal/store` 层已收敛为只读的 Vault 引用查询（不再有 create/update/delete 方法）。
+- **最终评审轮**：实例页面的代理列、表单选择器与 `InstanceService.ListProxies` 也一并移除——实例创建总是写入 `proxy_id` NULL，更新则逐字保留历史行中已存的 `proxy_id`，因此没有任何代码路径能创建或改变实例的代理绑定，而历史绑定作为数据仍可读。
+- **当前重点**（负责人的分阶段路线）：（1）Chromium 内核下载/安装/版本管理、实例真实启动/停止与隔离 Profile、在 Windows 11 上验证 3–5 个实例（CDP 接入在 Stage 9C）；（2）书签、浏览器基础功能、多窗口同步；（3）未来重新评估代理能力；（4）程序内更新，然后是完整备份与恢复（Stage 12，最后）。
 
-## Stage 7 — (cancelled)
+## Stage 7——（已取消）
 
-Mihomo core integration and run modes were cancelled together with the proxy product scope in the PR #9 cleanup. Proxy capability may be re-evaluated in a future phase; nothing in the current code starts, bundles or manages a proxy core.
+Mihomo 核心集成与运行模式已在 PR #9 清理中随代理产品范围一并取消。代理能力可能在未来某个阶段重新评估；当前代码不启动、不打包、不管理任何代理核心。
 
-## Stage 8 — Rule management (cancelled)
+## Stage 8——规则管理（已取消）
 
-Cancelled in the PR #9 scope cleanup, together with the proxy scope it depended on: rule sources only have meaning on top of a proxy runtime. Whether proxy capability — and with it any rule management — is ever reintroduced will be evaluated separately in the future; it is not part of the current plan.
+在 PR #9 范围清理中随其所依赖的代理范围一并取消：规则来源只有建立在代理运行时之上才有意义。代理能力——以及随之而来的任何规则管理——是否重新引入，将在未来单独评估；它不属于当前计划。
 
-## Stage 9 — Browser kernels and real instance launch
+## Stage 9——浏览器内核与实例真实启动
 
-- Chromium kernel download, installation and version management (verified downloads, `kernels` table)
-- Real browser instance start and stop, with process lifecycle management
-- Independent per-instance profiles: Cookie, Local Storage and cache isolation; a user data directory is never shared between running instances
-- An independent localhost CDP port per instance
-- Changing one instance never affects others
-- Bookmark management delivered with this stage
-- No proxy wiring: instances no longer expose any proxy binding in the UI or service API (a historical `proxy_id` value stored on old rows is preserved as data only)
+- Chromium 内核下载、安装与版本管理（经验证的下载、`kernels` 表）
+- 浏览器实例的真实启动与停止，含进程生命周期管理
+- 每实例独立的 Profile：Cookie、Local Storage 与 Cache 隔离；用户数据目录永不在运行中的实例之间共享
+- 每实例一个独立的 localhost CDP 端口（在 Stage 9C 接入）
+- 修改一个实例永不影响其他实例
+- 书签管理随本阶段交付（在 Stage 9C 接入前端）
+- 无代理接线：实例在界面与服务 API 中不再暴露任何代理绑定（旧行中存的历史 `proxy_id` 值仅作为数据保留）
 
-Stage 9 is delivered in parts:
+Stage 9 分部分交付：
 
-- **Stage 9A — manual browser registration and kernel management** (in PR #10): DeBrowser does **not** detect browsers automatically — no registry scanning, no disk scanning, no auto-discovery of any kind. The user adds a browser explicitly, in one of two ways. (A) Manual registration is a **pure path registration**: the user picks any program executable in the file picker and DeBrowser stores only its path and a display name (migration 0011, reshaped by migration 0012 `external_browsers`) so it survives restarts. There is NO identity, product, version, signature or publisher check on the chosen file, and it does not have to be Chrome or Brave. Registered programs are never copied, modified, uninstalled, deleted or launched by DeBrowser in this stage, their profiles are never read, and removing a registration deletes only the database row; a path can be re-selected at any time. (B) Managed kernels: downloading a DeBrowser-managed Chromium is optional, never a first-run prerequisite: managed builds come only from the official Chrome for Testing Stable metadata (HTTPS + host whitelist, per-hop redirect validation), are verified (ZIP structure, version match, Authenticode/Google LLC) and installed atomically under `kernels/<version>` (migration 0010 `kernels` table, managed kernels only), with guarded deletion. No browser is launched in 9A.
-- **Stage 9B — real instance launch** (next): real browser start/stop and process lifecycle, per-instance profile creation and isolation, per-instance CDP ports.
-- **Stage 9C — bookmarks** (after 9B): bookmark frontend wiring on the existing store CRUD.
+- **Stage 9A——浏览器手动登记与内核管理**（在 PR #10 中）：DeBrowser **不**自动检测浏览器——不扫描注册表、不扫描磁盘、没有任何自动发现。用户只能通过以下两种方式之一明确添加浏览器。（A）手动登记是**纯路径登记**：用户在文件选择器中任选一个程序可执行文件，DeBrowser 只保存其路径和显示名（migration 0011，经 migration 0012 重塑为 `external_browsers`），使其跨重启保留。对所选文件**不做**任何身份、产品、版本、签名或发布者检查，也不要求它必须是 Chrome 或 Brave。被登记的程序在本阶段不会被 DeBrowser 复制、修改、卸载、删除或启动，其 Profile 永不被读取，移除登记只删除数据库行；路径可以随时重新选择。（B）托管内核：下载 DeBrowser 托管的 Chromium 是可选项，永不是首次运行的前提：托管构建只来自官方 Chrome for Testing Stable 元数据（HTTPS + 主机白名单、逐跳重定向校验），经验证（ZIP 结构、版本匹配、Authenticode/Google LLC）后原子安装到 `kernels/<version>`（migration 0010 的 `kernels` 表，仅托管内核），并有受守卫的删除。9A 不启动任何浏览器。
+- **Stage 9B——实例真实启动**（下一阶段）：浏览器真实启动/停止与进程生命周期管理、每实例 Profile 的实际创建与隔离。
+- **Stage 9C——CDP 与书签接入**（在 9B 之后）：为每实例接入 localhost CDP 端口；在既有 store CRUD 之上完成书签前端接入。
 
-## Stage 10 — Multi-window synchronization
+## Stage 10——多窗口同步
 
-- Synchronized actions across multiple running instances, with an explicit synchronization scope, failure handling and instance-isolation boundaries
+- 多个运行中实例之间的同步操作，带明确的同步范围、失败处理与实例隔离边界
 
-## Stage 11 — In-app update and release
+## Stage 11——程序内更新与发布
 
-- In-app update via GitHub Releases only after a code-signing / trusted release-signing solution exists (until then, manual downloads from GitHub Releases); updates verify downloads, preserve all portable data directories, and roll back on failure
+- 仅在代码签名 / 可信发布签名方案就绪后才提供经 GitHub Releases 的程序内更新（在此之前从 GitHub Releases 手动下载）；更新要验证下载内容、保留全部便携数据目录，并在失败时回滚
 
-## Stage 12 — Full backup and restore (final stage)
+## Stage 12——完整备份与恢复（最终阶段）
 
-Backup & restore is deliberately the last functional stage: it must cover the complete user-data system in its final form (instances, kernels, bookmarks, multi-window state, update state). Fixing a full backup format before those exist would force constant format extensions, so this stage starts with an inventory of everything the finished application persists.
+备份与恢复有意放在最后一个功能阶段：它必须以最终形态覆盖完整的用户数据体系（实例、内核、书签、多窗口状态、更新状态）。在这些内容存在之前就固定一套完整的备份格式，只会迫使格式不断扩展，因此本阶段从盘点成品应用所持久化的全部内容开始。
 
-- User-created `.dbak` backup packages (manifest + per-file SHA-256), saveable outside the application folder; the backup format carries its OWN format version, independent of the application version, with compatibility/conversion for historical backup formats
-- Independent backup password (PBKDF2-HMAC-SHA256 from the Go standard library + AES-256-GCM) so backups restore across machines, Windows users and application versions — DPAPI alone is not the cross-machine mechanism
-- An explicit inventory decides what is backed up versus what is re-downloaded or rebuilt — never a blind copy of the whole program folder
-- Restore validates the complete backup in a staging area before any current data is replaced; a failed restore leaves current data untouched
-- Backup export, import and restore live here as a standalone feature — they are not part of the startup flow, and no backup/restore user feature is added in Stages 5A–11. (The pre-migration `VACUUM INTO` snapshots, integrity checks and vault mechanisms in the data layer are low-level safety facilities, not this feature.)
+- 用户创建的 `.dbak` 备份包（清单 + 逐文件 SHA-256），可保存到应用文件夹之外；备份格式带有它**自己**的格式版本，独立于应用版本，并为历史备份格式提供兼容/转换
+- 独立备份口令（Go 标准库的 PBKDF2-HMAC-SHA256 + AES-256-GCM），使备份能跨机器、跨 Windows 用户、跨应用版本恢复——DPAPI 本身不是跨机器机制
+- 用一份明确的清单决定哪些内容备份、哪些重新下载或重建——永不盲目复制整个程序文件夹
+- 恢复先在暂存区校验完整备份，之后才替换任何当前数据；恢复失败时当前数据不受影响
+- 备份导出、导入与恢复作为独立功能在本阶段交付——它们不属于启动流程，Stage 5A–11 不新增任何备份/恢复用户功能。（数据层中迁移前的 `VACUUM INTO` 快照、完整性检查与 Vault 机制是底层安全设施，不属于本功能。）
