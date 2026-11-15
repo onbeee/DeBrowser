@@ -20,11 +20,8 @@ export type {
     DiagnosticsView,
     ExportResult,
     ExportSummary,
-    InstallProgress,
-    KernelView,
     LogCapacityView,
     LogExportInfo,
-    StableVersionView,
     Status,
     UpdateInstanceInput
 } from "./models.js";

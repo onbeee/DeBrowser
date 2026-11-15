@@ -12,6 +12,15 @@ export interface Instance {
     "kernelId": string;
     "kernelName": string;
     "kernelVersion": string;
+
+    /**
+     * KernelExecutablePath is not a database column: the service
+     * resolves it live from the external_browsers registration that
+     * KernelID references, so a registration path change is always
+     * reflected. Empty when the instance has no associated
+     * registration (or the registration no longer exists).
+     */
+    "kernelExecutablePath": string;
     "userDataDir": string;
     "proxyId"?: string | null;
     "proxyListenPort"?: number | null;

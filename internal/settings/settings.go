@@ -40,7 +40,7 @@ type Settings struct {
 
 // Default returns the first-run settings: Simplified Chinese, dark.
 func Default() Settings {
-	return Settings{Language: LanguageZhCN, Theme: ThemeDark}
+	return Settings{Language: LanguageZhCN, Theme: ThemeLight}
 }
 
 // Log capacity bounds mirrored from internal/logging (kept as

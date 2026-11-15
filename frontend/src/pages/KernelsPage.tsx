@@ -1,73 +1,33 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Download,
-  FolderOpen,
-  Loader2,
-  RefreshCw,
-  Trash2,
-  XCircle,
-} from "lucide-react";
-import { Events } from "@wailsio/runtime";
+import { AlertTriangle, AppWindow, CheckCircle2, FolderOpen, Loader2, Plus, Trash2 } from "lucide-react";
 import {
   BrowserService,
   type BrowserView,
-  type InstallProgress,
-  type KernelView,
-  type StableVersionView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
-import { KernelInstallProgress } from "../../bindings/events";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// Browser kernels page (Stage 9A). DeBrowser never scans the
-// computer for browsers. Section A lists the programs the user
-// added BY HAND — pure path registrations: DeBrowser performs no
-// identity, signature or publisher check on them and shows no
-// verification state. Section B lists the Chromium kernels
-// DeBrowser manages itself, downloaded from Google's official
-// channel only when the user explicitly asks. Nothing on this
-// page detects, scans or discovers anything automatically.
-
-const kernelStatusLabels: Record<string, string> = {
-  ready: "可用",
-  verification_failed: "验证失败",
-  missing: "文件缺失",
-};
-
-const phaseLabels: Record<string, string> = {
-  downloading: "正在下载",
-  extracting: "正在解压",
-  verifying: "正在验证",
-  installing: "正在安装",
-  done: "安装完成",
-  failed: "安装失败",
-};
-
+// 浏览器内核页面：布局与「浏览器实例」页面一致（顶部说明 +
+// 主按钮、下方统一列表）。登记的内核供创建浏览器实例时选择。
+// DeBrowser 不会自动扫描、验证或修改电脑中已有的浏览器；
+// 用户手动选择的程序只登记路径（纯路径登记），不做任何文件
+// 检查，也不启动所选程序。DeBrowser 独立内核的下载与管理
+// 功能已按产品决定取消，本页面没有任何下载、安装或验证入口。
 export default function KernelsPage() {
-  const [manual, setManual] = useState<BrowserView[]>([]);
-  const [kernels, setKernels] = useState<KernelView[]>([]);
-  const [stable, setStable] = useState<StableVersionView | null>(null);
+  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [progress, setProgress] = useState<InstallProgress | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
-      const [browsers, managed] = await Promise.all([
-        BrowserService.ListBrowsers(),
-        BrowserService.ListManagedKernels(),
-      ]);
-      setManual((browsers ?? []).filter((b) => b.source === "manual"));
-      setKernels(managed ?? []);
+      const list = await BrowserService.ListBrowsers();
+      setBrowsers(list ?? []);
       setError(null);
     } catch (e) {
       setError(errText(e));
@@ -80,21 +40,10 @@ export default function KernelsPage() {
     void reload();
   }, [reload]);
 
-  useEffect(() => {
-    const off = Events.On(KernelInstallProgress, (ev) => {
-      const data = (ev as { data?: InstallProgress }).data;
-      if (data) setProgress(data);
-    });
-    return () => {
-      if (typeof off === "function") off();
-    };
-  }, []);
-
   // run executes one user operation: it generates the operation
   // ID the backend records under, passes it to the operation, and
   // afterwards records the exact feedback shown to the user under
-  // the same ID. action identifies the operation in the records;
-  // read-only queries (action "") are not recorded as operations.
+  // the same ID.
   const run = async (
     key: string,
     action: string,
@@ -148,111 +97,67 @@ export default function KernelsPage() {
       return msg;
     });
 
-  const fetchStable = () =>
-    run("stable", "", async () => {
-      setStable(await BrowserService.GetOfficialStableVersion());
-    });
-
-  const install = () =>
-    run("install", "kernel.install", async (opId) => {
-      setProgress(null);
-      const k = await BrowserService.InstallManagedKernel(opId);
-      const msg = `已安装独立内核：${k.version}`;
-      setNotice(msg);
-      await reload();
-      return msg;
-    });
-
-  const verifyKernel = (k: KernelView) =>
-    run(`verify-k-${k.id}`, "kernel.verify", async (opId) => {
-      const v = await BrowserService.VerifyManagedKernel(opId, k.id);
-      const msg = `内核 ${v.version} 状态：${kernelStatusLabels[v.status] ?? v.status}`;
-      setNotice(msg);
-      await reload();
-      return msg;
-    });
-
-  const deleteKernel = (k: KernelView) =>
-    run(`delete-k-${k.id}`, "kernel.delete", async (opId) => {
-      await BrowserService.DeleteManagedKernel(opId, k.id);
-      setConfirmDelete(null);
-      const msg = `已删除独立内核：${k.version}`;
-      setNotice(msg);
-      await reload();
-      return msg;
-    });
-
-  const stableInstalled = stable != null && kernels.some((k) => k.version === stable.version);
+  const btnSecondary =
+    "inline-flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 text-sm text-(--text-main) transition hover:bg-(--hover-bg) disabled:opacity-50";
+  const btnDanger =
+    "inline-flex h-9 items-center gap-1.5 rounded-md bg-(--danger) px-3 text-sm font-medium text-(--danger-contrast) transition hover:opacity-90 disabled:opacity-50";
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">浏览器内核</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          DeBrowser 不会自动扫描电脑中的浏览器。你可以手动添加浏览器程序，也可以下载 DeBrowser 独立管理的
-          Chromium。
-        </p>
+    <div className="mx-auto max-w-5xl px-6 py-6">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-(--text-dim)">登记本机浏览器程序，供创建浏览器实例时选择。</p>
+        <button
+          type="button"
+          onClick={addManual}
+          disabled={busy != null}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
+        >
+          {busy === "add-manual" ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+          添加内核
+        </button>
       </div>
 
       {error && (
         <div
           role="alert"
-          className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+          className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)"
         >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
       )}
       {notice && (
-        <div className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--border) bg-(--accent-soft) px-3 py-2 text-sm text-(--text-main)">
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-(--ok)" />
           <span>{notice}</span>
         </div>
       )}
 
-      {/* A. Manually added browsers */}
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">已添加的浏览器</h2>
-          <button
-            type="button"
-            onClick={addManual}
-            disabled={busy != null}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-          >
-            {busy === "add-manual" ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            ) : (
-              <FolderOpen className="h-4 w-4" aria-hidden />
-            )}
-            手动添加浏览器
-          </button>
-        </div>
-
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          手动选择电脑中的浏览器程序，将其路径添加到 DeBrowser。DeBrowser 不会自动扫描或修改电脑中已有的浏览器。
-        </p>
-
+      <div className="mt-5 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (
-          <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">正在加载…</p>
-        ) : manual.length === 0 ? (
-          <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">
-            尚未添加浏览器。点击下方按钮，手动选择浏览器程序。
-          </p>
+          <p className="px-4 py-10 text-center text-sm text-(--text-faint)">加载中…</p>
+        ) : browsers.length === 0 ? (
+          <div className="flex flex-col items-center px-4 py-12 text-center">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-(--hover-bg) text-(--text-faint)">
+              <AppWindow size={22} />
+            </span>
+            <p className="mt-3 text-sm text-(--text-dim)">尚未登记浏览器内核</p>
+            <p className="mt-1 text-xs text-(--text-faint)">点击右上角「添加内核」，手动选择电脑中的浏览器程序。</p>
+          </div>
         ) : (
-          <ul className="mt-4 flex flex-col divide-y divide-zinc-100 dark:divide-zinc-800">
-            {manual.map((b) => (
-              <li key={b.id} className="flex flex-col gap-2 py-3">
+          <ul className="divide-y divide-(--border)">
+            {browsers.map((b) => (
+              <li key={b.id} className="flex flex-col gap-2 px-4 py-3 hover:bg-(--hover-bg)">
+                <span className="text-sm font-medium">{b.name}</span>
+                <span className="break-all font-mono text-xs text-(--text-faint)" title={b.executablePath}>
+                  {b.executablePath}
+                </span>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-zinc-900 dark:text-zinc-50">{b.name}</span>
-                </div>
-                <div className="break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">{b.executablePath}</div>
-                <div className="flex gap-2">
                   <button
                     type="button"
                     onClick={() => reselectPath(b)}
                     disabled={busy != null}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                    className={btnSecondary}
                   >
                     {busy === `reselect-${b.id}` ? (
                       <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -267,7 +172,7 @@ export default function KernelsPage() {
                         type="button"
                         onClick={() => removeRegistration(b)}
                         disabled={busy != null}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-50"
+                        className={btnDanger}
                       >
                         {busy === `remove-${b.id}` ? (
                           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -279,11 +184,11 @@ export default function KernelsPage() {
                       <button
                         type="button"
                         onClick={() => setConfirmRemove(null)}
-                        className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                        className={btnSecondary}
                       >
                         取消
                       </button>
-                      <span className="self-center text-xs text-zinc-500 dark:text-zinc-400">
+                      <span className="self-center text-xs text-(--text-faint)">
                         只删除 DeBrowser 中的登记记录，不会删除或修改浏览器本身。
                       </span>
                     </>
@@ -292,7 +197,7 @@ export default function KernelsPage() {
                       type="button"
                       onClick={() => setConfirmRemove(b.id)}
                       disabled={busy != null}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                      className={btnSecondary}
                     >
                       <Trash2 className="h-4 w-4" aria-hidden />
                       移除登记
@@ -303,141 +208,7 @@ export default function KernelsPage() {
             ))}
           </ul>
         )}
-      </section>
-
-      {/* B. DeBrowser-managed Chromium kernels */}
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">DeBrowser 独立内核</h2>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          独立内核由 DeBrowser 从 Google 官方渠道主动下载并管理，与手动添加的浏览器互不影响。
-        </p>
-
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={fetchStable}
-            disabled={busy != null}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-          >
-            {busy === "stable" ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            ) : (
-              <RefreshCw className="h-4 w-4" aria-hidden />
-            )}
-            查看官方 Stable 版本
-          </button>
-          {stable && (
-            <span className="text-sm text-zinc-600 dark:text-zinc-300">
-              官方 Stable：{stable.version}（{stable.platform}）
-              {stableInstalled ? " · 已安装" : ""}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={install}
-            disabled={busy != null || stableInstalled}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-          >
-            {busy === "install" ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            ) : (
-              <Download className="h-4 w-4" aria-hidden />
-            )}
-            下载并安装
-          </button>
-        </div>
-
-        {progress && busy === "install" && (
-          <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-300" role="status">
-            {phaseLabels[progress.phase] ?? progress.phase}
-            {progress.phase === "downloading" && progress.percent >= 0 ? ` ${progress.percent}%` : ""} ·{" "}
-            {progress.version}
-          </p>
-        )}
-
-        {loading ? (
-          <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">正在加载…</p>
-        ) : kernels.length === 0 ? (
-          <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">尚未安装独立内核。</p>
-        ) : (
-          <ul className="mt-4 flex flex-col divide-y divide-zinc-100 dark:divide-zinc-800">
-            {kernels.map((k) => (
-              <li key={k.id} className="flex flex-col gap-2 py-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-zinc-900 dark:text-zinc-50">Chromium {k.version}</span>
-                  <span className="text-sm text-zinc-500 dark:text-zinc-400">
-                    {k.channel} · {k.platform}
-                  </span>
-                  <span
-                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
-                      k.status === "ready"
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                        : "bg-red-500/10 text-red-600 dark:text-red-400"
-                    }`}
-                  >
-                    {k.status === "ready" ? (
-                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
-                    ) : (
-                      <XCircle className="h-3.5 w-3.5" aria-hidden />
-                    )}
-                    {kernelStatusLabels[k.status] ?? k.status}
-                  </span>
-                </div>
-                <div className="break-all font-mono text-xs text-zinc-500 dark:text-zinc-400">{k.absExecutablePath}</div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => verifyKernel(k)}
-                    disabled={busy != null}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                  >
-                    {busy === `verify-k-${k.id}` ? (
-                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                    ) : (
-                      <RefreshCw className="h-4 w-4" aria-hidden />
-                    )}
-                    重新验证
-                  </button>
-                  {confirmDelete === k.id ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => deleteKernel(k)}
-                        disabled={busy != null}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-50"
-                      >
-                        {busy === `delete-k-${k.id}` ? (
-                          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                        ) : (
-                          <Trash2 className="h-4 w-4" aria-hidden />
-                        )}
-                        确认删除
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDelete(null)}
-                        className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                      >
-                        取消
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setConfirmDelete(k.id)}
-                      disabled={busy != null}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden />
-                      删除内核
-                    </button>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      </div>
     </div>
   );
 }

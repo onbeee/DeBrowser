@@ -66,19 +66,25 @@ type Subscription struct {
 // Chromium profile). The profile contents live on disk under
 // UserDataDir and are never stored in SQLite.
 type Instance struct {
-	ID              string         `json:"id"`
-	Name            string         `json:"name"`
-	KernelID        string         `json:"kernelId"`
-	KernelName      string         `json:"kernelName"`
-	KernelVersion   string         `json:"kernelVersion"`
-	UserDataDir     string         `json:"userDataDir"`
-	ProxyID         *string        `json:"proxyId,omitempty"`
-	ProxyListenPort *int           `json:"proxyListenPort,omitempty"`
-	Status          InstanceStatus `json:"status"`
-	StartURL        string         `json:"startUrl"`
-	SortOrder       int            `json:"sortOrder"`
-	CreatedAt       string         `json:"createdAt"`
-	UpdatedAt       string         `json:"updatedAt"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	KernelID      string `json:"kernelId"`
+	KernelName    string `json:"kernelName"`
+	KernelVersion string `json:"kernelVersion"`
+	// KernelExecutablePath is not a database column: the service
+	// resolves it live from the external_browsers registration that
+	// KernelID references, so a registration path change is always
+	// reflected. Empty when the instance has no associated
+	// registration (or the registration no longer exists).
+	KernelExecutablePath string         `json:"kernelExecutablePath"`
+	UserDataDir          string         `json:"userDataDir"`
+	ProxyID              *string        `json:"proxyId,omitempty"`
+	ProxyListenPort      *int           `json:"proxyListenPort,omitempty"`
+	Status               InstanceStatus `json:"status"`
+	StartURL             string         `json:"startUrl"`
+	SortOrder            int            `json:"sortOrder"`
+	CreatedAt            string         `json:"createdAt"`
+	UpdatedAt            string         `json:"updatedAt"`
 }
 
 // MihomoConfig is one historically imported Mihomo configuration

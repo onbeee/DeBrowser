@@ -1,64 +1,24 @@
 package service
 
 import (
-	"archive/zip"
-	"bytes"
-	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/onbeee/DeBrowser/internal/browserprobe"
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
-	"github.com/onbeee/DeBrowser/internal/kernels"
 )
 
-// --- fakes ---------------------------------------------------------
-
-type fakeInspector struct {
-	versions      map[string]browserprobe.VersionInfo
-	sigs          map[string]browserprobe.Signature
-	kernelVersion string
-}
-
-func (f *fakeInspector) Exists(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular()
-}
-func (f *fakeInspector) VersionInfo(p string) (browserprobe.VersionInfo, error) {
-	if v, ok := f.versions[filepath.Clean(p)]; ok {
-		return v, nil
-	}
-	return browserprobe.VersionInfo{ProductName: "Chromium", FileVersion: f.kernelVersion}, nil
-}
-func (f *fakeInspector) Signature(p string) (browserprobe.Signature, error) {
-	if s, ok := f.sigs[filepath.Clean(p)]; ok {
-		return s, nil
-	}
-	return browserprobe.Signature{Status: "valid", Publisher: "Google LLC"}, nil
-}
-
-type fakeFetcher struct {
-	metadata []byte
-	zipBytes []byte
-}
-
-func (f *fakeFetcher) Get(context.Context, string) ([]byte, error) { return f.metadata, nil }
-func (f *fakeFetcher) Download(_ context.Context, _, dest string, _ int64, _ func(int64)) error {
-	return os.WriteFile(dest, f.zipBytes, 0o600)
-}
-
-const testMetadata = `{"channels":{"Stable":{"version":"142.0.7444.162","downloads":{"chrome":[{"platform":"win64","url":"https://storage.googleapis.com/chrome-for-testing-public/142.0.7444.162/win64/chrome-win64.zip"}]}}}}`
+// Manual-registration tests. The managed downloadable-kernel
+// feature (and its tests) was removed by product decision
+// (2026-11-15); what remains is the pure path registration.
 
 type browserFixture struct {
 	svc        *BrowserService
 	db         *database.DB
 	cfg        config.Config
-	insp       *fakeInspector
 	chromePath string
 	bravePath  string
 }
@@ -100,16 +60,6 @@ func testBrowserFixture(t *testing.T) *browserFixture {
 	fx.bravePath = filepath.Join(cfg.Layout.Root, "installed", "brave.exe")
 	writeExe(t, fx.chromePath)
 	writeExe(t, fx.bravePath)
-	fx.insp = &fakeInspector{
-		versions: map[string]browserprobe.VersionInfo{
-			fx.chromePath: {ProductName: "Google Chrome", FileVersion: "142.0.7444.162"},
-			fx.bravePath:  {ProductName: "Brave Browser", FileVersion: "1.73.91"},
-		},
-		sigs: map[string]browserprobe.Signature{
-			fx.bravePath: {Status: "valid", Publisher: "Brave Software, Inc."},
-		},
-		kernelVersion: "142.0.7444.162",
-	}
 	fx.svc = fx.newService()
 	return fx
 }
@@ -117,33 +67,8 @@ func testBrowserFixture(t *testing.T) *browserFixture {
 // newService builds a service over the same database — a second
 // call simulates an application restart.
 func (fx *browserFixture) newService() *BrowserService {
-	svc := NewBrowserService(fx.db, fx.cfg.Layout, slog.Default())
-	svc.manager = &kernels.Manager{
-		Fetcher:   &fakeFetcher{metadata: []byte(testMetadata), zipBytes: testZipForFixture()},
-		Inspector: fx.insp,
-	}
-	return svc
+	return NewBrowserService(fx.db, fx.cfg.Layout, slog.Default())
 }
-
-var fixtureZip []byte
-
-func testZipForFixture() []byte { return fixtureZip }
-
-func init() {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	for name, body := range map[string]string{
-		"chrome-win64/chrome.exe": "MZ",
-		"chrome-win64/icudtl.dat": "data",
-	} {
-		w, _ := zw.Create(name)
-		_, _ = w.Write([]byte(body))
-	}
-	_ = zw.Close()
-	fixtureZip = buf.Bytes()
-}
-
-// --- tests -----------------------------------------------------------
 
 func TestNoAutoDetection(t *testing.T) {
 	fx := testBrowserFixture(t)
@@ -171,9 +96,8 @@ func TestManualAddPersistsAcrossRestart(t *testing.T) {
 	if added.Source != "manual" || added.Name != "chrome" || added.ExecutablePath != fx.chromePath {
 		t.Fatalf("added = %+v", added)
 	}
-	if added.Kind != "" || added.Version != "" || added.SignatureStatus != "" || added.Publisher != "" || added.DetectionStatus != "" {
-		t.Fatalf("manual view must not carry verification data: %+v", added)
-	}
+	// (The view type itself carries no kind, version, signature
+	// or verification fields at all — there is nothing to check.)
 	// The browser file must NOT be copied into DeBrowser's folders.
 	if strings.Contains(added.ExecutablePath, fx.cfg.Layout.Kernels) || strings.Contains(added.ExecutablePath, fx.cfg.Layout.Data) {
 		t.Fatalf("browser path points inside DeBrowser data: %s", added.ExecutablePath)
@@ -323,127 +247,5 @@ func TestRemoveRegistrationKeepsBrowserFile(t *testing.T) {
 	}
 	if err := fx.svc.RemoveBrowserRegistration("", added.ID); err == nil {
 		t.Fatal("removing a missing registration must error")
-	}
-}
-
-func TestKernelLifecycleAndCrossProtection(t *testing.T) {
-	fx := testBrowserFixture(t)
-	stable, err := fx.svc.GetOfficialStableVersion()
-	if err != nil || stable.Version != "142.0.7444.162" {
-		t.Fatalf("stable = %+v, %v", stable, err)
-	}
-	installed, err := fx.svc.InstallManagedKernel("")
-	if err != nil {
-		t.Fatalf("InstallManagedKernel: %v", err)
-	}
-	if installed.Status != "ready" || !strings.HasPrefix(installed.InstallPath, "kernels") {
-		t.Fatalf("installed = %+v", installed)
-	}
-	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162", "chrome.exe")); err != nil {
-		t.Fatalf("kernel chrome.exe missing: %v", err)
-	}
-	if _, err := fx.svc.InstallManagedKernel(""); err == nil {
-		t.Fatal("duplicate install must fail")
-	}
-	// Cross-protection: a kernel is not a manual registration and
-	// a manual browser is not a kernel.
-	fx.svc.ExecutablePicker = func() (string, error) { return fx.chromePath, nil }
-	manual, err := fx.svc.AddBrowserManually("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fx.svc.RemoveBrowserRegistration("", installed.ID); err == nil {
-		t.Fatal("RemoveBrowserRegistration must refuse a kernel ID")
-	}
-	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162", "chrome.exe")); err != nil {
-		t.Fatalf("kernel was touched by registration removal: %v", err)
-	}
-	if err := fx.svc.DeleteManagedKernel("", manual.ID); err == nil {
-		t.Fatal("DeleteManagedKernel must refuse a manual browser ID")
-	}
-	if _, err := os.Stat(fx.chromePath); err != nil {
-		t.Fatalf("manual browser was touched by kernel deletion: %v", err)
-	}
-	// Unified list separates the two sources.
-	all, err := fx.svc.ListBrowsers()
-	if err != nil || len(all) != 2 {
-		t.Fatalf("ListBrowsers = %+v, %v", all, err)
-	}
-	sources := map[string]bool{}
-	for _, b := range all {
-		sources[b.Source] = true
-	}
-	if !sources["manual"] || !sources["managed"] {
-		t.Fatalf("sources = %v, want manual+managed", sources)
-	}
-	// Verify + delete the kernel properly.
-	v, err := fx.svc.VerifyManagedKernel("", installed.ID)
-	if err != nil || v.Status != "ready" {
-		t.Fatalf("verify kernel = %+v, %v", v, err)
-	}
-	if err := fx.svc.DeleteManagedKernel("", installed.ID); err != nil {
-		t.Fatalf("DeleteManagedKernel: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162")); !os.IsNotExist(err) {
-		t.Fatal("kernel directory should be removed")
-	}
-	// Deleting the kernel must not affect the manual registration.
-	remaining, err := fx.svc.ListBrowsers()
-	if err != nil || len(remaining) != 1 || remaining[0].ID != manual.ID {
-		t.Fatalf("manual registration after kernel delete = %+v, %v", remaining, err)
-	}
-}
-
-// blockingFetcher simulates a stalled download: it returns only
-// when the caller's context ends.
-type blockingFetcher struct{ metadata []byte }
-
-func (f *blockingFetcher) Get(context.Context, string) ([]byte, error) { return f.metadata, nil }
-func (f *blockingFetcher) Download(ctx context.Context, _, _ string, _ int64, _ func(int64)) error {
-	<-ctx.Done()
-	return ctx.Err()
-}
-
-func TestInstallTimeoutCleansUp(t *testing.T) {
-	fx := testBrowserFixture(t)
-	fx.svc.manager.Fetcher = &blockingFetcher{metadata: []byte(testMetadata)}
-	fx.svc.installTimeout = 100 * time.Millisecond
-	if _, err := fx.svc.InstallManagedKernel(""); err == nil {
-		t.Fatal("install with a stalled download must fail on timeout")
-	}
-	// No half-installed kernel directory (including temp dirs) and
-	// no registration may survive the timeout.
-	entries, err := os.ReadDir(fx.cfg.Layout.Kernels)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		names := []string{}
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Fatalf("kernels dir not clean after timeout: %v", names)
-	}
-	managed, err := fx.svc.ListManagedKernels()
-	if err != nil || len(managed) != 0 {
-		t.Fatalf("ListManagedKernels after timeout = %+v, %v", managed, err)
-	}
-}
-
-func TestVerifyManagedKernelDetectsMissingFiles(t *testing.T) {
-	fx := testBrowserFixture(t)
-	installed, err := fx.svc.InstallManagedKernel("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162")); err != nil {
-		t.Fatal(err)
-	}
-	v, err := fx.svc.VerifyManagedKernel("", installed.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.Status != "missing" {
-		t.Fatalf("status = %q, want missing", v.Status)
 	}
 }

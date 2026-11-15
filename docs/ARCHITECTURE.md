@@ -38,7 +38,7 @@ DeBrowser 是模块化单体：一个 Go 二进制内嵌一个 React 前端，�
 `main.go` 是入口。启动顺序固定：
 
 1. `internal/config` 与 `internal/paths` 从可执行文件所在目录（永不从工作目录）解析便携布局，创建全部目录并探测应用根目录是否可写——只读位置会以明确错误中止启动；不回退到 `%APPDATA%`。启动是直接的：首次启动创建并初始化的目录与文件，与已有安装完全相同——没有欢迎页或选择页。
-2. `internal/logging` 在 `data/logs` 下打开分类结构化日志（Stage 5B，见下方「日志与诊断」）——在数据库与服务之前打开，在关闭时最后关闭。
+2. `internal/logging` 在 `data/logs` 下打开分类结构化日志（Stage 5B，见下方「日志」）——在数据库与服务之前打开，在关闭时最后关闭。
 2b. `internal/singleinstance` 取得按安装划分的锁 `data/app.lock`（Stage 3），它是操作系统级文件锁——Unix 上是 `flock`，Windows 上是 `LockFileEx`。操作系统是唯一的仲裁者：只有一个进程能持有它，竞争者永不删除或重建对方的锁文件（没有「先检查再删除」的竞态），且锁由操作系统在持有者以任何方式退出（正常退出、崩溃、强制结束、断电）时自动释放，因此不存在陈旧锁。该文件仅出于信息目的记录持有者的 PID。对同一便携文件夹的第二次启动得到 AlreadyRunning，写入一个激活信号（`data/activate.request`）请已运行的实例聚焦其窗口，然后在不触碰数据库的情况下退出。其他便携文件夹使用其他锁文件，互不影响。
 3. 没有外部数据迁移步骤：DeBrowser 永不从 `%APPDATA%`、`%LOCALAPPDATA%` 或任何其他位置扫描、检测或导入数据。Stage 1 的 Roaming 自动迁移（`internal/migration`）已在 Stage 5A 移除；唯一存在的迁移是第 4 步的数据库内 SQLite schema 迁移。
 4. `internal/database` 打开 SQLite（WAL 模式、`synchronous=FULL`、外键开启）并以事务方式应用待执行的迁移；升级已有数据库时，先把经验证的 `VACUUM INTO` 备份写入 `data\backups\`。核心数据访问经 `internal/store` 的 repositories 操作 `internal/model` 类型（Stage 2）。
@@ -52,23 +52,23 @@ AGENTS.md 的职责划分：Go 负责浏览器进程管理、实例生命周期�
 ### 前端 ↔ 后端通信
 
 - **Bindings**：注册的 Go 服务上导出的方法，通过静态生成的 TypeScript bindings 暴露在 `frontend/bindings/`（用 `wails3 generate bindings` 重新生成；永不手工编辑）。
-- **Events**：在 `main.go` 中注册的类型化自定义事件（`application.RegisterEvent`）。目前有两个：`app:status`（携带 `service.Status`，每 10 秒发出一次，也可通过 `AppService.GetStatus()` 按需获取）与 `kernel:install-progress`（Stage 9A，报告托管内核安装进度，见下方 Stage 9A 章节）。
+- **Events**：在 `main.go` 中注册的类型化自定义事件（`application.RegisterEvent`）。目前只有一个：`app:status`（携带 `service.Status`，每 10 秒发出一次，也可通过 `AppService.GetStatus()` 按需获取）。
 
 ## 前端（React）
 
-- `src/components/layout/`——侧边栏导航、顶部工具栏、底部状态栏。
-- `src/components/`——共享布局组件（侧边栏、顶栏、状态栏）。没有控制台面板。
+- `src/components/layout/`——侧边栏导航与顶部栏。顶部栏是页面标题的唯一所有者（各页面内部不再重复主标题）；应用没有底部固定状态栏。
+- `src/components/`——共享布局组件（侧边栏、顶栏）。没有控制台面板。
 - `src/pages/`——每个导航入口一个页面。尚未交付的模块渲染明确的「计划在 Stage N 交付」状态，而不是假数据。
 - `src/stores/`——Zustand store，保存界面状态（当前页面、后端状态、主题、会话日志行）。
 - 样式经 `@tailwindcss/vite` 插件使用 Tailwind CSS v4（`src/index.css`）。
 
-## 浏览器手动登记与内核管理（Stage 9A）
+## 浏览器手动登记（Stage 9A）
 
-Stage 9A 增加 `BrowserService`（bindings：`AddBrowserManually`、`UpdateBrowserPath`、`ListBrowsers`、`GetBrowserDetails`、`RemoveBrowserRegistration`、`GetOfficialStableVersion`、`InstallManagedKernel`、`ListManagedKernels`、`VerifyManagedKernel`、`DeleteManagedKernel`）。
+Stage 9A 增加 `BrowserService`（bindings：`AddBrowserManually`、`UpdateBrowserPath`、`ListBrowsers`、`GetBrowserDetails`、`RemoveBrowserRegistration`），支撑「浏览器内核」页面的唯一功能区域「自定内核」。
 
 - 手动登记是**纯路径登记**，完全不涉及任何验证包：用户在文件选择器中任选一个程序可执行文件，`BrowserService` 只把所选的绝对路径和一个从文件名派生的显示名存入 `external_browsers`（migration 0011，经 migration 0012 重塑）。DeBrowser 对用户所选文件**不做**任何身份、产品、版本、签名或发布者检查，不要求它必须是 Chrome 或 Brave，在本阶段永不启动它，也永不复制、修改、卸载或删除它、永不读取它的 Profile；重新选择路径会更新该行，移除登记只删除数据库行。
-- `internal/browserprobe` 只剩一个用途：在安装与重新验证时，验证 **DeBrowser 托管内核**的 `chrome.exe`（见 `internal/kernels` 条目）。它每次调用只验证一个文件，从不枚举任何东西。一个文件只有在以下条件满足后才报告为已验证：其版本资源以确切的官方 ProductName 标识产品（托管构建为 `Chromium`），且其 Authenticode 签名相对预期发布者（Google LLC）验证通过。发布者取自真正签署该文件的证书：签名者标识（Issuer + SerialNumber）从 PKCS#7 签名者信息（`CryptMsgGetParam`）读取，并与内嵌证书存储精确匹配，组织名用严格的 DER X.500 解析器从该证书的 Subject 读取——永不取存储中的第一张证书，也永不拆分渲染出的名称字符串。签名缺失、无效、发布者不匹配或签名者无法识别，都会得到带原因的明确「验证失败」结果，且该文件永不被执行。
-- `internal/kernels` 管理 DeBrowser 自己可选的 Chromium 构建，来源是官方 Chrome for Testing Stable 元数据。元数据端点是固定常量；下载只接受来自 Google 官方主机的 HTTPS，且每一跳重定向都重新校验，全程没有任何用户提供的 URL。该官方元数据不为这些构建发布 SHA-256，因此完整性依赖：HTTPS + 主机白名单 + 有界且路径安全的 ZIP 解压（文件数/大小上限、不允许绝对路径或 `..` 条目、不允许符号链接）+ 解压出的 `chrome.exe` 版本匹配 + Authenticode 验证（Google LLC）——不宣称任何不存在的哈希校验。安装是原子的（同一卷上的临时目录，全部检查通过后才重命名进 `kernels/<version>`；失败会清理）。只有托管内核被持久化（migration 0010，便携相对路径，按版本+平台唯一）；删除时先解析并重新验证真实目录严格位于 kernels 根之内，再删除文件、然后删除行，若文件已删而行删除失败则把该行标记为 `missing`。安装进度通过类型化事件 `kernel:install-progress` 报告给前端。
+- **实例与登记的关联**：创建/编辑实例时，用户可从已登记浏览器中选择一个关联（也可不选）。关联按登记的稳定 ID 建立（`browser_instances.kernel_id` 存 `external_browsers` 的 ID，`kernel_name` 存名称快照），不按名称关联——同名登记不会关联错误。实例的生效可执行路径不落库，由 `InstanceService` 按 ID 从登记记录实时解析为 `kernelExecutablePath` 返回，因此登记重新选择路径后，关联实例立即使用新路径。编辑实例时选择空项会清除已有关联；而关联功能之前以自由文本记录的内核名称/版本（`kernel_id` 为空的历史实例）在编辑时原样保留，不会被无关编辑静默清除。被实例引用的登记禁止移除（服务先计数引用并明确报错，不级联删除实例）。关联不引入任何文件检查：登记与关联全程不查存在性、身份、版本、签名或发布者，也不启动任何程序；实例真实启动仍属 Stage 9B。
+- **没有独立内核下载管理功能**：DeBrowser 主动下载、安装、验证、管理独立 Chromium 的功能已按产品决定取消（PR #11）。曾经支撑该功能的 `internal/kernels`（下载/解压/安装）与 `internal/browserprobe`（Authenticode 签名与发布者验证）两个包、BrowserService 的托管内核接口以及 `kernel:install-progress` 事件均已删除。数据库中的 `kernels` 表（migration 0010）作为历史结构保留，既有数据库照常升级，但当前没有任何用户可操作的内核管理功能，store 也不再提供 kernels 的增删改查。
 
 Stage 9A 不启动任何浏览器进程；实例真实启动/停止与 Profile 实际创建在 Stage 9B 交付，CDP 接入在 Stage 9C 交付。
 
@@ -76,7 +76,7 @@ Stage 9A 不启动任何浏览器进程；实例真实启动/停止与 Profile �
 
 Stage 3 只交付了基础：实例元数据管理、`profiles/` 下每实例一个目录的独立 Profile 目录**布局规划**（路径记录在实例元数据中；目录本身目前不会在创建实例时实际生成），以及上文所述的 Profile 删除安全机制。Stage 3 **不**实现 Chromium 进程管理，也不实际启动浏览器——目前尚没有进程管理器。
 
-Stage 9 增加运行时部分：浏览器内核管理（9A，已交付）、托管 Chromium 进程与实例启动/停止（9B）、CDP 接入（9C）、独立的浏览器配置与运行时隔离。在最终形态下，每个浏览器实例拥有唯一 ID、位于 `profiles/` 下的独立用户数据目录、独立配置，以及它自己的托管 Chromium 进程。用户数据目录永不在运行中的实例之间共享，活动 Profile 永不在 Chromium 使用期间被复制。DeBrowser 不宣称指纹隔离，除非它被明确实现并通过测试。
+Stage 9 增加运行时部分：浏览器手动登记（9A，已交付）、浏览器进程与实例启动/停止（9B）、CDP 接入（9C）、独立的浏览器配置与运行时隔离。在最终形态下，每个浏览器实例拥有唯一 ID、位于 `profiles/` 下的独立用户数据目录、独立配置，以及它自己的浏览器进程。用户数据目录永不在运行中的实例之间共享，活动 Profile 永不在 Chromium 使用期间被复制。DeBrowser 不宣称指纹隔离，除非它被明确实现并通过测试。
 
 ## 凭据存储（Stage 4A，internal/secrets）
 
@@ -94,21 +94,21 @@ Stage 9 增加运行时部分：浏览器内核管理（9A，已交付）、托�
 
 代理管理、订阅导入、统一代理配置以及任何代理核心运行时已在 PR #9 清理中移出产品范围（项目负责人决定），不是当前或已排期的功能。「代理配置」侧边栏入口只是占位页面。代理能力是否重新引入将在未来单独评估；它不在路线图上。（为这种评估记录一条设计约束，以免丢失：经代理的实例只有在代理核心本身通过其控制器确认后才可视为「就绪」——成功与监听端口建立 TCP 连接不是充分证据——且未就绪的经代理实例必须失败关闭，永不回退到直连。当前代码中这些都不存在。）
 
-## 日志与诊断（Stage 5B 基础 + 统一自动记录系统，internal/logging）
+## 日志（Stage 5B 基础 + 统一自动记录系统，internal/logging）
 
 三条分类的 JSON Lines 流位于便携目录的 `data/logs/`，各自存放在按日期命名的文件中（`<category>-YYYY-MM-DD.log`，在 5 MB 时滚动到 `.002`、`.003`…… 分卷）：
 
 - **run**——运行记录（统一类别名 `runtime`）：应用生命周期、页面打开/离开、模块与后台循环运行事实，以及既有的 `*slog.Logger` 输出（经一个消毒守卫 handler）；保留 30 天。
-- **operation**——操作记录：用户发起的业务操作及其后台步骤与结果（实例创建/更新/删除、浏览器登记与内核管理、主题与容量设置、各类导出）；保留 90 天。
+- **operation**——操作记录：用户发起的业务操作及其后台步骤与结果（实例创建/更新/删除、浏览器登记、主题与容量设置、各类导出）；保留 90 天。
 - **error**——错误记录：由同一守卫 handler 从 run 流分流的错误级 slog 记录，以及每次失败操作的完整错误事件（错误代码、类别、详情、用户实际看到的提示、耗时）；保留 90 天。
 
 **统一事件模型**：结构化记录一律是统一事件（`internal/logging` 的 `Event`）：`event_id`、`timestamp`、`event_type`、`category`、`module`、`action`、`target_type` / `target_id`、`operation_id`、`parent_event_id`、`trigger`、`status`、`duration_ms`、`error_code` / `error_category` / `error_detail`、`user_message`、`metadata`。每次用户操作由前端生成唯一的 `operation_id`，作为业务绑定的第一个参数传入后端；后端以同一 ID 写下根事件（operation_start）、步骤事件（operation_step，经 `parent_event_id` 链接根事件或上一步）与终局事件（operation_result），前端再以同一 ID 补记用户实际看到的反馈（client_result），因此「用户操作 → 前端请求 → 后端执行 → 后台步骤 → 执行结果 → 用户提示」可以完整还原，不同操作永不共用 ID。失败时另在 error 流写一条完整错误事件，与操作事件是不同事件而非副本；「全部记录」是三条流的汇总视图，不额外复制数据。既有 slog 行与 5B 时期的审计行仍是各自流的合法成员，范围统计与导出按行内时间戳处理它们。
 
-**容量管理**：三条流共用**一个**用户可配置的总容量上限（不再有每类 MB 上限；天数保留期不变），默认 100 MB，保存在 `config/settings.json` 的 `logCapacityBytes`，数据管理页可修改（预设 30/50/100/200/500 MB、1 GB 或自定义）。已用/剩余容量一律按日志目录内文件的实际字节统计（不含导出的 ZIP）。达到上限时自动清理最早记录：先整文件删除已轮转文件（跨类别按日期最旧优先，永不删正在写的文件）；仍超出时再按行修剪最旧的当前文件——同一 `operation_id` 的记录成组删除，组内部分删除时保留该组最后一条（结果），且文件中最新的一条记录永不删除。修改容量后立即重新统计并在超出时立即清理；因文件锁定等原因达不到上限时明确报错，绝不假装成功，清理失败同时记录在案供诊断。
+**容量管理**：三条流共用**一个**用户可配置的总容量上限（不再有每类 MB 上限；天数保留期不变），默认 100 MB，保存在 `config/settings.json` 的 `logCapacityBytes`，数据管理页可修改（预设 30/50/100/200/500 MB、1 GB 或自定义）。已用/剩余容量一律按日志目录内文件的实际字节统计（不含导出的 ZIP）。达到上限时自动清理最早记录：先整文件删除已轮转文件（跨类别按日期最旧优先，永不删正在写的文件）；仍超出时再按行修剪最旧的当前文件——同一 `operation_id` 的记录成组删除，组内部分删除时保留该组最后一条（结果），且文件中最新的一条记录永不删除。修改容量后立即重新统计并在超出时立即清理；因文件锁定等原因达不到上限时明确报错，绝不假装成功，清理失败同时记录在案并在数据管理页提示。
 
 **可靠性与隐私**：记录写入与业务操作隔离——写入失败只累计计数（在数据管理页可见），永不使业务失败，也不会递归记录自身错误。事件落盘前统一清洗：凭据形 metadata 键直接丢弃，自由文本经与守卫 handler 相同的清洗（URL userinfo、key=value 密钥、长 token 串），密码、Token、Cookie、Vault 明文与 Profile 内容永不进入记录。守卫 handler 同样丢弃凭据命名的 slog 属性。
 
-**数据管理页与导出**：数据管理页的「日志」区域固定五行——全部记录 / 操作记录 / 错误记录 / 运行记录各一行（实际日志存储目录 + 导出按钮），第五行「存储容量」显示「上限 / 剩余」并提供修改入口（对话框内同时显示上限、已用、剩余与使用进度）；页面不提供记录查看、实时流或日志中心。四个导出各自打开导出设置：后端按当前实际保留的记录动态返回最早/最新日期，用户选择日期范围后生成 ZIP——`records/<类别>.jsonl`（主要记录）、`manifest.json`（导出类别、请求范围、实际最早/最新事件时间、主要与上下文的数量区分、逐文件 SHA-256）、`README.md`；导出错误（或操作）记录时，对方流中同 `operation_id` 的关联记录作为 `context/` 下的上下文文件一并导出并在 manifest 中明确区分，绝不冒充主要记录。原有的诊断导出与故障报告导出保持不变（`DiagnosticsService`）：ZIP 只含日志流与元数据文档。所有导出在归档前做路径脱敏与敏感性扫描、命中即中止（失败关闭），目标位置通过原生保存对话框选择（接线在 `internal/app`，使服务层保持无 GUI），归档先写临时文件再原子替换，导出元数据中不记录任何机器绝对路径。
+**数据管理页与导出**：数据管理页的「日志」区域固定五行——全部记录 / 操作记录 / 错误记录 / 运行记录各一行（实际日志文件名摘要——多文件时显示首个文件名加「另有 N 个文件」，悬停显示完整清单，无文件显示「暂无文件」—— + 实际日志存储目录 + 导出按钮），第五行「存储容量」显示「上限 / 剩余」并提供修改入口（对话框内同时显示上限、已用、剩余与使用进度）；页面不提供记录查看、实时流或日志中心。四个导出各自打开导出设置：后端按当前实际保留的记录动态返回最早/最新日期，用户选择日期范围后生成 ZIP——`records/<类别>.jsonl`（主要记录）、`manifest.json`（导出类别、请求范围、实际最早/最新事件时间、主要与上下文的数量区分、逐文件 SHA-256）、`README.md`；导出错误（或操作）记录时，对方流中同 `operation_id` 的关联记录作为 `context/` 下的上下文文件一并导出并在 manifest 中明确区分，绝不冒充主要记录。日志是唯一的记录系统：不存在独立的操作审计模块，曾经的诊断导出与故障报告导出已随数据管理页「诊断与分析」区域一并删除（PR #11）。所有导出在归档前做路径脱敏与敏感性扫描、命中即中止（失败关闭），目标位置通过原生保存对话框选择（接线在 `internal/app`，使服务层保持无 GUI），归档先写临时文件再原子替换，导出元数据中不记录任何机器绝对路径。
 
 ## 已移除的代理 / 订阅 / Mihomo 功能（PR #9 范围清理）
 
@@ -116,7 +116,7 @@ Stage 9 增加运行时部分：浏览器内核管理（9A，已交付）、托�
 
 数据兼容性被有意保留：历史表（`proxies`、`subscriptions`、`mihomo_configs`、`mihomo_proxy_groups`、`mihomo_proxy_group_members`）及其全部行保留在既有数据库中，migration 0001–0009 未改动，这些表的 `internal/model` 类型作为历史数据模型保留。store 层在最终评审轮收敛到最小兼容面：不再有任何代理/订阅/配置的 create、update 或 delete 方法——只有 Vault 引用查询（`SecretRefInUse`、`AllSecretRefs`）仍读取这些表，使受守卫的 Vault 清理继续识别历史凭据引用。实例记录把已存的 `proxy_id` 值作为数据保留，但它不再是绑定：实例页面不显示代理列或选择器，`InstanceService` 不暴露代理列表，创建总是写入 `proxy_id` NULL，更新逐字保留已存值。凭据 Vault 文件及其条目同样未被触碰。本次清理不删除任何用户数据。
 
-诊断故障报告在同一轮做了清理：它只携带通用的应用 / 数据库 / 实例摘要状态——没有核心状态或日志、没有订阅刷新状态、没有代理配置字段——并保持失败关闭的扫描与路径脱敏。
+诊断故障报告曾在同一轮做过字段清理；该导出本身连同「诊断与分析」区域已在 PR #11 中整体删除，当前唯一的导出是上文的分类日志导出。
 
 ## 安全注记
 

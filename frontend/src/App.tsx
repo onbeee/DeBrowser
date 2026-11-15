@@ -4,7 +4,6 @@ import { AppService } from "../bindings/github.com/onbeee/DeBrowser/internal/ser
 import { AppStatus } from "../bindings/events";
 import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
-import StatusBar from "./components/layout/StatusBar";
 import DataManagementPage from "./pages/DataManagementPage";
 import InstancesPage from "./pages/InstancesPage";
 import KernelsPage from "./pages/KernelsPage";
@@ -22,8 +21,8 @@ export default function App() {
   const setTheme = useAppStore((state) => state.setTheme);
   const log = useAppStore((state) => state.log);
 
-  // 静默加载一次后端状态（供底部状态栏显示连接状态）；不再提
-  // 供右上角常驻刷新入口，也不把状态刷新写进控制台（§9）。
+  // 静默加载一次后端状态（供总览、系统设置与数据管理页面显
+  // 示）；界面没有底部固定状态栏，连接异常由各页面就地提示。
   const refreshStatus = useCallback(() => {
     AppService.GetStatus()
       .then((status) => {
@@ -87,7 +86,6 @@ export default function App() {
             <PlannedPage page={page} />
           )}
         </main>
-        <StatusBar />
       </div>
     </div>
   );

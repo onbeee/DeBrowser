@@ -62,8 +62,8 @@ func TestSettingsDefaultsAndThemePersistence(t *testing.T) {
 	if got.Language != settings.LanguageZhCN {
 		t.Errorf("language = %q, want zh-CN", got.Language)
 	}
-	if got.Theme != settings.ThemeDark {
-		t.Errorf("theme = %q, want dark default", got.Theme)
+	if got.Theme != settings.ThemeLight {
+		t.Errorf("theme = %q, want light default", got.Theme)
 	}
 	saved, err := svc.SaveTheme("", settings.ThemeWarm)
 	if err != nil {
