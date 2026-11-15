@@ -3,6 +3,7 @@
 package browserprobe
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"unsafe"
@@ -29,6 +30,7 @@ var (
 	procCryptMsgGetParam    = crypt32DLL.NewProc("CryptMsgGetParam")
 	procCryptMsgClose       = crypt32DLL.NewProc("CryptMsgClose")
 	procCryptDecodeObjectEx = crypt32DLL.NewProc("CryptDecodeObjectEx")
+	procCertRDNValueToStr   = crypt32DLL.NewProc("CertRDNValueToStrW")
 
 	kernel32DLL   = windows.NewLazySystemDLL("kernel32.dll")
 	procLocalFree = kernel32DLL.NewProc("LocalFree")
@@ -275,22 +277,55 @@ func msgSignerID(hMsg windows.Handle) (issuer, serial []byte, err error) {
 	return blobBytes(head.issuer), blobBytes(head.serialNumber), nil
 }
 
+// cryptENoMoreFiles is CRYPT_E_NO_MORE_FILES: the documented
+// error CertEnumCertificatesInStore reports when enumeration is
+// complete. ERROR_NO_MORE_ITEMS (259) is accepted as well. Any
+// other error is unexpected and aborts verification — a partial
+// enumeration could hide a second certificate matching the signer
+// identifier and defeat the ambiguity check.
+const cryptENoMoreFiles = 0x8009200D
+
+func isEnumEnd(err error) bool {
+	if err == nil {
+		return true
+	}
+	var errno windows.Errno
+	if errors.As(err, &errno) {
+		return errno == windows.Errno(cryptENoMoreFiles) || errno == windows.ERROR_NO_MORE_ITEMS
+	}
+	return false
+}
+
 // storeCandidates enumerates the embedded certificate store into
-// matchable candidates with decoded subjects. Following the
-// CertEnumCertificatesInStore contract, each context is released
-// by passing it to the next call; the terminating call releases
-// the last one.
+// matchable candidates with decoded subjects, via enumCollect
+// (see signer.go for the fail-closed contract):
+//
+//   - Only the documented end-of-enumeration outcome completes
+//     the collection; any other Crypt32 error aborts it and the
+//     partial result is discarded.
+//   - Context ownership follows the CertEnumCertificatesInStore
+//     contract: the API consumes the previous context on every
+//     call, so the closure clears its pending pointer after each
+//     call; if converting the current certificate fails, that
+//     context has not been consumed yet and enumCollect releases
+//     it exactly once through the release callback.
 func storeCandidates(hStore windows.Handle) ([]certCandidate, error) {
-	var out []certCandidate
-	var prev *windows.CertContext
-	for {
-		cert, err := windows.CertEnumCertificatesInStore(hStore, prev)
-		if err != nil || cert == nil {
-			break
+	var pending *windows.CertContext
+	next := func() (*windows.CertContext, bool, error) {
+		cert, err := windows.CertEnumCertificatesInStore(hStore, pending)
+		pending = nil // consumed by the API in every outcome
+		if cert == nil {
+			if isEnumEnd(err) {
+				return nil, false, nil
+			}
+			return nil, false, fmt.Errorf("enumerate signature store failed: %w", err)
 		}
-		prev = cert
+		pending = cert
+		return cert, true, nil
+	}
+	convert := func(cert *windows.CertContext) (certCandidate, error) {
 		if cert.CertInfo == nil {
-			continue
+			return certCandidate{}, fmt.Errorf("certificate in signature store has no info block")
 		}
 		info := cert.CertInfo
 		cand := certCandidate{
@@ -303,10 +338,20 @@ func storeCandidates(hStore windows.Handle) ([]certCandidate, error) {
 		}
 		attrs, derr := decodeSubjectName(info.Subject.Data, info.Subject.Size)
 		if derr != nil {
-			return nil, derr
+			return certCandidate{}, derr
 		}
 		cand.Subject = attrs
-		out = append(out, cand)
+		return cand, nil
+	}
+	release := func(cert *windows.CertContext) {
+		if pending == cert {
+			pending = nil
+		}
+		_ = windows.CertFreeCertificateContext(cert)
+	}
+	out, err := enumCollect(next, convert, release)
+	if err != nil {
+		return nil, err
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("embedded signature store contains no certificates")
@@ -331,12 +376,42 @@ type certNameInfoRaw struct {
 	rgRDN *certRDNRaw
 }
 
+// rdnValueToString converts one RDN attribute value to a Unicode
+// string with CertRDNValueToStrW, which converts according to the
+// attribute's own dwValueType (PrintableString, UTF8String,
+// BMPString/UnicodeString, TeletexString, IA5String, …). No
+// encoding is assumed by this code and no length is guessed: the
+// buffer size comes from the API itself (first call). A failed
+// conversion is an error — callers fail closed.
+func rdnValueToString(valueType uint32, b dataBlob) (string, error) {
+	if b.cbData == 0 || b.pbData == nil {
+		return "", fmt.Errorf("empty RDN attribute value (type %d)", valueType)
+	}
+	n, _, _ := procCertRDNValueToStr.Call(
+		uintptr(valueType), uintptr(unsafe.Pointer(&b)), 0, 0)
+	if n == 0 {
+		return "", fmt.Errorf("CertRDNValueToStrW sizing failed for value type %d", valueType)
+	}
+	buf := make([]uint16, n)
+	m, _, _ := procCertRDNValueToStr.Call(
+		uintptr(valueType), uintptr(unsafe.Pointer(&b)),
+		uintptr(unsafe.Pointer(&buf[0])), n)
+	if m == 0 {
+		return "", fmt.Errorf("CertRDNValueToStrW failed for value type %d", valueType)
+	}
+	return windows.UTF16ToString(buf), nil
+}
+
 // decodeSubjectName decodes a DER X.509 name via CryptDecodeObjectEx
 // (X509_NAME) into individual attributes — the reliable X.500
 // attribute parsing path; no rendered-name string splitting is
-// involved, so values containing commas, quotes or '=' survive
-// verbatim. String attribute values are returned by Crypt32 in
-// UTF-16LE form.
+// involved. Each attribute VALUE is converted by CertRDNValueToStrW
+// according to its own value type (see rdnValueToString); any
+// conversion failure aborts the decode (fail closed). Binary value
+// types (1 = encoded blob, 2 = octet string) carry no text and are
+// recorded with an empty value — an organization attribute of a
+// binary type therefore yields an empty organization, which the
+// signer-matching layer rejects.
 func decodeSubjectName(data *byte, size uint32) ([]nameAttribute, error) {
 	if data == nil || size == 0 {
 		return nil, fmt.Errorf("empty certificate subject")
@@ -359,12 +434,12 @@ func decodeSubjectName(data *byte, size uint32) ([]nameAttribute, error) {
 		rawAttrs := unsafe.Slice(rdn.rgRDNAttr, rdn.cRDNAttr)
 		for _, ra := range rawAttrs {
 			attr := nameAttribute{OID: cString(ra.pszObjId)}
-			// Types 1 (encoded blob) and 2 (octet string) are
-			// binary, not text; every other RDN value type is a
-			// character string delivered as UTF-16LE.
-			if ra.dwValueType != 1 && ra.dwValueType != 2 && ra.value.cbData >= 2 {
-				u16 := unsafe.Slice((*uint16)(unsafe.Pointer(ra.value.pbData)), ra.value.cbData/2)
-				attr.Value = windows.UTF16ToString(u16)
+			if ra.dwValueType != 1 && ra.dwValueType != 2 {
+				v, verr := rdnValueToString(ra.dwValueType, ra.value)
+				if verr != nil {
+					return nil, verr
+				}
+				attr.Value = v
 			}
 			attrs = append(attrs, attr)
 		}

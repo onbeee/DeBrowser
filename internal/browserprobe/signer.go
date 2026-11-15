@@ -94,6 +94,45 @@ func selectSignerCert(issuer, serial []byte, cands []certCandidate) (certCandida
 	return *match, nil
 }
 
+// enumCollect drains a handle-based enumeration (the Windows
+// certificate store) into candidates, enforcing the fail-closed
+// enumeration contract:
+//
+//   - next returns (handle, true, nil) for each item, (zero, false,
+//     nil) ONLY on the documented normal end of enumeration, and a
+//     non-nil error for any unexpected failure.
+//   - An unexpected error aborts the whole collection and the
+//     partial result is DISCARDED: signer matching over an
+//     incomplete store could miss a second certificate with the
+//     same issuer+serial and defeat the ambiguity check.
+//   - Ownership: next consumes the previously returned handle when
+//     it is called again (the CertEnumCertificatesInStore
+//     contract). If convert fails on the current handle, that
+//     handle has NOT been consumed yet, so enumCollect releases it
+//     exactly once via release before returning the error.
+func enumCollect[H any](
+	next func() (handle H, hasItem bool, err error),
+	convert func(H) (certCandidate, error),
+	release func(H),
+) ([]certCandidate, error) {
+	var out []certCandidate
+	for {
+		h, has, err := next()
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			return out, nil
+		}
+		c, cerr := convert(h)
+		if cerr != nil {
+			release(h)
+			return nil, cerr
+		}
+		out = append(out, c)
+	}
+}
+
 // signerPublisherFromCandidates resolves the publisher (subject
 // O=) of the actual signer certificate. Any failure — unmatchable
 // signer, missing organization attribute — is an error: the

@@ -141,3 +141,115 @@ func TestSerialNumbersEqualTrailingZeros(t *testing.T) {
 		t.Fatal("different serials must not compare equal")
 	}
 }
+
+// --- enumeration contract (enumCollect) ---------------------------
+
+type fakeEnum struct {
+	items    []int
+	errAt    int // index at which next() reports an error; -1 = never
+	consumed map[int]bool
+	released map[int]bool
+	pending  int
+	hasPend  bool
+	calls    int
+}
+
+func newFakeEnum(items []int, errAt int) *fakeEnum {
+	return &fakeEnum{items: items, errAt: errAt, consumed: map[int]bool{}, released: map[int]bool{}}
+}
+
+// next models CertEnumCertificatesInStore ownership: calling it
+// consumes the previously returned handle.
+func (f *fakeEnum) next() (int, bool, error) {
+	if f.hasPend {
+		f.consumed[f.pending] = true
+		f.hasPend = false
+	}
+	idx := f.calls
+	f.calls++
+	if idx == f.errAt {
+		return 0, false, errFakeEnum
+	}
+	if idx >= len(f.items) {
+		return 0, false, nil // documented normal end
+	}
+	f.pending = f.items[idx]
+	f.hasPend = true
+	return f.pending, true, nil
+}
+
+func (f *fakeEnum) release(h int) {
+	f.released[h] = true
+	if f.hasPend && f.pending == h {
+		f.hasPend = false
+	}
+}
+
+var errFakeEnum = &fakeError{"enumeration exploded"}
+
+type fakeError struct{ s string }
+
+func (e *fakeError) Error() string { return e.s }
+
+func intCand(h int) (certCandidate, error) {
+	return certCandidate{Encoded: []byte{byte(h)}}, nil
+}
+
+func TestEnumCollectNormalEnd(t *testing.T) {
+	f := newFakeEnum([]int{1, 2, 3}, -1)
+	got, err := enumCollect(f.next, intCand, f.release)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("got %d candidates, err %v", len(got), err)
+	}
+	// Every handle accounted for exactly once: all three consumed
+	// by subsequent next() calls (including the terminating one),
+	// none released by enumCollect, none leaked.
+	for _, h := range []int{1, 2, 3} {
+		if !f.consumed[h] {
+			t.Fatalf("handle %d was never consumed", h)
+		}
+		if f.released[h] {
+			t.Fatalf("handle %d released on the success path", h)
+		}
+	}
+	if f.hasPend {
+		t.Fatal("a handle is still pending after normal end")
+	}
+}
+
+func TestEnumCollectUnexpectedErrorDiscardsPartial(t *testing.T) {
+	f := newFakeEnum([]int{1, 2, 3}, 2) // error when fetching the 3rd
+	got, err := enumCollect(f.next, intCand, f.release)
+	if err == nil {
+		t.Fatal("unexpected enumeration error must fail the collection")
+	}
+	if got != nil {
+		t.Fatalf("partial candidate set must be discarded, got %d", len(got))
+	}
+}
+
+func TestEnumCollectConvertFailureReleasesInFlight(t *testing.T) {
+	f := newFakeEnum([]int{1, 2, 3}, -1)
+	convert := func(h int) (certCandidate, error) {
+		if h == 2 {
+			return certCandidate{}, errFakeEnum
+		}
+		return intCand(h)
+	}
+	got, err := enumCollect(f.next, convert, f.release)
+	if err == nil || got != nil {
+		t.Fatalf("got %v, err %v — convert failure must abort with no result", got, err)
+	}
+	// Handle 1 was consumed by the second next() call; handle 2
+	// (in flight when convert failed) must be released exactly
+	// once by enumCollect; nothing may remain pending.
+	if !f.consumed[1] {
+		t.Fatal("handle 1 should have been consumed")
+	}
+	if !f.released[2] {
+		t.Fatal("in-flight handle 2 was not released on the early return")
+	}
+	if f.hasPend {
+		t.Fatal("a handle is still pending after the early return")
+	}
+}
