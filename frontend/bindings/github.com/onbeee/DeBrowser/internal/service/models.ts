@@ -59,8 +59,16 @@ export interface ClientEventInput {
 export interface CreateInstanceInput {
     "name": string;
     "startUrl": string;
-    "kernelName": string;
-    "kernelVersion": string;
+
+    /**
+     * BrowserID optionally associates the instance with one
+     * registered browser (external_browsers ID) chosen in the form.
+     * Empty means no association. The association is by stable ID,
+     * never by name; the instance stores the registration's ID and
+     * a display snapshot of its name, and the executable path is
+     * always resolved live from the registration.
+     */
+    "browserId": string;
     "userDataDir": string;
 }
 
@@ -178,7 +186,14 @@ export interface UpdateInstanceInput {
     "id": string;
     "name": string;
     "startUrl": string;
-    "kernelName": string;
-    "kernelVersion": string;
+
+    /**
+     * BrowserID is the form's registered-browser choice (see
+     * CreateInstanceInput). On an instance that already has an
+     * association, an empty BrowserID clears it; on an instance
+     * without one, the historical free-text kernel name/version
+     * recorded before associations existed are preserved verbatim.
+     */
+    "browserId": string;
     "sortOrder": number;
 }

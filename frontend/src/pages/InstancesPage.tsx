@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { AppWindow, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
-import { InstanceService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
+import {
+  BrowserService,
+  InstanceService,
+  type BrowserView,
+} from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
@@ -15,11 +19,15 @@ interface FormState {
   id?: string;
   name: string;
   startUrl: string;
-  kernelName: string;
-  kernelVersion: string;
+  // browserId is the ID of one registered browser (「浏览器内核」
+  // page) associated with the instance; "" means no association.
+  // The options come only from actual registrations — never from
+  // free text — so an association always resolves to a real
+  // registered path.
+  browserId: string;
 }
 
-const EMPTY_FORM: FormState = { name: "", startUrl: "", kernelName: "", kernelVersion: "" };
+const EMPTY_FORM: FormState = { name: "", startUrl: "", browserId: "" };
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
@@ -31,7 +39,11 @@ type PendingDelete = { instance: Instance; withProfile: boolean } | null;
  */
 export default function InstancesPage() {
   const log = useAppStore((state) => state.log);
+  const setPage = useAppStore((state) => state.setPage);
   const [instances, setInstances] = useState<Instance[]>([]);
+  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
+  const [browsersError, setBrowsersError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
@@ -51,6 +63,13 @@ export default function InstancesPage() {
     } finally {
       setLoading(false);
     }
+    try {
+      const regs = await BrowserService.ListBrowsers();
+      setBrowsers(regs ?? []);
+      setBrowsersError(null);
+    } catch (err) {
+      setBrowsersError(err instanceof Error ? err.message : String(err));
+    }
   }, [log]);
 
   useEffect(() => {
@@ -68,8 +87,7 @@ export default function InstancesPage() {
           id: form.id,
           name: form.name,
           startUrl: form.startUrl,
-          kernelName: form.kernelName,
-          kernelVersion: form.kernelVersion,
+          browserId: form.browserId,
           sortOrder: 0,
         });
         log("info", `实例已更新：${form.name}`);
@@ -78,14 +96,14 @@ export default function InstancesPage() {
         const created = await InstanceService.CreateInstance(opId, {
           name: form.name,
           startUrl: form.startUrl,
-          kernelName: form.kernelName,
-          kernelVersion: form.kernelVersion,
+          browserId: form.browserId,
           userDataDir: "",
         });
         log("info", `实例已创建：${created.name}`);
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
       }
       setForm(null);
+      setEditing(null);
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -136,7 +154,10 @@ export default function InstancesPage() {
         </p>
         <button
           type="button"
-          onClick={() => setForm(EMPTY_FORM)}
+          onClick={() => {
+            setEditing(null);
+            setForm(EMPTY_FORM);
+          }}
           className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
         >
           <Plus size={14} /> 新建实例
@@ -182,9 +203,11 @@ export default function InstancesPage() {
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-(--text-dim)">
-                    {inst.kernelName
-                      ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
-                      : "未指定"}
+                    <span title={inst.kernelExecutablePath || undefined}>
+                      {inst.kernelName
+                        ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
+                        : "未指定"}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5 font-mono text-xs text-(--text-faint)">{inst.userDataDir}</td>
                   <td className="px-4 py-2.5">
@@ -192,15 +215,21 @@ export default function InstancesPage() {
                       <button
                         type="button"
                         title="编辑"
-                        onClick={() =>
+                        onClick={() => {
+                          setEditing(inst);
                           setForm({
                             id: inst.id,
                             name: inst.name,
                             startUrl: inst.startUrl,
-                            kernelName: inst.kernelName,
-                            kernelVersion: inst.kernelVersion,
-                          })
-                        }
+                            // A kernelId that no longer resolves
+                            // to a registration is shown as
+                            // unassociated (see the note in the
+                            // form); saving then clears it.
+                            browserId: browsers.some((b) => b.id === inst.kernelId)
+                              ? inst.kernelId
+                              : "",
+                          });
+                        }}
                         className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg)"
                       >
                         <Pencil size={14} />
@@ -245,31 +274,58 @@ export default function InstancesPage() {
                   placeholder="https://"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>内核名称（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={form.kernelName}
-                    onChange={(e) => setForm({ ...form, kernelName: e.target.value })}
-                    placeholder="Chromium"
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>内核版本（可选）</label>
-                  <input
-                    className={inputCls}
-                    value={form.kernelVersion}
-                    onChange={(e) => setForm({ ...form, kernelVersion: e.target.value })}
-                    placeholder="130"
-                  />
-                </div>
+              <div>
+                <label className={labelCls}>浏览器内核（可选）</label>
+                <select
+                  className={inputCls}
+                  value={form.browserId}
+                  onChange={(e) => setForm({ ...form, browserId: e.target.value })}
+                >
+                  <option value="">不选择内核</option>
+                  {browsers.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name} — {b.executablePath}
+                    </option>
+                  ))}
+                </select>
+                {browsersError ? (
+                  <p className="mt-1 text-xs text-(--danger)">内核列表加载失败：{browsersError}</p>
+                ) : browsers.length === 0 ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    尚未登记任何浏览器内核。
+                    <button
+                      type="button"
+                      className="text-(--accent) underline underline-offset-2"
+                      onClick={() => {
+                        setForm(null);
+                        setEditing(null);
+                        setPage("kernels");
+                      }}
+                    >
+                      前往「浏览器内核」页面添加
+                    </button>
+                  </p>
+                ) : null}
+                {editing && editing.kernelId !== "" && !browsers.some((b) => b.id === editing.kernelId) ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    原关联的内核登记已不存在，当前按未关联处理；保存后将清除原关联。
+                  </p>
+                ) : editing && editing.kernelId === "" && (editing.kernelName || editing.kernelVersion) ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    该实例保存有历史内核记录：{editing.kernelName}
+                    {editing.kernelVersion ? ` ${editing.kernelVersion}` : ""}
+                    （未关联登记内核）。不选择内核时此记录会保留；选择上方内核后将改为关联该登记。
+                  </p>
+                ) : null}
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setForm(null)}
+                onClick={() => {
+                  setForm(null);
+                  setEditing(null);
+                }}
                 className="rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
               >
                 取消

@@ -27,7 +27,7 @@
 
 ## Schema（当前状态）
 
-当前状态（migration 0001–0012，全部在启动时应用）：`app_settings`、`proxies`、`subscriptions`、`browser_instances`、`bookmarks`、`mihomo_configs`、`mihomo_proxy_groups` 与 `mihomo_proxy_group_members` 等表**存在**。在 PR #9 范围清理之后，代理/订阅/导入相关的表**只是历史数据结构——不是当前产品功能**。没有任何页面、服务或绑定为这些历史表暴露业务 CRUD 或列表操作。唯一剩余的读取是 Vault 引用保护查询 `SecretRefInUse` / `AllSecretRefs`，它们扫描这些表的 `secret_ref` 列，使历史凭据在仍被引用时永不被垃圾回收。这些表及其全部行出于兼容性保留（既有数据库保持数据与外键完好）。Stage 9A 增加了 `kernels` 表（migration 0010 创建的**历史表**，原为 DeBrowser 托管的 Chromium 构建；独立内核下载管理功能已取消，该表当前不被任何产品功能使用，见下方 `kernels` 一节）与 `external_browsers` 表（migration 0011/0012，用户手动添加程序的纯路径登记）；`browser_instances.kernel_id` 当前从未被写入，实例目前只携带内核身份的记录列（见下方 `browser_instances`）。本节未列出的任何东西都不存在于数据库中。
+当前状态（migration 0001–0012，全部在启动时应用）：`app_settings`、`proxies`、`subscriptions`、`browser_instances`、`bookmarks`、`mihomo_configs`、`mihomo_proxy_groups` 与 `mihomo_proxy_group_members` 等表**存在**。在 PR #9 范围清理之后，代理/订阅/导入相关的表**只是历史数据结构——不是当前产品功能**。没有任何页面、服务或绑定为这些历史表暴露业务 CRUD 或列表操作。唯一剩余的读取是 Vault 引用保护查询 `SecretRefInUse` / `AllSecretRefs`，它们扫描这些表的 `secret_ref` 列，使历史凭据在仍被引用时永不被垃圾回收。这些表及其全部行出于兼容性保留（既有数据库保持数据与外键完好）。Stage 9A 增加了 `kernels` 表（migration 0010 创建的**历史表**，原为 DeBrowser 托管的 Chromium 构建；独立内核下载管理功能已取消，该表当前不被任何产品功能使用，见下方 `kernels` 一节）与 `external_browsers` 表（migration 0011/0012，用户手动添加程序的纯路径登记）；`browser_instances.kernel_id` 现在由实例表单写入，存的是所关联的 `external_browsers` 登记 ID（见下方 `browser_instances` 与 `external_browsers`）。本节未列出的任何东西都不存在于数据库中。
 
 ID 是应用生成的 UUID（TEXT）。时间戳是 UTC 文本（`datetime('now')` 默认值；repository 在更新时刷新 `updated_at`）。
 
@@ -64,7 +64,7 @@ Stage 6（migration 0006）增加：`config_id`（外键 → `mihomo_configs`，
 | 列 | 说明 |
 | --- | --- |
 | `name` | UNIQUE——实例在界面中以名称标识。 |
-| `kernel_id`、`kernel_name`、`kernel_version` | 作为数据记录的内核身份。`kernels` 表是 migration 0010 的历史结构；当前 Service 从不写入 `kernel_id`，实例只携带 `kernel_name`/`kernel_version` 字符串。 |
+| `kernel_id`、`kernel_name`、`kernel_version` | 实例关联的已登记浏览器：`kernel_id` 存所关联 `external_browsers` 登记的稳定 ID（按 ID 关联，不按名称；无关联时为空），`kernel_name` 是关联时登记名称的显示快照，`kernel_version` 仅保留历史自由文本（新关联不写版本）。实例实际使用的可执行文件路径不落库：服务按 `kernel_id` 从登记记录实时解析（登记改路径后立即生效），以非持久化字段 `kernelExecutablePath` 返回。关联建立前的历史实例可能只有 `kernel_name`/`kernel_version` 文本而 `kernel_id` 为空，这类记录在编辑时原样保留，除非用户主动选择登记建立关联。`kernels` 表是 migration 0010 的历史结构，与这里的 `kernel_id` 无关。 |
 | `user_data_dir` | UNIQUE。相对便携数据目录的 Profile 路径（例如 `profiles\<id>`），使整个应用文件夹可整体移动。它是实例元数据中记录的**路径规划**：创建实例时该目录目前并不会被实际创建，浏览器运行目录在 Stage 9B 随实例启动建立。Profile 内容是浏览器数据，永不存入 SQLite。 |
 | `proxy_id` | **历史兼容字段。** 外键 → `proxies(id)`，`ON DELETE SET NULL`（schema 行为：删除一行代理会使实例脱钩，而不是破坏实例）。当前产品中没有代理绑定界面或操作：实例创建总是写入 NULL，实例更新逐字保留某行已有的历史值。 |
 | `proxy_listen_port` | **历史兼容字段。** Stage 4A（migration 0004）增加，原为实例的 Mihomo 监听端口，本应由已取消的 Stage 7 从 `app_settings` 的 `proxy.port_range` 范围（默认 `19000-19499`）分配。它不再被任何当前业务逻辑分配或使用；已存值按原样保留。通过唯一索引实现唯一（SQLite 不能用 ALTER 增加 UNIQUE 列）；NULL 端口永不冲突。 |
@@ -85,7 +85,7 @@ migration 0010 创建的历史表结构仍然存在：`id`、`version`、`channe
 
 ### `external_browsers`（Stage 9A，migration 0011 + 0012）
 
-用户**手动**添加的程序的**纯路径登记**：`id`、`name`（从所选文件名派生的显示名）、`executable_path`（用户所选的**绝对**路径——该程序位于 DeBrowser 的文件夹之外，因此不存在便携相对形式）、时间戳。`executable_path` 上的唯一索引使每个路径只有一份登记；重复添加同一路径会返回既有登记。DeBrowser 对用户所选文件不做任何身份、版本、签名、发布者或存在性检查，也不要求路径对应的文件实际存在：migration 0011 最初为手动添加的 Chrome/Brave 存储验证结果，migration 0012 在去掉验证列的情况下重建了该表（既有登记作为路径记录保留）。移除登记只删除这一行——永不删除程序本身。store 暴露 `CreateExternalBrowser`/`GetExternalBrowser`/`GetExternalBrowserByPath`/`ListExternalBrowsers`/`UpdateExternalBrowserPath`/`DeleteExternalBrowser`。
+用户**手动**添加的程序的**纯路径登记**：`id`、`name`（从所选文件名派生的显示名）、`executable_path`（用户所选的**绝对**路径——该程序位于 DeBrowser 的文件夹之外，因此不存在便携相对形式）、时间戳。`executable_path` 上的唯一索引使每个路径只有一份登记；重复添加同一路径会返回既有登记。DeBrowser 对用户所选文件不做任何身份、版本、签名、发布者或存在性检查，也不要求路径对应的文件实际存在：migration 0011 最初为手动添加的 Chrome/Brave 存储验证结果，migration 0012 在去掉验证列的情况下重建了该表（既有登记作为路径记录保留）。移除登记只删除这一行——永不删除程序本身；但被实例引用的登记不能移除：`BrowserService.RemoveBrowserRegistration` 先经 store 的 `CountInstancesByKernelID` 检查引用数，被引用时明确报错并保留登记与全部实例（不级联删除实例、不留下悬空关联），用户须先在实例中取消关联。store 暴露 `CreateExternalBrowser`/`GetExternalBrowser`/`GetExternalBrowserByPath`/`ListExternalBrowsers`/`UpdateExternalBrowserPath`/`DeleteExternalBrowser`。
 
 ### `app_settings`
 

@@ -67,6 +67,7 @@ AGENTS.md 的职责划分：Go 负责浏览器进程管理、实例生命周期�
 Stage 9A 增加 `BrowserService`（bindings：`AddBrowserManually`、`UpdateBrowserPath`、`ListBrowsers`、`GetBrowserDetails`、`RemoveBrowserRegistration`），支撑「浏览器内核」页面的唯一功能区域「自定内核」。
 
 - 手动登记是**纯路径登记**，完全不涉及任何验证包：用户在文件选择器中任选一个程序可执行文件，`BrowserService` 只把所选的绝对路径和一个从文件名派生的显示名存入 `external_browsers`（migration 0011，经 migration 0012 重塑）。DeBrowser 对用户所选文件**不做**任何身份、产品、版本、签名或发布者检查，不要求它必须是 Chrome 或 Brave，在本阶段永不启动它，也永不复制、修改、卸载或删除它、永不读取它的 Profile；重新选择路径会更新该行，移除登记只删除数据库行。
+- **实例与登记的关联**：创建/编辑实例时，用户可从已登记浏览器中选择一个关联（也可不选）。关联按登记的稳定 ID 建立（`browser_instances.kernel_id` 存 `external_browsers` 的 ID，`kernel_name` 存名称快照），不按名称关联——同名登记不会关联错误。实例的生效可执行路径不落库，由 `InstanceService` 按 ID 从登记记录实时解析为 `kernelExecutablePath` 返回，因此登记重新选择路径后，关联实例立即使用新路径。编辑实例时选择空项会清除已有关联；而关联功能之前以自由文本记录的内核名称/版本（`kernel_id` 为空的历史实例）在编辑时原样保留，不会被无关编辑静默清除。被实例引用的登记禁止移除（服务先计数引用并明确报错，不级联删除实例）。关联不引入任何文件检查：登记与关联全程不查存在性、身份、版本、签名或发布者，也不启动任何程序；实例真实启动仍属 Stage 9B。
 - **没有独立内核下载管理功能**：DeBrowser 主动下载、安装、验证、管理独立 Chromium 的功能已按产品决定取消（PR #11）。曾经支撑该功能的 `internal/kernels`（下载/解压/安装）与 `internal/browserprobe`（Authenticode 签名与发布者验证）两个包、BrowserService 的托管内核接口以及 `kernel:install-progress` 事件均已删除。数据库中的 `kernels` 表（migration 0010）作为历史结构保留，既有数据库照常升级，但当前没有任何用户可操作的内核管理功能，store 也不再提供 kernels 的增删改查。
 
 Stage 9A 不启动任何浏览器进程；实例真实启动/停止与 Profile 实际创建在 Stage 9B 交付，CDP 接入在 Stage 9C 交付。

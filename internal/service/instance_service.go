@@ -75,11 +75,16 @@ func NewInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger) 
 // unbound (proxy_id NULL). A historical instance's stored proxy_id is
 // data, not an editable binding.
 type CreateInstanceInput struct {
-	Name          string `json:"name"`
-	StartURL      string `json:"startUrl"`
-	KernelName    string `json:"kernelName"`
-	KernelVersion string `json:"kernelVersion"`
-	UserDataDir   string `json:"userDataDir"`
+	Name     string `json:"name"`
+	StartURL string `json:"startUrl"`
+	// BrowserID optionally associates the instance with one
+	// registered browser (external_browsers ID) chosen in the form.
+	// Empty means no association. The association is by stable ID,
+	// never by name; the instance stores the registration's ID and
+	// a display snapshot of its name, and the executable path is
+	// always resolved live from the registration.
+	BrowserID   string `json:"browserId"`
+	UserDataDir string `json:"userDataDir"`
 }
 
 // UpdateInstanceInput carries the editable fields of one instance.
@@ -88,12 +93,16 @@ type CreateInstanceInput struct {
 // The stored proxy_id is likewise not editable here: updates preserve
 // whatever value the row already has.
 type UpdateInstanceInput struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	StartURL      string `json:"startUrl"`
-	KernelName    string `json:"kernelName"`
-	KernelVersion string `json:"kernelVersion"`
-	SortOrder     int    `json:"sortOrder"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	StartURL string `json:"startUrl"`
+	// BrowserID is the form's registered-browser choice (see
+	// CreateInstanceInput). On an instance that already has an
+	// association, an empty BrowserID clears it; on an instance
+	// without one, the historical free-text kernel name/version
+	// recorded before associations existed are preserved verbatim.
+	BrowserID string `json:"browserId"`
+	SortOrder int    `json:"sortOrder"`
 }
 
 func ctx() (context.Context, context.CancelFunc) {
@@ -111,6 +120,7 @@ func (s *InstanceService) ListInstances() ([]model.Instance, error) {
 	if list == nil {
 		list = []model.Instance{}
 	}
+	s.resolveKernelPaths(c, list)
 	return list, nil
 }
 
@@ -122,7 +132,57 @@ func (s *InstanceService) GetInstance(id string) (model.Instance, error) {
 	if errors.Is(err, store.ErrNotFound) {
 		return model.Instance{}, fmt.Errorf("实例不存在")
 	}
+	if err == nil {
+		one := []model.Instance{in}
+		s.resolveKernelPaths(c, one)
+		in = one[0]
+	}
 	return in, err
+}
+
+// kernelAssociation resolves the form's registered-browser choice
+// to the (kernel_id, kernel_name) pair stored on an instance: the
+// registration's stable ID plus a display snapshot of its current
+// name. An empty choice yields empty fields. A choice naming a
+// registration that does not exist is an explicit error — never a
+// silent free-text kernel record.
+func (s *InstanceService) kernelAssociation(c context.Context, browserID string) (id, name string, err error) {
+	browserID = strings.TrimSpace(browserID)
+	if browserID == "" {
+		return "", "", nil
+	}
+	b, err := s.store.GetExternalBrowser(c, browserID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", "", fmt.Errorf("所选浏览器内核登记不存在")
+		}
+		return "", "", err
+	}
+	return b.ID, b.Name, nil
+}
+
+// resolveKernelPaths fills each instance's KernelExecutablePath
+// from the registration its KernelID references — a live lookup, so
+// re-selecting a registration's path is reflected on its instances
+// immediately. A missing registration leaves the path empty.
+func (s *InstanceService) resolveKernelPaths(c context.Context, list []model.Instance) {
+	seen := map[string]string{}
+	for i := range list {
+		kid := list[i].KernelID
+		if kid == "" {
+			continue
+		}
+		if p, ok := seen[kid]; ok {
+			list[i].KernelExecutablePath = p
+			continue
+		}
+		p := ""
+		if b, err := s.store.GetExternalBrowser(c, kid); err == nil {
+			p = b.ExecutablePath
+		}
+		seen[kid] = p
+		list[i].KernelExecutablePath = p
+	}
 }
 
 // CreateInstance validates and creates an instance. The default
@@ -165,15 +225,22 @@ func (s *InstanceService) createInstance(input CreateInstanceInput) (model.Insta
 	}
 	c, cancel := ctx()
 	defer cancel()
+	kernelID, kernelName, err := s.kernelAssociation(c, input.BrowserID)
+	if err != nil {
+		return model.Instance{}, err
+	}
 	created, err := s.store.CreateInstance(c, model.Instance{
 		ID: id, Name: name, UserDataDir: dir, // ProxyID stays nil: new instances are never bound
-		StartURL:      strings.TrimSpace(input.StartURL),
-		KernelName:    strings.TrimSpace(input.KernelName),
-		KernelVersion: strings.TrimSpace(input.KernelVersion),
+		StartURL:   strings.TrimSpace(input.StartURL),
+		KernelID:   kernelID,
+		KernelName: kernelName,
 	})
 	if err != nil {
 		return model.Instance{}, mapConstraintError(err)
 	}
+	one := []model.Instance{created}
+	s.resolveKernelPaths(c, one)
+	created = one[0]
 	s.log.Info("instance created", "id", created.ID, "name", created.Name)
 	return created, nil
 }
@@ -205,14 +272,34 @@ func (s *InstanceService) updateInstance(input UpdateInstanceInput) (model.Insta
 	// current.ProxyID is intentionally left untouched: the stored
 	// historical binding is preserved verbatim by every update.
 	current.StartURL = strings.TrimSpace(input.StartURL)
-	current.KernelName = strings.TrimSpace(input.KernelName)
-	current.KernelVersion = strings.TrimSpace(input.KernelVersion)
+	switch {
+	case strings.TrimSpace(input.BrowserID) != "":
+		kernelID, kernelName, kerr := s.kernelAssociation(c, input.BrowserID)
+		if kerr != nil {
+			return model.Instance{}, kerr
+		}
+		current.KernelID = kernelID
+		current.KernelName = kernelName
+		current.KernelVersion = ""
+	case current.KernelID != "":
+		// The form's empty choice explicitly clears an existing
+		// association.
+		current.KernelID = ""
+		current.KernelName = ""
+		current.KernelVersion = ""
+	default:
+		// No association and none chosen: historical free-text
+		// kernel name/version recorded before associations existed
+		// stay untouched — an unrelated edit never drops them.
+	}
 	current.SortOrder = input.SortOrder
 	updated, err := s.store.UpdateInstance(c, current)
 	if err != nil {
 		return model.Instance{}, mapConstraintError(err)
 	}
-	return updated, nil
+	one := []model.Instance{updated}
+	s.resolveKernelPaths(c, one)
+	return one[0], nil
 }
 
 // DeleteInstance removes ONLY the instance's metadata (and, via the

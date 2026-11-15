@@ -210,6 +210,18 @@ func (s *BrowserService) RemoveBrowserRegistration(operationID string, id string
 	defer func() { finishOp(op, err) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// A registration that instances still reference cannot be
+	// removed: the instances would be left pointing at a
+	// registration that no longer exists. Refuse with a clear
+	// message and keep both the registration and the instances
+	// untouched — removal never cascades into instance data.
+	if n, cerr := s.store.CountInstancesByKernelID(ctx, id); cerr != nil {
+		err = cerr
+		return err
+	} else if n > 0 {
+		err = fmt.Errorf("该内核正被 %d 个浏览器实例使用，无法移除登记。请先在这些实例中取消内核关联。", n)
+		return err
+	}
 	if derr := s.store.DeleteExternalBrowser(ctx, id); derr != nil {
 		if errors.Is(derr, store.ErrNotFound) {
 			err = fmt.Errorf("未找到该浏览器登记")
