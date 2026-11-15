@@ -32,10 +32,10 @@ import * as $models from "./models.js";
  * CreateInstance validates and creates an instance. The default
  * profile directory is profiles/<id>; an explicit directory must be
  * a relative path inside profiles/.
- * CreateInstance creates an instance (audited, Stage 5B).
+ * CreateInstance creates an instance (recorded, unified recording).
  */
-export function CreateInstance(input: $models.CreateInstanceInput): $CancellablePromise<model$0.Instance> {
-    return $Call.ByID(1021165291, input);
+export function CreateInstance(operationID: string, input: $models.CreateInstanceInput): $CancellablePromise<model$0.Instance> {
+    return $Call.ByID(1021165291, operationID, input);
 }
 
 /**
@@ -43,10 +43,11 @@ export function CreateInstance(input: $models.CreateInstanceInput): $Cancellable
  * schema cascade, its bookmarks). The profile directory on disk is
  * deliberately left untouched: browser data is never deleted as a
  * side effect of removing a record.
- * DeleteInstance deletes instance metadata only (audited, Stage 5B).
+ * DeleteInstance deletes instance metadata only (recorded,
+ * unified recording).
  */
-export function DeleteInstance(id: string): $CancellablePromise<void> {
-    return $Call.ByID(3072793292, id);
+export function DeleteInstance(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(3072793292, operationID, id);
 }
 
 /**
@@ -76,10 +77,10 @@ export function DeleteInstance(id: string): $CancellablePromise<void> {
  * 
  * A persisted "running" instance is refused before any of this.
  * DeleteInstanceAndProfile deletes an instance and its profile
- * directory (audited, Stage 5B).
+ * directory (recorded with per-phase steps, unified recording).
  */
-export function DeleteInstanceAndProfile(id: string): $CancellablePromise<void> {
-    return $Call.ByID(1852242710, id);
+export function DeleteInstanceAndProfile(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(1852242710, operationID, id);
 }
 
 /**
@@ -98,8 +99,8 @@ export function ListInstances(): $CancellablePromise<model$0.Instance[] | null> 
 
 /**
  * UpdateInstance validates and updates an instance's editable fields.
- * UpdateInstance updates an instance (audited, Stage 5B).
+ * UpdateInstance updates an instance (recorded, unified recording).
  */
-export function UpdateInstance(input: $models.UpdateInstanceInput): $CancellablePromise<model$0.Instance> {
-    return $Call.ByID(1861349874, input);
+export function UpdateInstance(operationID: string, input: $models.UpdateInstanceInput): $CancellablePromise<model$0.Instance> {
+    return $Call.ByID(1861349874, operationID, input);
 }

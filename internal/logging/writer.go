@@ -11,9 +11,13 @@ import (
 )
 
 // Policy is the retention rule for one log category: files older
-// than RetentionDays are deleted, and the category's total size is
-// capped at CapBytes (oldest files are deleted first; the file
-// currently being written is never deleted).
+// than RetentionDays are deleted. CapBytes optionally caps the
+// category's own total size (oldest files are deleted first; the
+// file currently being written is never deleted); the logging
+// System leaves it 0 — total capacity across all categories is a
+// single user-configurable limit enforced by the System (see
+// capacity.go). A positive CapBytes remains available for tests
+// and tools that drive a writer directly.
 type Policy struct {
 	RetentionDays int
 	CapBytes      int64
@@ -55,6 +59,11 @@ type categoryWriter struct {
 	writes      int
 	cleanupErr  error // most recent enforcement failure, for diagnostics
 	cleanupErrN int
+
+	// onThreshold, when set, is invoked (outside the writer lock)
+	// every 128 writes; the System uses it for global capacity
+	// enforcement.
+	onThreshold func()
 }
 
 func newCategoryWriter(dir, prefix string, policy Policy) (*categoryWriter, error) {
@@ -105,7 +114,13 @@ func (w *categoryWriter) scanLocked() []fileEntry {
 		if m[2] != "" {
 			fmt.Sscanf(m[2], "%d", &vol)
 		}
-		info, err := e.Info()
+		// The size must come from os.Stat, not DirEntry.Info: on
+		// Windows the size carried by a directory entry can lag
+		// behind writes to a still-open file, which would make
+		// capacity accounting (and enforcement) read a stale,
+		// smaller size right after heavy writing. Stat queries
+		// the file itself and is always current.
+		info, err := os.Stat(filepath.Join(w.dir, e.Name()))
 		if err != nil {
 			continue
 		}
@@ -186,16 +201,24 @@ func (w *categoryWriter) rollLocked() error {
 // over when the date changed or the current file would exceed
 // maxFileBytes.
 func (w *categoryWriter) Write(p []byte) (int, error) {
+	n, err, cb := w.writeInternal(p)
+	if cb != nil {
+		cb()
+	}
+	return n, err
+}
+
+func (w *categoryWriter) writeInternal(p []byte) (int, error, func()) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
-		return 0, os.ErrClosed
+		return 0, os.ErrClosed, nil
 	}
 	today := dayOf(w.now())
 	needRoll := !w.curDate.Equal(today) || (w.curSize > 0 && w.curSize+int64(len(p)) > maxFileBytes)
 	if needRoll {
 		if err := w.rollLocked(); err != nil {
-			return 0, err
+			return 0, err, nil
 		}
 	}
 	n, err := w.file.Write(p)
@@ -203,8 +226,9 @@ func (w *categoryWriter) Write(p []byte) (int, error) {
 	w.writes++
 	if w.writes%128 == 0 {
 		w.enforceLocked()
+		return n, err, w.onThreshold
 	}
-	return n, err
+	return n, err, nil
 }
 
 // enforceLocked applies retention and capacity limits. Failures are
@@ -228,8 +252,9 @@ func (w *categoryWriter) enforceLocked() {
 		kept = append(kept, f)
 		total += f.size
 	}
-	// Capacity: delete oldest first, never the current file.
-	for total > w.policy.CapBytes {
+	// Optional per-category capacity (only when a positive cap is
+	// configured): delete oldest first, never the current file.
+	for w.policy.CapBytes > 0 && total > w.policy.CapBytes {
 		idx := -1
 		for i, f := range kept {
 			if f.name != w.curName {

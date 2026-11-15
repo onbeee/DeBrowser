@@ -7,4 +7,13 @@
 export interface Settings {
     "language": string;
     "theme": string;
+
+    /**
+     * LogCapacityBytes is the user's total log capacity limit
+     * (unified recording system). Zero means "not configured":
+     * the logging default (100 MB) applies. The field is absent
+     * from settings files written before it existed, which decode
+     * as zero — fully backward compatible.
+     */
+    "logCapacityBytes"?: number;
 }

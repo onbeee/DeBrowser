@@ -39,7 +39,7 @@ func TestPurgeRefusesJunctionEscapeOnWindows(t *testing.T) {
 	// stored profile path passes through it.
 	makeJunction(t, filepath.Join(cfg.Layout.Profiles, "jmid"), outside)
 	in := seedInstance(t, cfg, "Junction逃逸", "profiles/jmid/inner")
-	err := svc.DeleteInstanceAndProfile(in.ID)
+	err := svc.DeleteInstanceAndProfile("", in.ID)
 	if err == nil {
 		t.Fatal("purge through junction to outside was allowed, want refusal")
 	}
@@ -64,7 +64,7 @@ func TestPurgeRefusesJunctionAsProfileDirOnWindows(t *testing.T) {
 	// The profile directory itself is a junction to the outside.
 	makeJunction(t, filepath.Join(cfg.Layout.Profiles, "jself"), outside)
 	in := seedInstance(t, cfg, "Junction本体", "profiles/jself")
-	if err := svc.DeleteInstanceAndProfile(in.ID); err == nil {
+	if err := svc.DeleteInstanceAndProfile("", in.ID); err == nil {
 		t.Fatal("purge of junction profile dir was allowed, want refusal")
 	}
 	if _, err := os.Stat(sentinel); err != nil {
@@ -74,7 +74,7 @@ func TestPurgeRefusesJunctionAsProfileDirOnWindows(t *testing.T) {
 		t.Errorf("metadata removed despite refusal: %v", err)
 	}
 	// Sanity: a normal profile still purges on Windows.
-	normal, err := svc.CreateInstance(CreateInstanceInput{Name: "正常"})
+	normal, err := svc.CreateInstance("", CreateInstanceInput{Name: "正常"})
 	if err != nil {
 		t.Fatalf("create normal: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestPurgeRefusesJunctionAsProfileDirOnWindows(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.DeleteInstanceAndProfile(normal.ID); err != nil {
+	if err := svc.DeleteInstanceAndProfile("", normal.ID); err != nil {
 		t.Fatalf("normal purge on Windows: %v", err)
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
@@ -118,7 +118,7 @@ func TestPurgeSwapIntermediateJunctionAfterVerifyRefusedOnWindows(t *testing.T) 
 		cmd := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(cfg.Layout.Profiles, "mid"), outside)
 		_ = cmd.Run()
 	}
-	if err := svc.DeleteInstanceAndProfile(in.ID); err == nil {
+	if err := svc.DeleteInstanceAndProfile("", in.ID); err == nil {
 		t.Fatal("purge under post-verify junction swap succeeded, want refusal")
 	}
 	if _, err := svc.GetInstance(in.ID); err != nil {

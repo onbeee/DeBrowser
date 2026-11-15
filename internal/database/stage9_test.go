@@ -40,8 +40,8 @@ func TestMigration9DropsOverlayKeepsEverythingElse(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate to v9: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 9 {
-		t.Fatalf("applied version = %d (err %v), want 9", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+		t.Fatalf("applied version = %d (err %v), want 10", v, err)
 	}
 	if err := db.SQL().QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='mihomo_proxy_group_custom_members'`).Scan(&n); err != nil || n != 0 {
@@ -75,8 +75,8 @@ func TestMigration9FreshDatabase(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 9 {
-		t.Fatalf("applied version = %d (err %v), want 9", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+		t.Fatalf("applied version = %d (err %v), want 10", v, err)
 	}
 	var n int
 	if err := db.SQL().QueryRowContext(ctx,

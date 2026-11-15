@@ -66,7 +66,6 @@ type CategoryView struct {
 	Files         int    `json:"files"`
 	Bytes         int64  `json:"bytes"`
 	RetentionDays int    `json:"retentionDays"`
-	CapBytes      int64  `json:"capBytes"`
 	CleanupErrors int    `json:"cleanupErrors"`
 }
 
@@ -94,6 +93,13 @@ type DiagnosticsView struct {
 	LogDir         string         `json:"logDir"`
 	Categories     []CategoryView `json:"categories"`
 	LastExport     *ExportSummary `json:"lastExport"`
+	// Unified log capacity (one total limit across all streams):
+	// the configured limit, the actual on-disk usage and the
+	// remaining space, all measured from the real files.
+	LogCapacityLimitBytes int64 `json:"logCapacityLimitBytes"`
+	LogUsedBytes          int64 `json:"logUsedBytes"`
+	LogRemainingBytes     int64 `json:"logRemainingBytes"`
+	LogWriteErrors        int64 `json:"logWriteErrors"`
 }
 
 // GetDiagnostics returns the current diagnostics snapshot.
@@ -131,10 +137,13 @@ func (s *DiagnosticsService) GetDiagnostics() (DiagnosticsView, error) {
 			Files:         st.Files,
 			Bytes:         st.Bytes,
 			RetentionDays: st.Policy.RetentionDays,
-			CapBytes:      st.Policy.CapBytes,
 			CleanupErrors: st.CleanupErrors,
 		})
 	}
+	view.LogCapacityLimitBytes = s.logs.CapacityLimit()
+	view.LogUsedBytes = s.logs.TotalBytes()
+	view.LogRemainingBytes = s.logs.RemainingBytes()
+	view.LogWriteErrors = s.logs.WriteErrors()
 	s.mu.Lock()
 	view.LastExport = s.lastExport
 	s.mu.Unlock()
@@ -152,22 +161,25 @@ type ExportResult struct {
 // ExportDiagnostics asks the user for a destination (native save
 // dialog) and writes the diagnostic ZIP there. Cancelling the
 // dialog is a normal outcome, not an error.
-func (s *DiagnosticsService) ExportDiagnostics() (ExportResult, error) {
-	start := time.Now()
+func (s *DiagnosticsService) ExportDiagnostics(operationID string) (ExportResult, error) {
+	op := beginOp(s.logs, operationID, "数据管理", "diagnostics.export", "diagnostics", "")
 	if s.SavePathPicker == nil {
-		return ExportResult{}, fmt.Errorf("保存对话框不可用")
+		err := fmt.Errorf("保存对话框不可用")
+		finishOp(op, err)
+		return ExportResult{}, err
 	}
 	defaultName := "debrowser-diagnostics-" + time.Now().Format("20060102-150405") + ".zip"
 	dest, err := s.SavePathPicker(defaultName)
 	if err != nil {
-		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		finishOp(op, err)
 		return ExportResult{}, fmt.Errorf("打开保存对话框失败：%w", err)
 	}
 	if dest == "" {
+		op.Cancelled("用户取消保存对话框")
 		return ExportResult{Cancelled: true}, nil
 	}
 	summary, err := s.exportTo(dest, nil)
-	auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+	finishOp(op, err)
 	if err != nil {
 		return ExportResult{}, err
 	}
@@ -239,7 +251,7 @@ func (s *DiagnosticsService) exportTo(dest string, extras map[string][]byte) (Ex
 		categoryMeta = append(categoryMeta, map[string]any{
 			"category": string(st.Category), "files": len(files), "bytes": catBytes,
 			"oldestFile": oldest, "newestFile": newest,
-			"retentionDays": st.Policy.RetentionDays, "capBytes": st.Policy.CapBytes,
+			"retentionDays": st.Policy.RetentionDays,
 		})
 		totalFiles += len(files)
 		totalBytes += catBytes
@@ -406,27 +418,30 @@ func ScanForSecrets(data []byte) error {
 // All content passes the same path redaction and fail-closed
 // sensitivity scan as the log streams; the database, the
 // vault, browser data and raw user configs are never included.
-func (s *DiagnosticsService) ExportFaultReport() (ExportResult, error) {
-	start := time.Now()
+func (s *DiagnosticsService) ExportFaultReport(operationID string) (ExportResult, error) {
+	op := beginOp(s.logs, operationID, "数据管理", "diagnostics.export", "diagnostics", "")
 	if s.SavePathPicker == nil {
-		return ExportResult{}, fmt.Errorf("保存对话框不可用")
+		err := fmt.Errorf("保存对话框不可用")
+		finishOp(op, err)
+		return ExportResult{}, err
 	}
 	defaultName := "debrowser-fault-report-" + time.Now().Format("20060102-150405") + ".zip"
 	dest, err := s.SavePathPicker(defaultName)
 	if err != nil {
-		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		finishOp(op, err)
 		return ExportResult{}, fmt.Errorf("打开保存对话框失败：%w", err)
 	}
 	if dest == "" {
+		op.Cancelled("用户取消保存对话框")
 		return ExportResult{Cancelled: true}, nil
 	}
 	extras, err := s.buildFaultReportExtras()
 	if err != nil {
-		auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+		finishOp(op, err)
 		return ExportResult{}, err
 	}
 	summary, err := s.exportTo(dest, extras)
-	auditOp(s.logs, "diagnostics.export", "diagnostics", "", start, err)
+	finishOp(op, err)
 	if err != nil {
 		return ExportResult{}, err
 	}

@@ -36,7 +36,7 @@ type App struct {
 
 // New builds the Wails application around the given services. The
 // assets filesystem holds the embedded frontend build (frontend/dist).
-func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, diagnosticsService *service.DiagnosticsService, log *slog.Logger, assets fs.FS) *App {
+func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, diagnosticsService *service.DiagnosticsService, browserService *service.BrowserService, log *slog.Logger, assets fs.FS) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{cancel: cancel, log: log}
 
@@ -51,6 +51,21 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 		return dlg.PromptForSingleSelection()
 	}
 
+	// Manual browser registration picks an executable through the
+	// native open-file dialog (Stage 9A); verification happens in
+	// the service, never in the picker.
+	browserService.ExecutablePicker = func() (string, error) {
+		dlg := application.Get().Dialog.OpenFile()
+		dlg.SetTitle("选择浏览器可执行文件")
+		dlg.AddFilter("可执行文件", "*.exe")
+		return dlg.PromptForSingleSelection()
+	}
+	// Managed-kernel install progress is forwarded to the frontend
+	// on its typed event channel.
+	browserService.OnProgress = func(p service.InstallProgress) {
+		a.wails.Event.Emit(service.InstallProgressEvent, p)
+	}
+
 	a.wails = application.New(application.Options{
 		Name:        version.Name,
 		Description: "Local-first multi-profile browser manager",
@@ -58,6 +73,7 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 			application.NewService(appService),
 			application.NewService(instanceService),
 			application.NewService(diagnosticsService),
+			application.NewService(browserService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -106,6 +122,7 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 		}
 	}))
 
+	log.Info("background loops started", "loops", len(a.loops))
 	log.Info("application assembled", "name", version.Name, "version", version.Version)
 	return a
 }
@@ -139,5 +156,6 @@ func (a *App) Run() error {
 	lifecycle.WaitForever(5*time.Second, func() {
 		a.log.Warn("background loops still draining after 5s; waiting for them to finish before shutdown continues")
 	}, a.loops...)
+	a.log.Info("background loops stopped")
 	return err
 }

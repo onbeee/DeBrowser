@@ -68,8 +68,8 @@ func TestGetDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDiagnostics: %v", err)
 	}
-	if view.AppVersion == "" || view.SchemaVersion != 9 {
-		t.Fatalf("view = %+v, want version set and schema 5", view)
+	if view.AppVersion == "" || view.SchemaVersion != 12 {
+		t.Fatalf("view = %+v, want version set and schema 11", view)
 	}
 	if len(view.Categories) != 3 {
 		t.Fatalf("categories = %d, want 3", len(view.Categories))
@@ -123,7 +123,7 @@ func TestExportDiagnosticsZipStructureAndHashes(t *testing.T) {
 	if err := json.Unmarshal(mf, &manifest); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
-	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 9 {
+	if manifest.FormatVersion != 1 || manifest.SchemaVersion != 12 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	if len(manifest.Files) == 0 {
@@ -201,7 +201,7 @@ func TestExportUnwritableDestination(t *testing.T) {
 func TestExportCancelledDialog(t *testing.T) {
 	f := newDiagFixture(t)
 	f.svc.SavePathPicker = func(string) (string, error) { return "", nil }
-	res, err := f.svc.ExportDiagnostics()
+	res, err := f.svc.ExportDiagnostics("")
 	if err != nil {
 		t.Fatalf("ExportDiagnostics: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestFaultReportContentsAndRedaction(t *testing.T) {
 	}
 	dest := filepath.Join(t.TempDir(), "fault.zip")
 	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
-	res, err := f.svc.ExportFaultReport()
+	res, err := f.svc.ExportFaultReport("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestFaultReportContentsAndRedaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("fault-report.json missing; entries: %v", keysOf(files))
 	}
-	for _, want := range []string{`"schemaVersion": 9`, `"appVersion"`, `"instances"`, `"total": 1`} {
+	for _, want := range []string{`"schemaVersion": 12`, `"appVersion"`, `"instances"`, `"total": 1`} {
 		if !strings.Contains(report, want) {
 			t.Errorf("fault report missing %q:\n%s", want, report)
 		}
@@ -599,7 +599,7 @@ func TestFaultReportFailsClosedOnSecretInLog(t *testing.T) {
 	appendToCategoryFile(t, f.layout.Logs, "run", `{"leak":"secret_ref = abc"}`)
 	dest := filepath.Join(t.TempDir(), "fault.zip")
 	f.svc.SavePathPicker = func(string) (string, error) { return dest, nil }
-	if _, err := f.svc.ExportFaultReport(); err == nil {
+	if _, err := f.svc.ExportFaultReport(""); err == nil {
 		t.Fatal("fault report exported despite a secret in a log file")
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {

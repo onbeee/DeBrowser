@@ -13,6 +13,7 @@ declare module "@wailsio/runtime" {
     namespace Events {
         interface CustomEvents {
             "app:status": service$0.Status;
+            "kernel:install-progress": service$0.InstallProgress;
         }
     }
 }

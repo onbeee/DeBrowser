@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/config"
@@ -22,15 +23,18 @@ const (
 	CategoryError     Category = "error"
 )
 
-// Stage 5B retention policy (fixed by the product specification):
+// Per-category day retention (Stage 5B product specification):
 //
-//	run:       30 days, 20 MB total
-//	operation: 90 days, 50 MB total
-//	error:     90 days, 50 MB total
+//	run:       30 days
+//	operation: 90 days
+//	error:     90 days
+//
+// Byte capacity is NOT per-category: one user-configurable total
+// limit covers all three streams together (see capacity.go).
 var categoryPolicies = map[Category]Policy{
-	CategoryRun:       {RetentionDays: 30, CapBytes: 20 << 20},
-	CategoryOperation: {RetentionDays: 90, CapBytes: 50 << 20},
-	CategoryError:     {RetentionDays: 90, CapBytes: 50 << 20},
+	CategoryRun:       {RetentionDays: 30},
+	CategoryOperation: {RetentionDays: 90},
+	CategoryError:     {RetentionDays: 90},
 }
 
 // System is the Stage 5B logging system: three categorized,
@@ -45,6 +49,16 @@ type System struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	// Unified recording (event.go) and global capacity
+	// (capacity.go) state.
+	writeErrors   int64 // atomic: failed structured-event writes
+	capacityLimit int64 // atomic: total capacity in bytes
+	enforceSem    sync.Mutex
+	capMu         sync.Mutex
+	capErr        error
+	capErrN       int
+	lastEnforce   time.Time
 }
 
 // NewSystem creates the three category writers under the layout's
@@ -64,6 +78,14 @@ func NewSystem(cfg config.Config) (*System, error) {
 		}
 		s.writers[cat] = w
 	}
+	// Global capacity: default until the app applies the user's
+	// persisted setting; writers nudge enforcement as they write.
+	atomic.StoreInt64(&s.capacityLimit, DefaultCapacityBytes)
+	for _, w := range s.writers {
+		w.onThreshold = s.enforceThrottled
+	}
+	_ = s.EnforceCapacity()
+
 	level := ParseLevel(cfg.LogLevel)
 	opts := &slog.HandlerOptions{Level: level, ReplaceAttr: renameAttr}
 	runHandler := slog.NewJSONHandler(io.MultiWriter(s.writers[CategoryRun], os.Stderr), opts).

@@ -65,7 +65,7 @@ func TestSettingsDefaultsAndThemePersistence(t *testing.T) {
 	if got.Theme != settings.ThemeDark {
 		t.Errorf("theme = %q, want dark default", got.Theme)
 	}
-	saved, err := svc.SaveTheme(settings.ThemeWarm)
+	saved, err := svc.SaveTheme("", settings.ThemeWarm)
 	if err != nil {
 		t.Fatalf("SaveTheme: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestSettingsDefaultsAndThemePersistence(t *testing.T) {
 	if reloaded.Theme != settings.ThemeWarm {
 		t.Errorf("persisted theme = %q, want warm", reloaded.Theme)
 	}
-	if _, err := svc.SaveTheme("neon"); err == nil {
+	if _, err := svc.SaveTheme("", "neon"); err == nil {
 		t.Error("SaveTheme accepted an unsupported theme")
 	}
 }

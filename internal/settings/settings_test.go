@@ -65,3 +65,42 @@ func TestLoadRejectsCorruptFile(t *testing.T) {
 		t.Error("Load accepted a corrupt settings file")
 	}
 }
+
+func TestLogCapacityRoundTripAndLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "settings.json")
+	// A legacy settings file without the capacity field loads as
+	// "not configured" (0) instead of failing.
+	if err := os.WriteFile(file, []byte("{\"language\":\"zh-CN\",\"theme\":\"dark\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(file)
+	if err != nil {
+		t.Fatalf("legacy settings rejected: %v", err)
+	}
+	if loaded.LogCapacityBytes != 0 {
+		t.Fatalf("legacy capacity = %d, want 0 (unset)", loaded.LogCapacityBytes)
+	}
+	// A configured capacity round-trips.
+	s := Default()
+	s.LogCapacityBytes = 50 << 20
+	if err := Save(file, s); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LogCapacityBytes != 50<<20 {
+		t.Fatalf("capacity round-trip = %d", loaded.LogCapacityBytes)
+	}
+	// Out-of-range capacities are invalid.
+	s.LogCapacityBytes = 100
+	if err := s.Validate(); err == nil {
+		t.Fatal("tiny capacity validated")
+	}
+	s.LogCapacityBytes = 2 << 40
+	if err := s.Validate(); err == nil {
+		t.Fatal("huge capacity validated")
+	}
+}

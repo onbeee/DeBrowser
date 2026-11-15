@@ -40,7 +40,7 @@ func TestPurgeSwapIntermediateAfterVerifyRefused(t *testing.T) {
 		_ = os.Rename(filepath.Join(cfg.Layout.Profiles, "mid"), filepath.Join(cfg.Layout.Profiles, "mid-parked"))
 		_ = os.Symlink(outside, filepath.Join(cfg.Layout.Profiles, "mid"))
 	}
-	if err := svc.DeleteInstanceAndProfile(id); err == nil {
+	if err := svc.DeleteInstanceAndProfile("", id); err == nil {
 		t.Fatal("purge under post-verify component swap succeeded, want refusal")
 	}
 	if _, err := svc.GetInstance(id); err != nil {
@@ -61,7 +61,7 @@ func TestPurgeSwapIntermediateAfterVerifyRefused(t *testing.T) {
 func TestPurgeRestoreWithSwappedRoot(t *testing.T) {
 	svc, cfg := testInstanceService(t)
 	outside := t.TempDir()
-	created, err := svc.CreateInstance(CreateInstanceInput{Name: "恢复"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "恢复"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestPurgeRestoreWithSwappedRoot(t *testing.T) {
 		_ = os.Rename(profilesRoot, parkedRoot)
 		_ = os.Symlink(outside, profilesRoot)
 	}
-	if err := svc.DeleteInstanceAndProfile(created.ID); err == nil {
+	if err := svc.DeleteInstanceAndProfile("", created.ID); err == nil {
 		t.Fatal("purge with failing record delete succeeded, want error")
 	}
 	restored := filepath.Join(parkedRoot, filepath.Base(profileDir), "Preferences")

@@ -1,151 +1,152 @@
-# DeBrowser — Project Engineering Rules
+# DeBrowser——项目工程规则
 
-## 1. Project Identity
+## 1. 项目身份
 
-Project name: DeBrowser
+项目名称：DeBrowser
 
-Product: A lightweight, local-first desktop multi-profile browser management application.
+产品：一款轻量、本地优先的桌面多 Profile 浏览器管理应用。
 
-Primary platform: Windows 11 x64.
+主要平台：Windows 11 x64。
 
-The application must prioritize:
-- Stability
-- Performance
-- Low resource consumption
-- Data integrity
-- Security
-- Maintainability
-- Simple architecture
+应用必须优先保证：
+- 稳定性
+- 性能
+- 低资源占用
+- 数据完整性
+- 安全性
+- 可维护性
+- 架构简单
 
-## 2. Technology Stack
+## 2. 技术栈
 
-- Desktop framework: Wails v3.0.0
-- Backend: Go 1.26+
-- Frontend: React 18
-- Language: TypeScript
-- Build tool: Vite
-- Styling: Tailwind CSS
-- Icons: lucide-react
-- Database: SQLite
-- SQLite driver: modernc.org/sqlite
-- State management: Zustand
-- Browser control: Chrome DevTools Protocol (CDP)
+- 桌面框架：Wails v3.0.0
+- 后端：Go 1.26+
+- 前端：React 18
+- 语言：TypeScript
+- 构建工具：Vite
+- 样式：Tailwind CSS
+- 图标：lucide-react
+- 数据库：SQLite
+- SQLite 驱动：modernc.org/sqlite
+- 状态管理：Zustand
+- 浏览器控制：Chrome DevTools Protocol（CDP）
 
-Use stable, compatible, pinned dependency versions. Do not upgrade major dependencies without approval.
+使用稳定、兼容、已锁定版本的依赖。未经批准不得升级主要依赖的大版本。
 
-## 3. Architecture
+## 3. 架构
 
-Use a modular monolithic architecture.
+采用模块化单体架构。
 
-Go owns all core business logic:
-- Browser process management
-- Instance lifecycle
-- Profile isolation
-- Kernel management
-- Bookmark management
-- Synchronization
-- Database operations
-- Backup and recovery
+Go 负责全部核心业务逻辑：
+- 浏览器进程管理
+- 实例生命周期
+- Profile 隔离
+- 内核管理
+- 书签管理
+- 同步
+- 数据库操作
+- 备份与恢复
 
-React owns:
-- UI rendering
-- User interactions
-- Forms
-- Tables
-- Frontend state
-- Notifications
+React 负责：
+- UI 渲染
+- 用户交互
+- 表单
+- 表格
+- 前端状态
+- 通知
 
-Use Wails bindings for frontend-to-backend calls and Wails events for asynchronous state notifications.
+前端调用后端使用 Wails bindings；异步状态通知使用 Wails events。
 
-Do not introduce unnecessary microservices, Redis, MongoDB, Docker or GraphQL.
+不得引入不必要的微服务、Redis、MongoDB、Docker 或 GraphQL。
 
-## 4. Browser Isolation
+## 4. 浏览器隔离
 
-Each browser instance must have:
-- A unique instance ID
-- An independent user data directory
-- An independent configuration
-- An independently managed browser process
+每个浏览器实例必须拥有：
+- 唯一的实例 ID
+- 独立的用户数据目录
+- 独立的配置
+- 独立管理的浏览器进程
 
-Never share a Chromium user data directory between running instances.
+运行中的实例之间永不共享同一个 Chromium 用户数据目录。
 
-Never copy a live browser profile while Chromium is using it.
+Chromium 正在使用某个 Profile 时，永不复制该活动 Profile。
 
-Do not claim browser fingerprint isolation unless it has been explicitly implemented and tested.
+除非指纹隔离已经明确实现并通过测试，否则不得宣称具备浏览器指纹隔离能力。
 
-## 5. Database
+## 5. 数据库
 
-Use SQLite with:
-- WAL mode
-- Foreign key constraints
-- Database migrations
-- Transactional writes
-- Appropriate indexes
-- Backup and restore support
+使用 SQLite，并启用：
+- WAL 模式
+- 外键约束
+- 数据库迁移
+- 事务性写入
+- 适当的索引
+- 备份与恢复支持
 
-Never store browser cookies or browser profile contents in SQLite.
+永不把浏览器 Cookie 或浏览器 Profile 内容存入 SQLite。
 
-Never commit user databases, browser profiles, credentials, subscription URLs or private proxy configurations.
+永不提交用户数据库、浏览器 Profile、凭据、订阅 URL 或私有代理配置。
 
-## 6. Engineering Rules
+## 6. 工程规则
 
-- Keep code modular and readable.
-- Avoid unnecessary abstractions.
-- Handle errors explicitly.
-- Use context cancellation for long-running tasks.
-- Protect concurrent access to instance state.
-- Do not block the UI thread.
-- Add unit tests for business logic.
-- Add integration tests for critical workflows.
-- Use structured logging.
-- Validate all external input.
-- Never expose CDP debugging ports publicly.
-- Do not execute arbitrary commands from frontend input.
+- 代码保持模块化、可读。
+- 避免不必要的抽象。
+- 显式处理错误。
+- 长时间运行的任务使用 context 取消。
+- 保护对实例状态的并发访问。
+- 不得阻塞 UI 线程。
+- 为业务逻辑添加单元测试。
+- 为关键工作流添加集成测试。
+- 使用结构化日志。
+- 统一自动记录：用户操作、后台步骤、错误与运行事实统一写入 `internal/logging` 的三类记录（operation / error / runtime），每次用户操作以一个 operation_id 贯穿前后端；严禁记录密码、Token、Cookie、Vault 明文或 Profile 内容；日志总容量为用户可配置的单一上限（默认 100 MB），超出时自动清理最早记录；日志写入失败不得使业务操作失败。
+- 校验全部外部输入。
+- 永不把 CDP 调试端口暴露到公网。
+- 不得根据前端输入执行任意命令。
 
-## 7. GitHub Workflow
+## 7. GitHub 工作流
 
-- main: stable production branch.
-- develop: integration branch.
-- feature/*: isolated feature branches.
-- Every feature must use a Pull Request.
-- Run automated checks before merging.
-- Never force-push or delete branches without approval.
-- Never commit directly to main.
-- Do not merge a Pull Request without explicit project-owner approval.
+- main：稳定的生产分支。
+- develop：集成分支。
+- feature/*：隔离的功能分支。
+- 每个功能必须通过 Pull Request 交付。
+- 合并前运行自动化检查。
+- 未经批准不得强推或删除分支。
+- 不得直接向 main 提交。
+- 未经项目负责人明确批准，不得合并任何 Pull Request。
 
 ## 8. CI/CD
 
-Use GitHub Actions.
+使用 GitHub Actions。
 
-Required checks:
-- Go formatting
-- Go tests
+必需检查：
+- Go 格式化
+- Go 测试
 - Go vet
-- Frontend TypeScript checks
-- Frontend production build
-- Windows x64 application build
+- 前端 TypeScript 检查
+- 前端生产构建
+- Windows x64 应用构建
 
-Build artifacts must be uploaded for review.
+构建产物必须上传以供评审。
 
-Do not publish public releases automatically.
+不得自动发布公开版本。
 
-## 9. Development Strategy
+## 9. 开发策略
 
-Implement in small, testable stages.
+按小而可测试的阶段实施。
 
-Stage 1: Repository foundation and application shell.
-Stage 2: SQLite database and migrations.
-Stage 3: Browser kernel detection and instance lifecycle.
-Stage 4: Proxy and Mihomo integration.
-Stage 5: Bookmarks and kernel management.
-Stage 6: Multi-window synchronization.
-Stage 7: Backup, recovery, performance and release testing.
+Stage 1：仓库基础与应用外壳。
+Stage 2：SQLite 数据库与迁移。
+Stage 3：浏览器内核检测与实例生命周期。
+Stage 4：代理与 Mihomo 集成。
+Stage 5：书签与内核管理。
+Stage 6：多窗口同步。
+Stage 7：备份、恢复、性能与发布测试。
 
-> Historical note (2026-11-13): the seven lines above are the ORIGINAL stage plan recorded when this file was written (2026-11-10) and are kept as a historical record only — the project no longer follows these numbers (Stages 3 and 4, for example, were delivered with different scopes). The authoritative current roadmap, with the final stage numbering fixed by the product owner on 2026-11-13 (Stage 5A direct startup … Stage 12 full backup & restore, last), is `docs/ROADMAP.md`.
+> 历史注记（2026-11-13）：以上七行是本文件写成时（2026-11-10）记录的**原始**阶段规划，仅作历史记录保留——项目已不再沿用这套编号（例如 Stage 3 与 Stage 4 实际交付的范围与此不同）。当前权威路线图——最终阶段编号由项目负责人于 2026-11-13 固定（Stage 5A 直接启动 …… Stage 12 完整备份与恢复，最后实施）——见 `docs/ROADMAP.md`。
 
-Do not implement all stages in one change.
+不得在一次变更中实现全部阶段。
 
-Working agreement (project-owner decision, 2026-11-13) — how implementation work is assigned and executed:
+工作分工（项目负责人决定，2026-11-13）——实施工作如何分派与执行：
 
 1. 产品范围、架构设计、技术选型、实施方案和具体任务由项目负责人制定并提供。
 2. Muse 必须按照项目负责人提供的具体指令执行，不得自行提出替代产品方案、技术方案或重新设计任务范围。
@@ -153,10 +154,10 @@ Working agreement (project-owner decision, 2026-11-13) — how implementation wo
 4. 如果指令存在缺失、矛盾或无法执行的关键条件，停止相关操作并报告具体阻塞点，不得擅自补充设计或扩大范围。
 5. 执行后按指令完成测试、检查、提交和汇报。
 
-After implementation:
-1. Run relevant automated checks.
-2. Fix failures.
-3. Summarize changed files.
-4. Document limitations.
-5. Create a Pull Request.
-6. Wait for project-owner review.
+实施完成后：
+1. 运行相关自动化检查。
+2. 修复失败项。
+3. 汇总变更文件。
+4. 说明限制与未完成事项。
+5. 创建 Pull Request。
+6. 等待项目负责人评审。

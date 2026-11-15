@@ -43,6 +43,7 @@ var assets embed.FS
 
 func init() {
 	application.RegisterEvent[service.Status](service.StatusEvent)
+	application.RegisterEvent[service.InstallProgress](service.InstallProgressEvent)
 }
 
 func main() {
@@ -68,6 +69,14 @@ func run() error {
 	}
 	logger := logSystem.Logger()
 	defer func() { _ = logSystem.Close() }()
+	logSystem.RecordLifecycle("应用启动", logging.StatusStarted, nil)
+	// failStart records a structured startup-failure error event
+	// (in addition to the slog record at each call site) and
+	// returns the error unchanged.
+	failStart := func(action string, err error) error {
+		logSystem.RecordError("应用", action, err, "startup_failed", "startup", err.Error())
+		return err
+	}
 
 	// The startup record deliberately carries no filesystem paths:
 	// log files leave the machine in diagnostic exports, and
@@ -79,6 +88,7 @@ func run() error {
 	// running instance to focus its window and exits successfully.
 	lock, err := singleinstance.Acquire(cfg.Layout.InstanceLock)
 	if err != nil {
+		_ = failStart("获取单实例锁失败", err)
 		var already *singleinstance.AlreadyRunningError
 		if errors.As(err, &already) {
 			if serr := singleinstance.SignalActivation(cfg.Layout.ActivationFile); serr != nil {
@@ -103,8 +113,9 @@ func run() error {
 	})
 	if err != nil {
 		logger.Error("open database failed", "error", err)
-		return err
+		return failStart("打开数据库失败", err)
 	}
+	logSystem.RecordLifecycle("数据库已打开", logging.StatusSuccess, nil)
 	// The database is closed explicitly after the application stops
 	// (below); this deferred guard covers the early-return paths in
 	// between, and runs exactly once thanks to the flag.
@@ -120,19 +131,28 @@ func run() error {
 	cancel()
 	if err != nil {
 		logger.Error("database migration failed", "error", err)
-		return err
+		return failStart("数据库迁移失败", err)
 	}
+	logSystem.RecordLifecycle("数据库迁移完成", logging.StatusSuccess, nil)
 
 	appService, err := service.NewAppService(cfg, db, logger)
 	if err != nil {
 		logger.Error("load settings failed", "error", err)
-		return err
+		return failStart("加载设置失败", err)
+	}
+	// Apply the user's persisted total log capacity (the logging
+	// system starts with the 100 MB default). An enforcement
+	// failure here is recorded by the logging system and never
+	// blocks startup.
+	if _, cerr := logSystem.SetCapacityLimit(appService.EffectiveLogCapacityBytes()); cerr != nil {
+		logger.Warn("apply log capacity failed", "error", cerr)
 	}
 	instanceService, err := service.NewInstanceService(db, cfg.Layout, logger)
 	if err != nil {
 		logger.Error("instance service failed", "error", err)
-		return err
+		return failStart("初始化实例服务失败", err)
 	}
+	browserService := service.NewBrowserService(db, cfg.Layout, logger)
 
 	// The credential vault opens after the database: existing
 	// rows reference vault entries, and opening it at startup
@@ -146,8 +166,9 @@ func run() error {
 	_, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
 	if err != nil {
 		logger.Error("open credential vault failed", "error", err)
-		return err
+		return failStart("打开凭据 Vault 失败", err)
 	}
+	logSystem.RecordLifecycle("凭据 Vault 已打开", logging.StatusSuccess, nil)
 	if vaultRecovery.Unrecoverable {
 		logger.Warn("credential vault unrecoverable; corrupt files quarantined",
 			"quarantined", vaultRecovery.Quarantined)
@@ -159,11 +180,18 @@ func run() error {
 	// services record whitelist entries in the operation log.
 	appService.Auditor = logSystem
 	instanceService.Auditor = logSystem
+	browserService.Auditor = logSystem
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
 
-	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, logger, assets)
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, logger, assets)
+	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)
 	runErr := wailsApp.Run()
+	if runErr != nil {
+		logSystem.RecordLifecycle("应用异常退出", logging.StatusFailed, nil)
+	} else {
+		logSystem.RecordLifecycle("应用正常关闭", logging.StatusSuccess, nil)
+	}
 
 	// The app has fully stopped and its background loops are drained:
 	// nothing can touch the database any more, so close it now.

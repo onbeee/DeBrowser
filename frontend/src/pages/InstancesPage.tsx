@@ -3,6 +3,7 @@ import { AppWindow, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from "lucid
 import { InstanceService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
+import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 const STATUS_LABEL: Record<string, string> = {
   stopped: "已停止",
@@ -59,9 +60,11 @@ export default function InstancesPage() {
   const submitForm = async () => {
     if (!form) return;
     setBusy(true);
+    const opId = newOperationId();
+    const action = form.id ? "instance.update" : "instance.create";
     try {
       if (form.id) {
-        await InstanceService.UpdateInstance({
+        await InstanceService.UpdateInstance(opId, {
           id: form.id,
           name: form.name,
           startUrl: form.startUrl,
@@ -70,8 +73,9 @@ export default function InstancesPage() {
           sortOrder: 0,
         });
         log("info", `实例已更新：${form.name}`);
+        recordOperationFeedback(opId, true, `实例已更新：${form.name}`, "浏览器实例", action);
       } else {
-        const created = await InstanceService.CreateInstance({
+        const created = await InstanceService.CreateInstance(opId, {
           name: form.name,
           startUrl: form.startUrl,
           kernelName: form.kernelName,
@@ -79,6 +83,7 @@ export default function InstancesPage() {
           userDataDir: "",
         });
         log("info", `实例已创建：${created.name}`);
+        recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
       }
       setForm(null);
       await load();
@@ -86,6 +91,7 @@ export default function InstancesPage() {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       log("error", `保存实例失败：${message}`);
+      recordOperationFeedback(opId, false, `保存实例失败：${message}`, "浏览器实例", action);
     } finally {
       setBusy(false);
     }
@@ -94,13 +100,17 @@ export default function InstancesPage() {
   const confirmDelete = async () => {
     if (!pendingDelete) return;
     setBusy(true);
+    const opId = newOperationId();
+    const action = pendingDelete.withProfile ? "instance.delete_with_profile" : "instance.delete";
     try {
       if (pendingDelete.withProfile) {
-        await InstanceService.DeleteInstanceAndProfile(pendingDelete.instance.id);
+        await InstanceService.DeleteInstanceAndProfile(opId, pendingDelete.instance.id);
         log("info", `实例记录及 Profile 已删除：${pendingDelete.instance.name}`);
+        recordOperationFeedback(opId, true, `实例记录及 Profile 已删除：${pendingDelete.instance.name}`, "浏览器实例", action);
       } else {
-        await InstanceService.DeleteInstance(pendingDelete.instance.id);
+        await InstanceService.DeleteInstance(opId, pendingDelete.instance.id);
         log("info", `实例记录已删除（Profile 文件保留）：${pendingDelete.instance.name}`);
+        recordOperationFeedback(opId, true, `实例记录已删除（Profile 文件保留）：${pendingDelete.instance.name}`, "浏览器实例", action);
       }
       setPendingDelete(null);
       await load();
@@ -108,6 +118,7 @@ export default function InstancesPage() {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       log("error", `删除实例失败：${message}`);
+      recordOperationFeedback(opId, false, `删除实例失败：${message}`, "浏览器实例", action);
     } finally {
       setBusy(false);
     }

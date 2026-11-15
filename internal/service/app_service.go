@@ -106,13 +106,39 @@ func (s *AppService) GetSettings() settings.Settings {
 // SaveTheme persists a new appearance theme ("dark" | "light" |
 // "warm") and returns the full settings. The change is stored in
 // <root>/config/settings.json so it survives restarts and travels
-// with the portable folder.
-// SaveTheme persists a new appearance theme (audited, Stage 5B).
-func (s *AppService) SaveTheme(theme string) (settings.Settings, error) {
-	start := time.Now()
+// with the portable folder. The operation is recorded in the
+// unified recording system under the caller-provided operation ID.
+func (s *AppService) SaveTheme(operationID string, theme string) (settings.Settings, error) {
+	op := beginOp(s.Auditor, operationID, "设置", "settings.update_theme", "settings", "")
 	out, err := s.saveTheme(theme)
-	auditOp(s.Auditor, "settings.update_theme", "settings", "", start, err)
+	finishOp(op, err)
 	return out, err
+}
+
+// EffectiveLogCapacityBytes returns the total log capacity to
+// enforce: the user's persisted setting, or the logging default
+// when none was configured.
+func (s *AppService) EffectiveLogCapacityBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settings.LogCapacityBytes > 0 {
+		return s.settings.LogCapacityBytes
+	}
+	return logging.DefaultCapacityBytes
+}
+
+// SaveLogCapacity persists a new total log capacity in the user
+// settings (config/settings.json), so it survives restarts.
+func (s *AppService) SaveLogCapacity(bytes int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.settings
+	next.LogCapacityBytes = bytes
+	if err := settings.Save(s.cfg.Layout.SettingsFile, next); err != nil {
+		return fmt.Errorf("保存日志容量设置失败：%w", err)
+	}
+	s.settings = next
+	return nil
 }
 
 func (s *AppService) saveTheme(theme string) (settings.Settings, error) {
