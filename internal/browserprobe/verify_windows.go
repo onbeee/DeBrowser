@@ -376,14 +376,40 @@ type certNameInfoRaw struct {
 	rgRDN *certRDNRaw
 }
 
+// rdnStringValueTypes are the CERT_RDN character-string value
+// types this code knows how to convert. Anything else (binary
+// types are filtered by the caller; unknown types) fails closed
+// rather than being guessed at.
+var rdnStringValueTypes = map[uint32]bool{
+	3:  true, // CERT_RDN_NUMERIC_STRING
+	4:  true, // CERT_RDN_PRINTABLE_STRING
+	5:  true, // CERT_RDN_TELETEX_STRING
+	6:  true, // CERT_RDN_VIDEOTEX_STRING
+	7:  true, // CERT_RDN_IA5_STRING
+	8:  true, // CERT_RDN_GRAPHIC_STRING
+	9:  true, // CERT_RDN_VISIBLE_STRING
+	10: true, // CERT_RDN_GENERAL_STRING
+	11: true, // CERT_RDN_UNIVERSAL_STRING
+	12: true, // CERT_RDN_INT4_STRING
+	13: true, // CERT_RDN_BMP_STRING (= CERT_RDN_UNICODE_STRING)
+	14: true, // CERT_RDN_UTF8_STRING
+}
+
 // rdnValueToString converts one RDN attribute value to a Unicode
 // string with CertRDNValueToStrW, which converts according to the
 // attribute's own dwValueType (PrintableString, UTF8String,
-// BMPString/UnicodeString, TeletexString, IA5String, …). No
-// encoding is assumed by this code and no length is guessed: the
-// buffer size comes from the API itself (first call). A failed
-// conversion is an error — callers fail closed.
+// BMPString/UnicodeString, TeletexString, IA5String, …). The
+// input blob is the value in the decoded form produced by
+// CryptDecodeObjectEx — the exact form the API consumes (character
+// strings as UTF-16LE, with the documented exception that
+// CERT_RDN_UTF8_STRING values remain UTF-8 bytes). No encoding is
+// assumed by this code and no length is guessed: the buffer size
+// comes from the API itself (first call). A failed conversion is
+// an error — callers fail closed.
 func rdnValueToString(valueType uint32, b dataBlob) (string, error) {
+	if !rdnStringValueTypes[valueType] {
+		return "", fmt.Errorf("unsupported RDN value type %d", valueType)
+	}
 	if b.cbData == 0 || b.pbData == nil {
 		return "", fmt.Errorf("empty RDN attribute value (type %d)", valueType)
 	}
