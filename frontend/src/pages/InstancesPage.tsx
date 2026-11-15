@@ -57,6 +57,11 @@ export default function InstancesPage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
+    // Close the editing gate FIRST, before any await: on a reload,
+    // a stale browsersLoaded=true from the previous load must not
+    // keep editing enabled while the fresh lists are in flight.
+    // Only a successful ListBrowsers below re-opens it.
+    setBrowsersLoaded(false);
     setLoading(true);
     try {
       const list = await InstanceService.ListInstances();
@@ -69,7 +74,6 @@ export default function InstancesPage() {
     } finally {
       setLoading(false);
     }
-    setBrowsersLoaded(false);
     try {
       const regs = await BrowserService.ListBrowsers();
       setBrowsers(regs ?? []);
