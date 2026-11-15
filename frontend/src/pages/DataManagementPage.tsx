@@ -332,19 +332,6 @@ export default function DataManagementPage() {
             </button>
           </div>
         </div>
-        {view && view.logUsedBytes > 0 && (
-          <div className="mt-1 text-xs text-(--text-faint)">
-            已使用 {formatBytes(view.logUsedBytes)}，剩余 {formatBytes(view.logRemainingBytes)}。
-          </div>
-        )}
-        {view && view.logWriteErrors > 0 && (
-          <div className="mt-2 text-xs text-(--danger)">
-            有 {view.logWriteErrors} 条记录写入失败，日志系统已降级运行，业务操作不受影响。
-          </div>
-        )}
-        {(view?.categories ?? []).some((c) => c.cleanupErrors > 0) && (
-          <div className="mt-2 text-xs text-(--danger)">部分日志清理曾失败，详情见运行日志。</div>
-        )}
       </section>
 
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">
@@ -386,6 +373,14 @@ export default function DataManagementPage() {
           故障报告在诊断信息之外附带应用、数据库与实例的概要状态，全部经后端脱敏，可直接交给技术支持或
           ChatGPT 分析。
         </p>
+        {view && view.logWriteErrors > 0 && (
+          <div className="mt-2 text-xs text-(--danger)">
+            有 {view.logWriteErrors} 条记录写入失败，日志系统已降级运行，业务操作不受影响。
+          </div>
+        )}
+        {(view?.categories ?? []).some((c) => c.cleanupErrors > 0) && (
+          <div className="mt-2 text-xs text-(--danger)">部分日志清理曾失败，详情见运行日志。</div>
+        )}
         {exportNote && <div className="mt-2 text-sm text-(--text-dim)">{exportNote}</div>}
         {exportError && <div className="mt-2 text-sm text-(--danger)">{exportError}</div>}
       </section>
