@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/onbeee/DeBrowser/internal/browserprobe"
 	"github.com/onbeee/DeBrowser/internal/config"
@@ -374,6 +375,42 @@ func TestKernelLifecycleAndCrossProtection(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fx.cfg.Layout.Kernels, "142.0.7444.162")); !os.IsNotExist(err) {
 		t.Fatal("kernel directory should be removed")
+	}
+}
+
+// blockingFetcher simulates a stalled download: it returns only
+// when the caller's context ends.
+type blockingFetcher struct{ metadata []byte }
+
+func (f *blockingFetcher) Get(context.Context, string) ([]byte, error) { return f.metadata, nil }
+func (f *blockingFetcher) Download(ctx context.Context, _, _ string, _ int64, _ func(int64)) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestInstallTimeoutCleansUp(t *testing.T) {
+	fx := testBrowserFixture(t)
+	fx.svc.manager.Fetcher = &blockingFetcher{metadata: []byte(testMetadata)}
+	fx.svc.installTimeout = 100 * time.Millisecond
+	if _, err := fx.svc.InstallManagedKernel(); err == nil {
+		t.Fatal("install with a stalled download must fail on timeout")
+	}
+	// No half-installed kernel directory (including temp dirs) and
+	// no registration may survive the timeout.
+	entries, err := os.ReadDir(fx.cfg.Layout.Kernels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("kernels dir not clean after timeout: %v", names)
+	}
+	managed, err := fx.svc.ListManagedKernels()
+	if err != nil || len(managed) != 0 {
+		t.Fatalf("ListManagedKernels after timeout = %+v, %v", managed, err)
 	}
 }
 

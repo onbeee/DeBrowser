@@ -118,15 +118,30 @@ func DisplayName(kind Kind) string {
 }
 
 // kindFromProductName decides the browser family from the file's
-// own product name — never from the file name.
+// own product name — never from the file name, and never by
+// substring matching. Only the exact official ProductName values
+// that the genuine Windows builds carry in their version resources
+// are accepted:
+//
+//   - "Google Chrome"  (Chrome Stable)
+//   - "Brave Browser"  (Brave Stable)
+//   - "Chromium"       (Chromium / Chrome for Testing builds)
+//
+// Channel variants carry different product names in their version
+// resources ("Google Chrome Beta", "Google Chrome Dev",
+// "Google Chrome Canary", "Brave Browser Beta", "Brave Browser
+// Nightly", …) and are rejected, as is anything else that merely
+// contains a familiar word ("Not Google Chrome", "Brave
+// Updater"). Scope note: identity is established by the exact
+// product name; this check does not independently verify the
+// release channel beyond what the product name itself states.
 func kindFromProductName(product string) (Kind, bool) {
-	p := strings.ToLower(product)
-	switch {
-	case strings.Contains(p, "brave"):
-		return KindBrave, true
-	case strings.Contains(p, "google chrome"):
+	switch strings.TrimSpace(product) {
+	case "Google Chrome":
 		return KindChrome, true
-	case strings.Contains(p, "chromium"):
+	case "Brave Browser":
+		return KindBrave, true
+	case "Chromium":
 		return KindChromium, true
 	}
 	return "", false

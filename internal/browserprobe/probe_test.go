@@ -119,3 +119,35 @@ func TestVerifyIgnoresFilename(t *testing.T) {
 		t.Fatalf("got %+v, want verified Brave", got)
 	}
 }
+
+func TestProductNameWhitelist(t *testing.T) {
+	accepted := map[string]Kind{
+		"Google Chrome": KindChrome,
+		"Brave Browser": KindBrave,
+		"Chromium":      KindChromium,
+	}
+	for name, want := range accepted {
+		if got, ok := kindFromProductName(name); !ok || got != want {
+			t.Errorf("kindFromProductName(%q) = %q, %v; want %q", name, got, ok, want)
+		}
+	}
+	rejected := []string{
+		"Google Chrome Beta",
+		"Google Chrome Dev",
+		"Google Chrome Canary",
+		"Brave Browser Beta",
+		"Brave Browser Nightly",
+		"Not Google Chrome",
+		"Brave Updater",
+		"Google Chrome Helper",
+		"Chromium Browser",
+		"chrome",
+		"My Chrome Clone",
+		"",
+	}
+	for _, name := range rejected {
+		if got, ok := kindFromProductName(name); ok {
+			t.Errorf("kindFromProductName(%q) = %q, want rejection", name, got)
+		}
+	}
+}

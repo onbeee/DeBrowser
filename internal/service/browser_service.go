@@ -62,6 +62,11 @@ type BrowserService struct {
 	// tests substitute fakes).
 	inspector browserprobe.Inspector
 	manager   *kernels.Manager
+
+	// installTimeout bounds one whole managed-kernel installation
+	// (metadata fetch + download + extraction + verification +
+	// registration) under a single controlled context.
+	installTimeout time.Duration
 }
 
 // InstallProgress is one managed-kernel install progress update.
@@ -110,11 +115,12 @@ type StableVersionView struct {
 func NewBrowserService(db *database.DB, layout paths.Layout, log *slog.Logger) *BrowserService {
 	insp := browserprobe.NewInspector()
 	return &BrowserService{
-		store:     store.New(db),
-		layout:    layout,
-		log:       log,
-		inspector: insp,
-		manager:   &kernels.Manager{Fetcher: kernels.HTTPFetcher{}, Inspector: insp},
+		store:          store.New(db),
+		layout:         layout,
+		log:            log,
+		inspector:      insp,
+		manager:        &kernels.Manager{Fetcher: kernels.HTTPFetcher{}, Inspector: insp},
+		installTimeout: 15 * time.Minute,
 	}
 }
 
@@ -406,9 +412,19 @@ func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
 	var err error
 	defer func() { auditOp(s.Auditor, "kernel.install", "kernel", out.ID, start, err) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// ONE controlled context governs the entire installation —
+	// metadata fetch, ZIP download, extraction, verification and
+	// registration. On timeout or cancellation the manager cleans
+	// its temporary download/extraction files and nothing is
+	// registered, so no half-installed, unregistered kernel can be
+	// left behind.
+	timeout := s.installTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	body, ferr := s.manager.Fetcher.Get(ctx, kernels.MetadataURL)
-	cancel()
 	if ferr != nil {
 		err = fmt.Errorf("获取官方版本信息失败：%w", ferr)
 		return KernelView{}, err
@@ -424,7 +440,7 @@ func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
 			s.OnProgress(InstallProgress{Version: rel.Version, Phase: phase, Percent: percent})
 		}
 	}
-	dir, ierr := s.manager.Install(context.Background(), s.layout.Kernels, rel, emit)
+	dir, ierr := s.manager.Install(ctx, s.layout.Kernels, rel, emit)
 	if ierr != nil {
 		if errors.Is(ierr, kernels.ErrAlreadyInstalled) {
 			err = fmt.Errorf("该版本内核已经安装")
@@ -442,7 +458,7 @@ func (s *BrowserService) InstallManagedKernel() (KernelView, error) {
 		err = fmt.Errorf("安装内核失败：%w", rerr)
 		return KernelView{}, err
 	}
-	k, cerr := s.store.CreateKernel(context.Background(), model.Kernel{
+	k, cerr := s.store.CreateKernel(ctx, model.Kernel{
 		Version:        rel.Version,
 		Channel:        "stable",
 		Platform:       kernels.Platform,

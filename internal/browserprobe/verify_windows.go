@@ -5,7 +5,6 @@ package browserprobe
 import (
 	"fmt"
 	"os"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -25,8 +24,14 @@ var (
 	procGetFileVersionInfo     = versionDLL.NewProc("GetFileVersionInfoW")
 	procVerQueryValue          = versionDLL.NewProc("VerQueryValueW")
 
-	procCertNameToStr  = crypt32DLL.NewProc("CertNameToStrW")
 	procWinVerifyTrust = wintrustDLL.NewProc("WinVerifyTrust")
+
+	procCryptMsgGetParam    = crypt32DLL.NewProc("CryptMsgGetParam")
+	procCryptMsgClose       = crypt32DLL.NewProc("CryptMsgClose")
+	procCryptDecodeObjectEx = crypt32DLL.NewProc("CryptDecodeObjectEx")
+
+	kernel32DLL   = windows.NewLazySystemDLL("kernel32.dll")
+	procLocalFree = kernel32DLL.NewProc("LocalFree")
 )
 
 // NewInspector returns the Windows inspector.
@@ -137,7 +142,11 @@ const (
 	trustENoSignature                    = 0x800B0100
 	certQueryObjectFile                  = 1
 	certQueryContentFlagPKCS7SignedEmbed = 1 << 10
-	certX500NameStr                      = 3
+	cmsgSignerCountParam                 = 5
+	cmsgSignerInfoParam                  = 6
+	x509Name                             = 7 // MAKEINTRESOURCE(7)
+	cryptDecodeAllocFlag                 = 0x8000
+	x509ASNEncoding                      = 1
 )
 
 func (windowsInspector) Signature(path string) (Signature, error) {
@@ -181,51 +190,195 @@ func (windowsInspector) Signature(path string) (Signature, error) {
 	}
 }
 
-// signerPublisher extracts the organization (O=) of the embedded
-// signer's certificate subject.
+// dataBlob mirrors the Crypt32 CRYPT_DATA_BLOB layout (x64).
+type dataBlob struct {
+	cbData uint32
+	pbData *byte
+}
+
+func blobBytes(b dataBlob) []byte {
+	if b.cbData == 0 || b.pbData == nil {
+		return nil
+	}
+	out := make([]byte, b.cbData)
+	copy(out, unsafe.Slice(b.pbData, b.cbData))
+	return out
+}
+
+// cmsgSignerInfoHead mirrors the head of CMSG_SIGNER_INFO — the
+// only fields signer identification needs (dwVersion, Issuer,
+// SerialNumber); the remaining fields are not read.
+type cmsgSignerInfoHead struct {
+	dwVersion    uint32
+	issuer       dataBlob
+	serialNumber dataBlob
+}
+
+// signerPublisher returns the organization (O=) of the certificate
+// that ACTUALLY signed the file. It reads the signer identifier
+// (Issuer + SerialNumber) from the PKCS#7 signer info via
+// CryptMsgGetParam, then selects the one certificate in the
+// embedded store matching that identifier (see signer.go). The
+// first certificate in the store is never trusted on its own, and
+// any ambiguity or missing data is an error.
 func signerPublisher(pathUTF16 *uint16) (string, error) {
 	var hStore windows.Handle
+	var hMsg windows.Handle
 	err := windows.CryptQueryObject(
 		certQueryObjectFile,
 		unsafe.Pointer(pathUTF16),
 		certQueryContentFlagPKCS7SignedEmbed,
-		0, 0, nil, nil, nil, &hStore, nil, nil)
-	if err != nil || hStore == 0 {
-		return "", fmt.Errorf("open embedded signature store failed: %w", err)
+		0, 0, nil, nil, nil, &hStore, &hMsg, nil)
+	if err != nil || hStore == 0 || hMsg == 0 {
+		return "", fmt.Errorf("open embedded signature failed: %w", err)
 	}
 	defer func() { _ = windows.CertCloseStore(hStore, 0) }()
-	cert, err := windows.CertEnumCertificatesInStore(hStore, nil)
-	if err != nil || cert == nil {
-		return "", fmt.Errorf("no signer certificate found: %w", err)
+	defer func() { _, _, _ = procCryptMsgClose.Call(uintptr(hMsg)) }()
+
+	issuer, serial, err := msgSignerID(hMsg)
+	if err != nil {
+		return "", err
 	}
-	defer func() { _ = windows.CertFreeCertificateContext(cert) }()
-	if cert.CertInfo == nil {
-		return "", fmt.Errorf("signer certificate has no info block")
+	cands, err := storeCandidates(hStore)
+	if err != nil {
+		return "", err
 	}
-	subject := &cert.CertInfo.Subject
-	n, _, _ := procCertNameToStr.Call(
-		1, // X509_ASN_ENCODING
-		uintptr(unsafe.Pointer(subject)),
-		certX500NameStr, 0, 0, 0)
-	if n <= 1 {
-		return "", fmt.Errorf("read signer name failed")
-	}
-	buf := make([]uint16, n)
-	procCertNameToStr.Call(
-		1, uintptr(unsafe.Pointer(subject)), certX500NameStr, 0,
-		uintptr(unsafe.Pointer(&buf[0])), n)
-	name := windows.UTF16ToString(buf)
-	return parseOrganization(name), nil
+	return signerPublisherFromCandidates(issuer, serial, cands)
 }
 
-// parseOrganization extracts the O= component of an X.500 name
-// string like "CN=Google LLC, O=Google LLC, C=US".
-func parseOrganization(x500 string) string {
-	for _, part := range strings.Split(x500, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "O=") {
-			return strings.Trim(strings.TrimPrefix(part, "O="), `"`)
+// msgSignerID extracts the signer identifier of the message's
+// single signer.
+func msgSignerID(hMsg windows.Handle) (issuer, serial []byte, err error) {
+	var count uint32
+	var size uint32
+	r, _, callErr := procCryptMsgGetParam.Call(uintptr(hMsg), cmsgSignerCountParam, 0,
+		uintptr(unsafe.Pointer(&count)), uintptr(unsafe.Pointer(&size)))
+	if r == 0 {
+		return nil, nil, fmt.Errorf("read signer count failed: %w", callErr)
+	}
+	if count != 1 {
+		return nil, nil, fmt.Errorf("signature has %d signers, want exactly 1", count)
+	}
+	size = 0
+	r, _, callErr = procCryptMsgGetParam.Call(uintptr(hMsg), cmsgSignerInfoParam, 0, 0,
+		uintptr(unsafe.Pointer(&size)))
+	if r == 0 || size < uint32(unsafe.Sizeof(cmsgSignerInfoHead{})) {
+		return nil, nil, fmt.Errorf("size signer info failed: %w", callErr)
+	}
+	buf := make([]byte, size)
+	r, _, callErr = procCryptMsgGetParam.Call(uintptr(hMsg), cmsgSignerInfoParam, 0,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)))
+	if r == 0 {
+		return nil, nil, fmt.Errorf("read signer info failed: %w", callErr)
+	}
+	head := (*cmsgSignerInfoHead)(unsafe.Pointer(&buf[0]))
+	return blobBytes(head.issuer), blobBytes(head.serialNumber), nil
+}
+
+// storeCandidates enumerates the embedded certificate store into
+// matchable candidates with decoded subjects. Following the
+// CertEnumCertificatesInStore contract, each context is released
+// by passing it to the next call; the terminating call releases
+// the last one.
+func storeCandidates(hStore windows.Handle) ([]certCandidate, error) {
+	var out []certCandidate
+	var prev *windows.CertContext
+	for {
+		cert, err := windows.CertEnumCertificatesInStore(hStore, prev)
+		if err != nil || cert == nil {
+			break
+		}
+		prev = cert
+		if cert.CertInfo == nil {
+			continue
+		}
+		info := cert.CertInfo
+		cand := certCandidate{
+			Issuer:       blobBytes(dataBlob{cbData: info.Issuer.Size, pbData: info.Issuer.Data}),
+			SerialNumber: blobBytes(dataBlob{cbData: info.SerialNumber.Size, pbData: info.SerialNumber.Data}),
+		}
+		if cert.EncodedCert != nil && cert.Length > 0 {
+			cand.Encoded = make([]byte, cert.Length)
+			copy(cand.Encoded, unsafe.Slice(cert.EncodedCert, cert.Length))
+		}
+		attrs, derr := decodeSubjectName(info.Subject.Data, info.Subject.Size)
+		if derr != nil {
+			return nil, derr
+		}
+		cand.Subject = attrs
+		out = append(out, cand)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("embedded signature store contains no certificates")
+	}
+	return out, nil
+}
+
+// Raw CERT_NAME_INFO decode structures (x64 layout).
+type certRDNAttrRaw struct {
+	pszObjId    *byte
+	dwValueType uint32
+	value       dataBlob
+}
+
+type certRDNRaw struct {
+	cRDNAttr  uint32
+	rgRDNAttr *certRDNAttrRaw
+}
+
+type certNameInfoRaw struct {
+	cRDN  uint32
+	rgRDN *certRDNRaw
+}
+
+// decodeSubjectName decodes a DER X.509 name via CryptDecodeObjectEx
+// (X509_NAME) into individual attributes — the reliable X.500
+// attribute parsing path; no rendered-name string splitting is
+// involved, so values containing commas, quotes or '=' survive
+// verbatim. String attribute values are returned by Crypt32 in
+// UTF-16LE form.
+func decodeSubjectName(data *byte, size uint32) ([]nameAttribute, error) {
+	if data == nil || size == 0 {
+		return nil, fmt.Errorf("empty certificate subject")
+	}
+	var outPtr unsafe.Pointer
+	var outSize uint32
+	r, _, callErr := procCryptDecodeObjectEx.Call(
+		x509ASNEncoding, x509Name,
+		uintptr(unsafe.Pointer(data)), uintptr(size),
+		cryptDecodeAllocFlag, 0,
+		uintptr(unsafe.Pointer(&outPtr)), uintptr(unsafe.Pointer(&outSize)))
+	if r == 0 || outPtr == nil {
+		return nil, fmt.Errorf("decode certificate subject failed: %w", callErr)
+	}
+	defer func() { _, _, _ = procLocalFree.Call(uintptr(outPtr)) }()
+	info := (*certNameInfoRaw)(outPtr)
+	var attrs []nameAttribute
+	rdns := unsafe.Slice(info.rgRDN, info.cRDN)
+	for _, rdn := range rdns {
+		rawAttrs := unsafe.Slice(rdn.rgRDNAttr, rdn.cRDNAttr)
+		for _, ra := range rawAttrs {
+			attr := nameAttribute{OID: cString(ra.pszObjId)}
+			// Types 1 (encoded blob) and 2 (octet string) are
+			// binary, not text; every other RDN value type is a
+			// character string delivered as UTF-16LE.
+			if ra.dwValueType != 1 && ra.dwValueType != 2 && ra.value.cbData >= 2 {
+				u16 := unsafe.Slice((*uint16)(unsafe.Pointer(ra.value.pbData)), ra.value.cbData/2)
+				attr.Value = windows.UTF16ToString(u16)
+			}
+			attrs = append(attrs, attr)
 		}
 	}
-	return ""
+	return attrs, nil
+}
+
+func cString(p *byte) string {
+	if p == nil {
+		return ""
+	}
+	n := 0
+	for *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(p)) + uintptr(n))) != 0 {
+		n++
+	}
+	return string(unsafe.Slice(p, n))
 }
