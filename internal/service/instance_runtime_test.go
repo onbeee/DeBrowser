@@ -159,6 +159,15 @@ func (l *fakeLauncher) plant(pid int, info runner.Info) *fakeProcess {
 	return p
 }
 
+// shortenStopConfirm shrinks the stop operation's wait for the
+// watcher's cleanup signal, for tests whose close never lands.
+func shortenStopConfirm(t *testing.T) func() {
+	t.Helper()
+	orig := stopConfirmTimeout
+	stopConfirmTimeout = 100 * time.Millisecond
+	return func() { stopConfirmTimeout = orig }
+}
+
 func testRuntimeService(t *testing.T, launcher runner.Launcher) (*InstanceService, config.Config, *database.DB) {
 	t.Helper()
 	cfg, err := config.Load(func(key string) string {
@@ -237,9 +246,13 @@ func TestStartStopLifecycleWithFakeBrowser(t *testing.T) {
 	if err != nil || rt.PID != fl.lastProc.pid {
 		t.Fatalf("runtime record = %+v, %v", rt, err)
 	}
-	// Double start is refused.
-	if err := svc.StartInstance("", inst.ID); err == nil || !strings.Contains(err.Error(), "已在运行") {
-		t.Fatalf("double start error = %v", err)
+	// A repeated start of a running instance is idempotent:
+	// it succeeds without launching a second process.
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("double start: %v", err)
+	}
+	if fl.seq != 1 {
+		t.Fatalf("launches = %d, want 1 (no second process)", fl.seq)
 	}
 	// Stop closes gracefully and clears the record.
 	if err := svc.StopInstance("op-stop", inst.ID); err != nil {
@@ -355,6 +368,7 @@ func TestProcessExitIsDetected(t *testing.T) {
 }
 
 func TestStopFailureKeepsInstanceRunning(t *testing.T) {
+	defer shortenStopConfirm(t)()
 	fl := newFakeLauncher()
 	svc, _, db := testRuntimeService(t, fl)
 	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
@@ -379,6 +393,178 @@ func TestStopFailureKeepsInstanceRunning(t *testing.T) {
 		t.Fatalf("second stop: %v", err)
 	}
 	waitStatus(t, svc, inst.ID, model.StatusStopped)
+}
+
+// exitOnInspectLauncher makes the launched process die while
+// the start flow is verifying it: Inspect captures the identity
+// first, then the process exits, then the (valid) identity is
+// reported as if nothing had happened.
+type exitOnInspectLauncher struct {
+	*fakeLauncher
+}
+
+func (l *exitOnInspectLauncher) Inspect(pid int) (runner.Info, error) {
+	info, err := l.fakeLauncher.Inspect(pid)
+	if err == nil {
+		l.mu.Lock()
+		p := l.procs[pid]
+		l.mu.Unlock()
+		if p != nil {
+			p.exit(0)
+		}
+	}
+	return info, err
+}
+
+// A process that exits during the start's identity verification
+// must never be persisted as running: the launch is an ordinary
+// failure and no runtime record remains.
+func TestStartProcessExitsDuringVerification(t *testing.T) {
+	base := newFakeLauncher()
+	fl := &exitOnInspectLauncher{fakeLauncher: base}
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "核验时退出", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start of a process that died during verification succeeded")
+	}
+	waitStatus(t, svc, inst.ID, model.StatusStopped)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record written for a process that died during verification: %v", err)
+	}
+}
+
+// A stop returns only after the watcher has completed the
+// unified exit cleanup: while the close is still in flight the
+// instance reads "stopping" (never a premature "stopped"), and
+// by the time the stop returns, the runtime record is already
+// deleted by the watcher.
+func TestStopWaitsForWatcherCleanup(t *testing.T) {
+	fl := newFakeLauncher()
+	fl.closeDelayOnLaunch = 400 * time.Millisecond
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "统一清理", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- svc.StopInstance("", inst.ID) }()
+	time.Sleep(100 * time.Millisecond)
+	if got, _ := svc.GetInstance(inst.ID); got.Status != model.StatusStopping {
+		t.Fatalf("status during an in-flight close = %q, want stopping", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Fatalf("runtime record deleted before the exit landed: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// The stop returned only after the watcher's cleanup: the
+	// record is already gone and the status settled.
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record still present when the stop returned: %v", err)
+	}
+	waitStatus(t, svc, inst.ID, model.StatusStopped)
+}
+
+// A close request that reports an error while the process
+// actually exited is a successful close: the confirmed exit,
+// settled by the watcher, decides — not the request's error.
+func TestStopCloseErrorButExitedSucceeds(t *testing.T) {
+	fl := newFakeLauncher()
+	fl.closeErrOnLaunch = errors.New("close raced the exit")
+	fl.closeExitsOnLaunch = true
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "报错已退", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StopInstance("", inst.ID); err != nil {
+		t.Fatalf("stop whose close errored but the process exited: %v", err)
+	}
+	waitStatus(t, svc, inst.ID, model.StatusStopped)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record survived the raced close: %v", err)
+	}
+}
+
+// A failed stop changes nothing about ownership: the watcher
+// keeps the process, and when the browser later exits on its
+// own the watcher settles it as usual.
+func TestFailedStopLeavesWatcherInCharge(t *testing.T) {
+	defer shortenStopConfirm(t)()
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "关不掉后自关", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	fl.lastProc.closeErr = errors.New("window did not close")
+	if err := svc.StopInstance("", inst.ID); err == nil {
+		t.Fatal("stop of an unclosable browser succeeded")
+	}
+	if got, _ := svc.GetInstance(inst.ID); got.Status != model.StatusRunning {
+		t.Fatalf("status after failed stop = %q, want running", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Fatalf("runtime record lost after a failed stop: %v", err)
+	}
+	fl.lastProc.exit(0)
+	waitStatus(t, svc, inst.ID, model.StatusStopped)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record survived the self-exit after a failed stop: %v", err)
+	}
+}
+
+// One instance's browser exiting on its own never disturbs
+// another running instance.
+func TestOneInstanceSelfExitLeavesOtherRunning(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	a, err := svc.CreateInstance("", CreateInstanceInput{Name: "甲留", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.CreateInstance("", CreateInstanceInput{Name: "乙退", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	procA := fl.lastProc
+	if err := svc.StartInstance("", b.ID); err != nil {
+		t.Fatal(err)
+	}
+	fl.lastProc.exit(0)
+	waitStatus(t, svc, b.ID, model.StatusStopped)
+	got, _ := svc.GetInstance(a.ID)
+	if got.Status != model.StatusRunning {
+		t.Fatalf("A status after B self-exited = %q, want running", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), a.ID); err != nil {
+		t.Fatalf("A's runtime record disturbed by B's exit: %v", err)
+	}
+	_ = procA
+	if err := svc.StopInstance("", a.ID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRunningInstanceGates(t *testing.T) {
@@ -497,6 +683,38 @@ func TestReattachAfterRestart(t *testing.T) {
 		t.Fatalf("stop after re-attach: %v", err)
 	}
 	waitStatus(t, svc2, inst.ID, model.StatusStopped)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record survived the stop after re-attach: %v", err)
+	}
+}
+
+// After a restart re-attaches a still-running browser, the user
+// closing that browser's window is settled by the new session's
+// watcher exactly like a locally started one: status stopped,
+// runtime record deleted.
+func TestReattachThenUserCloseSettles(t *testing.T) {
+	fl := newFakeLauncher()
+	svc1, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc1.CreateInstance("", CreateInstanceInput{Name: "接管后自关", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc1.StartInstance("", inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	svc2, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("second service: %v", err)
+	}
+	if got, _ := svc2.GetInstance(inst.ID); got.Status != model.StatusRunning {
+		t.Fatalf("status after restart = %q, want running (re-attached)", got.Status)
+	}
+	fl.lastProc.exit(0)
+	waitStatus(t, svc2, inst.ID, model.StatusStopped)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record survived the re-attached browser's exit: %v", err)
+	}
 }
 
 func seedRuntimeRow(t *testing.T, db *database.DB, inst model.Instance, rt model.InstanceRuntime) {
@@ -1118,6 +1336,13 @@ func TestStartAbortCloseFailsProcessAliveHoldsUnknown(t *testing.T) {
 	// Once the process is gone, a restart's reconciliation
 	// clears the record and the instance is stopped again.
 	child.exit(0)
+	// The hold kept the process watched in THIS session too:
+	// the unified watcher settles it without any restart —
+	// record deleted, hold lifted, status stopped.
+	waitStatus(t, svc, inst.ID, model.StatusStopped)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record not cleared by the in-session watcher: %v", err)
+	}
 	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
 	if err != nil {
 		t.Fatalf("fresh service: %v", err)

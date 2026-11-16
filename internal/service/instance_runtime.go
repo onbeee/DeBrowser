@@ -81,6 +81,40 @@ var startSettleDelay = 300 * time.Millisecond
 // closeTimeout bounds one graceful close request.
 var closeTimeout = 20 * time.Second
 
+// stopConfirmTimeout bounds how long a stop operation waits for
+// the watcher's unified exit cleanup after its close request:
+// the request itself already waited inside CloseGracefully, so
+// this only covers the watcher observing the exit and landing
+// its (local) cleanup. A variable so tests can shorten it.
+var stopConfirmTimeout = 2 * time.Second
+
+// procWatch is the lifecycle handle for one adopted browser
+// process. Exactly one watcher goroutine (watchProcess) owns
+// the process's exit cleanup; done is closed when that cleanup
+// has run, so an operation that asked the process to close — a
+// stop, a failed start's cleanup — waits for the unified
+// outcome instead of cleaning up itself.
+type procWatch struct {
+	proc runner.Process
+	done chan struct{}
+	// exited is set under rtMu by the watcher the moment it
+	// observes the exit, before any cleanup: a start operation
+	// that sees it knows the process is gone and must not
+	// persist a running state for it.
+	exited bool
+	// persisted reports whether a runtime record exists for
+	// this process (written by a verified start or an
+	// unconfirmed-exit hold, or present at re-attachment). Only
+	// then does the watcher settle the database on exit; before
+	// that, the start operation owns the outcome.
+	persisted bool
+	// stopAsked is set by a stop operation before it asks the
+	// process to close: an exit the user requested through
+	// DeBrowser is a normal exit for status purposes, whatever
+	// its code (a browser answering SIGTERM reports -1, not 0).
+	stopAsked bool
+}
+
 // reconcileEvent is one startup-reconciliation outcome, buffered
 // until the unified record is wired (see ReportReconciliation).
 type reconcileEvent struct {
@@ -254,11 +288,12 @@ func (s *InstanceService) reconcileOne(c context.Context, rt model.InstanceRunti
 	outcome, proc := s.verifyRecordedProcess(rt)
 	switch outcome {
 	case verifyConfirmed:
+		w := &procWatch{proc: proc, done: make(chan struct{}), persisted: true}
 		s.rtMu.Lock()
-		s.procs[inst.ID] = proc
+		s.procs[inst.ID] = w
 		s.rtMu.Unlock()
 		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning)
-		go s.watchProcess(inst.ID, proc)
+		go s.watchProcess(inst.ID, w)
 		s.noteReconcile(inst.ID, "启动时重新识别运行中的实例", logging.StatusSuccess, "")
 		s.log.Info("re-attached to running browser instance", "id", inst.ID, "pid", rt.PID)
 	case verifyGone, verifyNotOurs:
@@ -311,45 +346,73 @@ func (s *InstanceService) applyEffectiveStatuses(list []model.Instance) {
 	}
 }
 
-// watchProcess observes one tracked browser process. When it exits
-// on its own — the user closed the window, or the browser crashed
-// — the instance's records are brought in line: runtime record
-// removed, persisted status updated (stopped for a clean exit,
-// error for an abnormal one), and the fact recorded. When a stop
-// operation is handling the exit itself it first unregisters the
-// process, and this watcher then stands down.
-func (s *InstanceService) watchProcess(instanceID string, proc runner.Process) {
-	<-proc.Exited()
+// watchProcess observes one adopted browser process and is the
+// SINGLE owner of its exit cleanup. However the process ends —
+// the user closes the window, the browser crashes, a stop
+// operation's close request takes effect, or a re-attached
+// browser exits after a DeBrowser restart — the watcher
+// performs the final cleanup exactly once: it unregisters the
+// process and, when a runtime record exists for it (the watch
+// is persisted), deletes the record, clears any stale unknown
+// hold, settles the persisted status from the exit code
+// (stopped for a clean exit, error for an abnormal one) and
+// records the fact. done is then closed, releasing any
+// operation waiting for the unified outcome. A watch that is
+// not yet persisted — a start still verifying its process — is
+// only observed: the start operation owns the outcome until it
+// marks the watch persisted.
+func (s *InstanceService) watchProcess(instanceID string, w *procWatch) {
+	<-w.proc.Exited()
 	s.rtMu.Lock()
-	current, tracked := s.procs[instanceID]
-	if !tracked || current != proc {
-		s.rtMu.Unlock()
-		return // a stop operation owns this exit
+	if s.procs[instanceID] == w {
+		delete(s.procs, instanceID)
 	}
-	delete(s.procs, instanceID)
+	w.exited = true
+	persisted := w.persisted
+	stopAsked := w.stopAsked
 	s.rtMu.Unlock()
+	if persisted {
+		c, cancel := ctx()
+		defer cancel()
+		_ = s.store.DeleteInstanceRuntime(c, instanceID)
+		code := w.proc.ExitCode()
+		status := model.StatusStopped
+		action := "浏览器进程已退出"
+		recStatus := logging.StatusSuccess
+		if code != 0 && !stopAsked {
+			status = model.StatusError
+			action = "浏览器进程异常退出"
+			recStatus = logging.StatusFailed
+		}
+		_ = s.store.SetInstanceStatus(c, instanceID, status)
+		s.clearUnverifiedMark(instanceID)
+		if s.Auditor != nil {
+			s.Auditor.RecordRuntime("浏览器实例", action, recStatus, map[string]string{
+				"instance_id": instanceID,
+				"pid":         strconv.Itoa(w.proc.PID()),
+				"exit_code":   strconv.Itoa(code),
+			})
+		}
+		s.log.Info("browser process exited", "instance", instanceID, "pid", w.proc.PID(), "exitCode", code)
+	}
+	close(w.done)
+}
 
-	c, cancel := ctx()
-	defer cancel()
-	_ = s.store.DeleteInstanceRuntime(c, instanceID)
-	code := proc.ExitCode()
-	status := model.StatusStopped
-	action := "浏览器进程已退出"
-	recStatus := logging.StatusSuccess
-	if code != 0 {
-		status = model.StatusError
-		action = "浏览器进程异常退出"
-		recStatus = logging.StatusFailed
+// detachWatch removes a watch from the tracked map while its
+// watcher goroutine keeps running on the watch itself. It is
+// used when a start ends in the unknown hold: the instance must
+// read "unknown", not "running", yet the watcher still owns the
+// process's eventual exit cleanup (and settles it, once the
+// hold's runtime record makes the watch persisted).
+func (s *InstanceService) detachWatch(id string, w *procWatch, persisted bool) {
+	s.rtMu.Lock()
+	if s.procs[id] == w {
+		delete(s.procs, id)
 	}
-	_ = s.store.SetInstanceStatus(c, instanceID, status)
-	if s.Auditor != nil {
-		s.Auditor.RecordRuntime("浏览器实例", action, recStatus, map[string]string{
-			"instance_id": instanceID,
-			"pid":         strconv.Itoa(proc.PID()),
-			"exit_code":   strconv.Itoa(code),
-		})
+	if persisted {
+		w.persisted = true
 	}
-	s.log.Info("browser process exited", "instance", instanceID, "pid", proc.PID(), "exitCode", code)
+	s.rtMu.Unlock()
 }
 
 // holdUnconfirmedInstance puts an instance whose browser may
@@ -435,16 +498,18 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 		return err
 	}
 	s.rtMu.Lock()
-	if _, running := s.procs[id]; running {
-		s.rtMu.Unlock()
-		return fmt.Errorf("实例已在运行中")
-	}
 	if t, busy := s.transient[id]; busy {
 		s.rtMu.Unlock()
 		if t == model.StatusStarting {
 			return fmt.Errorf("实例正在启动中")
 		}
 		return fmt.Errorf("实例正在关闭中")
+	}
+	if _, running := s.procs[id]; running {
+		// Already running: the start requirement is satisfied —
+		// never create a second process for the same instance.
+		s.rtMu.Unlock()
+		return nil
 	}
 	if s.unverified[id] {
 		s.rtMu.Unlock()
@@ -541,6 +606,17 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	}
 	op.Step("启动浏览器进程", logging.StatusSuccess, map[string]string{"pid": strconv.Itoa(proc.PID())})
 
+	// Exit monitoring starts NOW, before any verification: from
+	// this moment the watcher owns the process's exit cleanup,
+	// so an exit at any point of the remaining start sequence is
+	// observed exactly once and can never be overwritten by the
+	// start flow persisting a running state for a dead process.
+	w := &procWatch{proc: proc, done: make(chan struct{})}
+	s.rtMu.Lock()
+	s.procs[id] = w
+	s.rtMu.Unlock()
+	go s.watchProcess(id, w)
+
 	// A process object is not proof of a running browser: the
 	// process must survive the settle window, and its verified
 	// identity must match what was launched.
@@ -555,6 +631,7 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 		// posted, signal delivered) is not proof of exit, and a
 		// close error racing a real exit is still an exit.
 		if confirmChildExited(proc) {
+			s.detachWatch(id, w, false)
 			op.Step("清理未核验的浏览器进程", logging.StatusSuccess, nil)
 			return fail(err)
 		}
@@ -577,11 +654,18 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 			op.Step("写入运行记录", logging.StatusFailed, nil)
 			if confirmChildExited(proc) {
 				s.clearUnverifiedMark(inst.ID)
+				s.detachWatch(id, w, false)
 				op.Step("清理未核验的浏览器进程", logging.StatusSuccess, nil)
 				return fail(err)
 			}
+			s.detachWatch(id, w, false)
 			return fail(fmt.Errorf("严重错误：无法确认浏览器进程是否已退出，且运行记录写入失败，重启后可能无法恢复该实例的保护状态：%w", herr))
 		}
+		// The hold is durable: the watcher keeps owning this
+		// process's exit (now with a record to settle), but the
+		// instance must read "unknown", not "running", until a
+		// startup reconciliation re-verifies it.
+		s.detachWatch(id, w, true)
 		return fail(fmt.Errorf("无法确认浏览器进程是否已退出，实例已进入无法确认状态：%w", err))
 	}
 	select {
@@ -624,18 +708,28 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 		UserDataDir:      inst.UserDataDir,
 		StartedAt:        time.Now().Format(time.RFC3339),
 	}
+	// Persist under rtMu, serialized against the watcher: if it
+	// has already observed the exit, the launch is an ordinary
+	// failure and nothing may be written back as running; if it
+	// observes the exit during the writes, it runs after this
+	// block and settles the just-written record itself.
+	s.rtMu.Lock()
+	if w.exited || processExited(proc) {
+		s.rtMu.Unlock()
+		return abort(fmt.Errorf("浏览器启动后立即退出"))
+	}
 	if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
+		s.rtMu.Unlock()
 		return abort(fmt.Errorf("保存运行状态失败：%w", err))
 	}
 	if err := s.store.SetInstanceStatus(c, id, model.StatusRunning); err != nil {
 		_ = s.store.DeleteInstanceRuntime(c, id)
+		s.rtMu.Unlock()
 		return abort(fmt.Errorf("保存运行状态失败：%w", err))
 	}
-	s.rtMu.Lock()
-	s.procs[id] = proc
+	w.persisted = true
 	delete(s.transient, id)
 	s.rtMu.Unlock()
-	go s.watchProcess(id, proc)
 	s.log.Info("browser instance started", "id", id, "pid", proc.PID(), "dir", inst.UserDataDir)
 	return nil
 }
@@ -661,12 +755,14 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 		return err
 	}
 	s.rtMu.Lock()
-	proc, tracked := s.procs[id]
+	w, tracked := s.procs[id]
 	if tracked {
-		// Unregister first: the exit watcher stands down and this
-		// operation owns the outcome.
-		delete(s.procs, id)
+		if s.transient[id] == model.StatusStarting {
+			s.rtMu.Unlock()
+			return fmt.Errorf("实例正在启动中")
+		}
 		s.transient[id] = model.StatusStopping
+		w.stopAsked = true
 	}
 	s.rtMu.Unlock()
 	if !tracked {
@@ -680,23 +776,26 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 		delete(s.transient, id)
 		s.rtMu.Unlock()
 	}
-	if err := proc.CloseGracefully(closeTimeout); err != nil {
-		// The browser did not close: restore tracking (the exit
-		// watcher resumes ownership) and tell the truth — the
-		// instance is still running.
-		s.rtMu.Lock()
-		s.procs[id] = proc
-		delete(s.transient, id)
-		s.rtMu.Unlock()
+	// Ask the exact tracked process to close and let the
+	// watcher own the outcome: the close request is not the
+	// cleanup. The watcher stays registered; when the exit is
+	// observed it alone deletes the runtime record and settles
+	// the status, and its done signal releases this operation.
+	// A close error is not decisive either — an exit racing it
+	// still counts, through the same signal.
+	_ = w.proc.CloseGracefully(closeTimeout)
+	select {
+	case <-w.done:
+		clearTransient()
+		op.Step("关闭浏览器", logging.StatusSuccess, nil)
+		s.log.Info("browser instance stopped", "id", id, "pid", w.proc.PID())
+		return nil
+	case <-time.After(stopConfirmTimeout):
+		// The process is still alive and still watched: report
+		// the failure truthfully, with the instance still
+		// running — never a premature "stopped".
+		clearTransient()
 		op.Step("关闭浏览器", logging.StatusFailed, nil)
-		return fmt.Errorf("关闭未完成：浏览器未能正常退出（%v），实例仍在运行", err)
+		return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
 	}
-	clearTransient()
-	_ = s.store.DeleteInstanceRuntime(c, id)
-	if err := s.store.SetInstanceStatus(c, id, model.StatusStopped); err != nil {
-		return err
-	}
-	op.Step("关闭浏览器", logging.StatusSuccess, nil)
-	s.log.Info("browser instance stopped", "id", id, "pid", proc.PID())
-	return nil
 }

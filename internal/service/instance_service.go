@@ -51,7 +51,7 @@ type InstanceService struct {
 	// persisted status stays "running" with the runtime record
 	// kept, so the next startup reconciles them again.
 	rtMu       sync.Mutex
-	procs      map[string]runner.Process
+	procs      map[string]*procWatch
 	transient  map[string]model.InstanceStatus
 	unverified map[string]bool
 	// reconcileEvents accumulates the outcomes of the startup
@@ -91,7 +91,7 @@ func newInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger, 
 		layout:     layout,
 		log:        log,
 		launcher:   launcher,
-		procs:      map[string]runner.Process{},
+		procs:      map[string]*procWatch{},
 		transient:  map[string]model.InstanceStatus{},
 		unverified: map[string]bool{},
 	}

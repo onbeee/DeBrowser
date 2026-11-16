@@ -388,6 +388,15 @@ func TestRealStartAbortUnconfirmedExitHoldsUnknown(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// The hold kept the process watched in this session, so the
+	// unified watcher settles it here first: the record is
+	// deleted and the abnormal (killed) exit lands as "error".
+	waitStatus(t, svc, inst.ID, model.StatusError)
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record not cleared after the child disappeared: %v", err)
+	}
+	// A restart then finds nothing to re-attach and nothing
+	// left at unknown: the settled state stands.
 	fresh, err := NewInstanceService(db, cfg.Layout, slog.Default())
 	if err != nil {
 		t.Fatalf("fresh service: %v", err)
@@ -396,10 +405,7 @@ func TestRealStartAbortUnconfirmedExitHoldsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != model.StatusStopped {
-		t.Fatalf("after restart with the child gone: status = %q, want stopped", got.Status)
-	}
-	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("runtime record not cleared after the child disappeared: %v", err)
+	if got.Status == model.StatusUnknown || got.Status == model.StatusRunning {
+		t.Fatalf("after restart with the child gone: status = %q, want a settled state", got.Status)
 	}
 }
