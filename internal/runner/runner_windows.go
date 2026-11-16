@@ -20,7 +20,11 @@ func systemLauncher() Launcher { return winLauncher{} }
 type winLauncher struct{}
 
 const (
-	winProcessAccess = windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.SYNCHRONIZE
+	// PROCESS_VM_READ is required for the command line read
+	// (ReadProcessMemory on the target's PEB): with query access
+	// alone that read is denied and identity verification could
+	// never succeed on Windows.
+	winProcessAccess = windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.PROCESS_VM_READ | windows.SYNCHRONIZE
 	wmClose          = 0x0010
 )
 

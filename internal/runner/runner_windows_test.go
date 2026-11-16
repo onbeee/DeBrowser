@@ -122,14 +122,29 @@ func TestWindowsLaunchUnconfirmedTerminationIsReported(t *testing.T) {
 	l := winLauncher{}
 	_, err := launchChild(t, l, 0)
 	untracked := requireUntracked(t, err, false)
-	// The child really is still running: end it from outside so
-	// the test leaves nothing behind.
+	// The child really is still running (the whole point of the
+	// unconfirmed report): prove it by observing that waiting on
+	// it does not return, then end it from outside so the test
+	// leaves nothing behind. (Inspect cannot be the oracle here:
+	// the unreaped launch handle keeps the terminated process
+	// object queryable even after it dies.)
 	p, ferr := os.FindProcess(untracked.PID)
 	if ferr != nil {
 		t.Fatal(ferr)
 	}
+	waited := make(chan struct{})
+	go func() { _, _ = p.Wait(); close(waited) }()
+	select {
+	case <-waited:
+		t.Fatal("child exited on its own; the unconfirmed-termination scenario did not hold")
+	case <-time.After(300 * time.Millisecond):
+	}
 	if kerr := p.Kill(); kerr != nil {
 		t.Fatalf("cleanup kill: %v", kerr)
 	}
-	requireGone(t, l, untracked.PID)
+	select {
+	case <-waited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child did not exit after the cleanup kill")
+	}
 }
