@@ -32,6 +32,12 @@ type fakeProcess struct {
 	code     int
 	closeErr error
 	closes   int
+	// closeExits makes CloseGracefully end the process even
+	// while returning closeErr (a close error racing a real
+	// exit). closeDelay makes the close take that long before
+	// answering (a close that outlives the caller's patience).
+	closeExits bool
+	closeDelay time.Duration
 }
 
 func (p *fakeProcess) PID() int                { return p.pid }
@@ -43,6 +49,13 @@ func (p *fakeProcess) exit(code int) {
 }
 func (p *fakeProcess) CloseGracefully(time.Duration) error {
 	p.closes++
+	if p.closeDelay > 0 {
+		time.Sleep(p.closeDelay)
+	}
+	if p.closeExits {
+		p.exit(0)
+		return p.closeErr
+	}
 	if p.closeErr != nil {
 		return p.closeErr
 	}
@@ -63,7 +76,11 @@ type fakeLauncher struct {
 	// cmdlineOverride, when set, replaces the command line
 	// Inspect reports for launched processes (verbatim).
 	cmdlineOverride string
-	lastProc        *fakeProcess
+	// Close behavior copied onto every launched process.
+	closeErrOnLaunch   error
+	closeExitsOnLaunch bool
+	closeDelayOnLaunch time.Duration
+	lastProc           *fakeProcess
 }
 
 func newFakeLauncher() *fakeLauncher {
@@ -82,7 +99,8 @@ func (l *fakeLauncher) Launch(executable string, args ...string) (runner.Process
 	}
 	l.seq++
 	pid := 1000 + l.seq
-	p := &fakeProcess{pid: pid, created: int64(pid * 100), exited: make(chan struct{})}
+	p := &fakeProcess{pid: pid, created: int64(pid * 100), exited: make(chan struct{}),
+		closeErr: l.closeErrOnLaunch, closeExits: l.closeExitsOnLaunch, closeDelay: l.closeDelayOnLaunch}
 	cmdline := executable + " " + strings.Join(args, " ")
 	if l.spoofDir {
 		cmdline = executable + ` --user-data-dir=C:\elsewhere\other-profile`
@@ -898,5 +916,384 @@ func TestReconcileRecordWithoutCreationTimeGoneClears(t *testing.T) {
 	}
 	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("runtime record survived after the process was gone: %v", err)
+	}
+}
+
+// --- Round 2: abort cleanup confirmation + mandatory exe path ---
+
+func statusOf(t *testing.T, svc *InstanceService, id string) model.InstanceStatus {
+	t.Helper()
+	got, err := svc.GetInstance(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got.Status
+}
+
+// Verification fails after the child already exited on its own:
+// the abort is an ordinary start failure — stopped, no record,
+// and the instance can start again right away.
+func TestStartAbortWhenChildAlreadyExited(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "验证前已退出", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := 3
+	fl.exitOnLaunch = &code
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start succeeded for a child that exited during the settle window")
+	}
+	if got := statusOf(t, svc, inst.ID); got != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record exists after a confirmed-exit abort: %v", err)
+	}
+	fl.exitOnLaunch = nil
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("restart after confirmed-exit abort: %v", err)
+	}
+}
+
+// Verification fails and the graceful close succeeds: the exit
+// is confirmed through the close, so this stays an ordinary
+// start failure and nothing is held.
+func TestStartAbortGracefulCloseConfirmsExit(t *testing.T) {
+	fl := newFakeLauncher()
+	fl.spoofDir = true
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "中止关闭成功", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start succeeded with a foreign user-data-dir")
+	}
+	if fl.lastProc.closes != 1 {
+		t.Fatalf("graceful closes = %d, want exactly 1 (the exact child)", fl.lastProc.closes)
+	}
+	select {
+	case <-fl.lastProc.exited:
+	default:
+		t.Fatal("child did not exit after the graceful close")
+	}
+	if got := statusOf(t, svc, inst.ID); got != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record held after a confirmed exit: %v", err)
+	}
+	fl.spoofDir = false
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("restart after graceful-close abort: %v", err)
+	}
+}
+
+// The close call returns an error but the process has in fact
+// exited (a close error racing a real exit): the observed exit
+// wins and the abort is an ordinary start failure.
+func TestStartAbortCloseErrorButChildExited(t *testing.T) {
+	fl := newFakeLauncher()
+	fl.spoofDir = true
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "关闭报错但已退出", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.closeExitsOnLaunch = true
+	fl.closeErrOnLaunch = errors.New("close raced with exit")
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start succeeded with a foreign user-data-dir")
+	} else if !strings.Contains(err.Error(), "未使用该实例的实例文件") {
+		t.Fatalf("error = %v, want the original verification failure (ordinary abort)", err)
+	}
+	if got := statusOf(t, svc, inst.ID); got != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped (exit was confirmed despite the close error)", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record held after a confirmed exit: %v", err)
+	}
+}
+
+// The close fails and the process is still alive (WM_CLOSE
+// ineffective, no window, a confirmation dialog — the class of
+// failures where the request was sent but nothing exited): the
+// abort must NOT be an ordinary failure. The instance is held
+// unknown with a COMPLETE runtime record, every risky operation
+// is frozen, other instances are untouched, and a later restart
+// clears the hold once the process is gone.
+func TestStartAbortCloseFailsProcessAliveHoldsUnknown(t *testing.T) {
+	fl := newFakeLauncher()
+	fl.spoofDir = true
+	fl.closeErrOnLaunch = errors.New("no top-level window")
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	registerFakeBrowser(t, db, "reg-b", "fake-browser-b.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "中止无法确认退出", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := svc.CreateInstance("", CreateInstanceInput{Name: "不受影响的实例", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = svc.StartInstance("", inst.ID)
+	if err == nil {
+		t.Fatal("start succeeded with a foreign user-data-dir")
+	}
+	if !strings.Contains(err.Error(), "无法确认") {
+		t.Fatalf("error = %v, want it to state the exit could not be confirmed", err)
+	}
+	child := fl.lastProc
+	if got := statusOf(t, svc, inst.ID); got != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown", got)
+	}
+	rt, rerr := store.New(db).GetInstanceRuntime(t.Context(), inst.ID)
+	if rerr != nil {
+		t.Fatalf("runtime record missing for the held instance: %v", rerr)
+	}
+	if rt.PID != child.pid || rt.ProcessCreatedAt != child.created || rt.ProcessCreatedAt == 0 {
+		t.Fatalf("record = pid %d created %d, want the child's pid %d and its real creation time %d",
+			rt.PID, rt.ProcessCreatedAt, child.pid, child.created)
+	}
+	// Every risky operation is frozen while the exit is
+	// unconfirmed.
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Error("second start allowed while exit unconfirmed")
+	}
+	if err := svc.StopInstance("", inst.ID); err == nil {
+		t.Error("stop allowed while exit unconfirmed")
+	}
+	if err := svc.DeleteInstance("", inst.ID); err == nil {
+		t.Error("delete allowed while exit unconfirmed")
+	}
+	if err := svc.DeleteInstanceAndProfile("", inst.ID); err == nil {
+		t.Error("delete-with-profile allowed while exit unconfirmed")
+	}
+	upd := UpdateInstanceInput{ID: inst.ID, Name: "中止无法确认退出", BrowserID: "reg-b"}
+	if _, err := svc.UpdateInstance("", upd); err == nil {
+		t.Error("kernel change allowed while exit unconfirmed")
+	}
+	upd.ProfileAction = "rename"
+	upd.ProfileName = "改名尝试"
+	if _, err := svc.UpdateInstance("", upd); err == nil {
+		t.Error("profile rename allowed while exit unconfirmed")
+	}
+	// The cleanup touched ONLY this launch's process object:
+	// exactly one close attempt, on the child itself. The other
+	// instance starts and stops completely normally.
+	if child.closes != 1 {
+		t.Fatalf("close attempts on the child = %d, want 1", child.closes)
+	}
+	fl.spoofDir = false
+	fl.closeErrOnLaunch = nil
+	if err := svc.StartInstance("", other.ID); err != nil {
+		t.Fatalf("other instance start affected by the hold: %v", err)
+	}
+	if err := svc.StopInstance("", other.ID); err != nil {
+		t.Fatalf("other instance stop affected by the hold: %v", err)
+	}
+	// Once the process is gone, a restart's reconciliation
+	// clears the record and the instance is stopped again.
+	child.exit(0)
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	if got := statusOf(t, fresh, inst.ID); got != model.StatusStopped {
+		t.Fatalf("after restart with the process gone: status = %q, want stopped", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record not cleared after the process disappeared: %v", err)
+	}
+}
+
+// A close that drags past the caller's timeout and still leaves
+// the process alive lands in the same unknown hold.
+func TestStartAbortSlowCloseHoldsUnknown(t *testing.T) {
+	old := abortCloseTimeout
+	abortCloseTimeout = 50 * time.Millisecond
+	defer func() { abortCloseTimeout = old }()
+	fl := newFakeLauncher()
+	fl.spoofDir = true
+	fl.closeErrOnLaunch = errors.New("close timed out")
+	fl.closeDelayOnLaunch = 300 * time.Millisecond
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "中止关闭超时", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start succeeded with a foreign user-data-dir")
+	}
+	if got := statusOf(t, svc, inst.ID); got != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown after a timed-out close with the process alive", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Fatalf("runtime record missing for the held instance: %v", err)
+	}
+	fl.lastProc.exit(0)
+}
+
+// A runtime record WITHOUT an executable path can never be
+// adopted, even when every other signal matches: an empty path
+// is not a wildcard.
+func TestReconcileRecordWithoutExePathStaysUnknown(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "记录缺可执行路径", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.plant(9999, runner.Info{
+		PID: 9999, CreatedAt: 4242, ExecutablePath: "fake-browser.exe",
+		CommandLine: "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst), HasCommandLine: true,
+	})
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9999, ProcessCreatedAt: 4242, Platform: runtime.GOOS,
+		ExecutablePath: "", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	if got := statusOf(t, fresh, inst.ID); got != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown (record without an executable path must not be adopted)", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Errorf("runtime record was dropped instead of held: %v", err)
+	}
+	if err := fresh.StartInstance("", inst.ID); err == nil {
+		t.Error("start allowed for an instance whose record cannot verify")
+	}
+}
+
+// A live process whose executable path cannot be READ can never
+// be adopted either.
+func TestReconcileUnreadableExePathStaysUnknown(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "进程路径不可读", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.plant(9999, runner.Info{
+		PID: 9999, CreatedAt: 4242, ExecutablePath: "",
+		CommandLine: "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst), HasCommandLine: true,
+	})
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9999, ProcessCreatedAt: 4242, Platform: runtime.GOOS,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	if got := statusOf(t, fresh, inst.ID); got != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown (unreadable executable path must not be adopted)", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Errorf("runtime record was dropped instead of held: %v", err)
+	}
+}
+
+// Both paths present but different: the process at the recorded
+// PID is provably a different browser — record cleared, instance
+// stopped — even though creation time and folder argument match.
+func TestReconcileExeMismatchIsNotOurs(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "可执行路径不一致", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.plant(9999, runner.Info{
+		PID: 9999, CreatedAt: 4242, ExecutablePath: "other-browser.exe",
+		CommandLine: "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst), HasCommandLine: true,
+	})
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9999, ProcessCreatedAt: 4242, Platform: runtime.GOOS,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	if got := statusOf(t, fresh, inst.ID); got != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped (executable mismatch disproves identity)", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record not cleared for a disproven process: %v", err)
+	}
+}
+
+// A case-only difference in the executable path is the same
+// path under Windows comparison rules: adoption proceeds (and
+// the adopted process can be stopped normally).
+func TestReconcileExeCaseDifferenceAdopts(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "路径大小写差异", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.plant(9999, runner.Info{
+		PID: 9999, CreatedAt: 4242, ExecutablePath: "FAKE-BROWSER.EXE",
+		CommandLine: "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst), HasCommandLine: true,
+	})
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9999, ProcessCreatedAt: 4242, Platform: runtime.GOOS,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	if got := statusOf(t, fresh, inst.ID); got != model.StatusRunning {
+		t.Fatalf("status = %q, want running (case-only path difference must still adopt)", got)
+	}
+	if err := fresh.StopInstance("", inst.ID); err != nil {
+		t.Fatalf("stop adopted instance: %v", err)
+	}
+}
+
+// The executable path matching does not rescue a record whose
+// creation time differs: the PID was recycled, the record is
+// cleared and the instance is stopped.
+func TestReconcileExeMatchCreatedMismatchIsNotOurs(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "创建时间不一致", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.plant(9999, runner.Info{
+		PID: 9999, CreatedAt: 9999, ExecutablePath: "fake-browser.exe",
+		CommandLine: "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst), HasCommandLine: true,
+	})
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9999, ProcessCreatedAt: 4242, Platform: runtime.GOOS,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	if got := statusOf(t, fresh, inst.ID); got != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped (creation-time mismatch disproves identity)", got)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record not cleared for a recycled PID: %v", err)
 	}
 }

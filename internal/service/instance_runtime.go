@@ -42,6 +42,23 @@ import (
 //     are independent OS processes, and their runtime records let
 //     the next DeBrowser start re-identify the ones still alive.
 
+// abortCloseTimeout bounds the graceful close asked of a
+// just-launched process whose verification failed. A variable
+// so tests can shorten it.
+var abortCloseTimeout = 3 * time.Second
+
+// processExited reports whether the tracked process's exit has
+// already been observed on its own exit channel — the only
+// proof of exit the abort path accepts.
+func processExited(p runner.Process) bool {
+	select {
+	case <-p.Exited():
+		return true
+	default:
+		return false
+	}
+}
+
 // startSettleDelay is how long a freshly launched process must
 // survive before the launch counts as successful (a field so
 // tests can shorten it).
@@ -154,12 +171,15 @@ func (s *InstanceService) verifyRecordedProcess(rt model.InstanceRuntime) (verif
 	} else if info.CreatedAt != rt.ProcessCreatedAt {
 		return verifyNotOurs, nil // PID recycled by another process
 	}
-	if rt.ExecutablePath != "" {
-		if info.ExecutablePath == "" {
-			unprovable = true
-		} else if !strings.EqualFold(filepath.Clean(info.ExecutablePath), filepath.Clean(rt.ExecutablePath)) {
-			return verifyNotOurs, nil
-		}
+	// The executable path is a mandatory identity signal, not an
+	// optional one: a record that lacks it, or a process whose
+	// path cannot be read, can never be adopted — an empty path
+	// is never treated as a wildcard or skipped over.
+	if rt.ExecutablePath == "" || info.ExecutablePath == "" {
+		return verifyUnknown, nil
+	}
+	if !strings.EqualFold(filepath.Clean(info.ExecutablePath), filepath.Clean(rt.ExecutablePath)) {
+		return verifyNotOurs, nil // a different browser binary owns this PID
 	}
 	if !info.HasCommandLine {
 		// The instance-folder ownership — the fact that decides
@@ -318,36 +338,42 @@ func (s *InstanceService) watchProcess(instanceID string, proc runner.Process) {
 	s.log.Info("browser process exited", "instance", instanceID, "pid", proc.PID(), "exitCode", code)
 }
 
-// holdUntrackedInstance puts an instance whose browser may be
-// running without a tracking handle into the "unknown" hold: the
-// persisted status becomes running, a runtime record WITHOUT a
-// creation time is kept (so the next startup reconciles it —
-// such a record can never fully verify, so the process is never
-// adopted), and the in-memory unverified mark freezes every
-// risky operation for this session. If the database writes fail
-// the in-memory mark still holds for this session.
-func (s *InstanceService) holdUntrackedInstance(c context.Context, inst model.Instance, exe string, pid int) {
+// holdUnconfirmedInstance puts an instance whose browser may
+// still be running — without DeBrowser being able to confirm
+// its exit or keep watching it — into the "unknown" hold: the
+// persisted status becomes running, a runtime record is kept so
+// the next startup reconciliation re-judges the process instead
+// of assuming it stopped, and the in-memory unverified mark
+// freezes every risky operation for this session. createdAt is
+// the process creation time when it was captured (a launch
+// whose post-launch verification failed: the record is complete
+// and reconciliation may fully verify and re-adopt the process)
+// or 0 when tracking itself failed at launch (no creation time
+// was ever captured, so such a record can never fully verify
+// and the process is never adopted). If the database writes
+// fail the in-memory mark still holds for this session.
+func (s *InstanceService) holdUnconfirmedInstance(c context.Context, inst model.Instance, exe string, pid int, createdAt int64) {
 	if pid > 0 {
 		rt := model.InstanceRuntime{
 			InstanceID:       inst.ID,
 			PID:              pid,
-			ProcessCreatedAt: 0, // never captured: tracking failed
+			ProcessCreatedAt: createdAt,
 			Platform:         runtime.GOOS,
 			ExecutablePath:   exe,
 			UserDataDir:      inst.UserDataDir,
 			StartedAt:        time.Now().Format(time.RFC3339),
 		}
 		if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
-			s.log.Error("record untracked instance runtime failed", "id", inst.ID, "err", err)
+			s.log.Error("record unconfirmed instance runtime failed", "id", inst.ID, "err", err)
 		}
 	}
 	if err := s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning); err != nil {
-		s.log.Error("hold untracked instance as running failed", "id", inst.ID, "err", err)
+		s.log.Error("hold unconfirmed instance as running failed", "id", inst.ID, "err", err)
 	}
 	s.rtMu.Lock()
 	s.unverified[inst.ID] = true
 	s.rtMu.Unlock()
-	s.log.Warn("instance browser may be running untracked; held as unknown", "id", inst.ID, "pid", pid)
+	s.log.Warn("instance browser exit unconfirmed; held as unknown", "id", inst.ID, "pid", pid)
 }
 
 // StartInstance launches the instance's browser (recorded).
@@ -465,7 +491,7 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 			// operation — including a second start — can touch
 			// it until a later reconciliation resolves the
 			// record.
-			s.holdUntrackedInstance(c, inst, exe, untracked.PID)
+			s.holdUnconfirmedInstance(c, inst, exe, untracked.PID, 0)
 			return fail(fmt.Errorf("浏览器进程可能已启动，但无法建立进程跟踪，实例已进入无法确认状态：%w", err))
 		}
 		return fail(fmt.Errorf("浏览器启动失败：%w", err))
@@ -476,12 +502,34 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	// process must survive the settle window, and its verified
 	// identity must match what was launched.
 	abort := func(err error) error {
-		// This process was started by THIS operation moments ago
-		// and never became a tracked instance browser; asking it
-		// to close is safe and leaves no phantom behind.
-		_ = proc.CloseGracefully(3 * time.Second)
 		op.Step("确认浏览器运行", logging.StatusFailed, nil)
-		return fail(err)
+		// This process was started by THIS operation moments ago
+		// and never became a tracked instance browser, so asking
+		// IT — this exact process object, never a name or PID
+		// lookup — to close is safe. But the abort counts as an
+		// ordinary start failure only once the process's exit is
+		// CONFIRMED: a close request having been sent (WM_CLOSE
+		// posted, signal delivered) is not proof of exit, and a
+		// close error racing a real exit is still an exit.
+		if processExited(proc) {
+			op.Step("清理未核验的浏览器进程", logging.StatusSuccess, nil)
+			return fail(err)
+		}
+		if cerr := proc.CloseGracefully(abortCloseTimeout); cerr == nil || processExited(proc) {
+			op.Step("清理未核验的浏览器进程", logging.StatusSuccess, nil)
+			return fail(err)
+		}
+		// The process may still be running with this instance's
+		// folder and its exit cannot be confirmed. Hold the
+		// instance at "unknown" with a complete runtime record
+		// (this launch DID capture the identity) so nothing
+		// treats it as stopped, risky operations stay frozen,
+		// and the next startup reconciliation re-verifies the
+		// record — re-adopting the browser if it is still this
+		// instance's, clearing it once the process is gone.
+		op.Step("清理未核验的浏览器进程", logging.StatusFailed, nil)
+		s.holdUnconfirmedInstance(c, inst, exe, proc.PID(), proc.CreatedAt())
+		return fail(fmt.Errorf("无法确认浏览器进程是否已退出，实例已进入无法确认状态：%w", err))
 	}
 	select {
 	case <-proc.Exited():
