@@ -88,6 +88,13 @@ var closeTimeout = 20 * time.Second
 // its (local) cleanup. A variable so tests can shorten it.
 var stopConfirmTimeout = 2 * time.Second
 
+// watchSettleHook, when set (tests only), runs inside the
+// watcher's persisted cleanup after the exit has been observed
+// and the restart guard established, before the database is
+// settled. It lets tests hold the cleanup window open
+// deterministically instead of racing it with sleeps.
+var watchSettleHook func(instanceID string)
+
 // procWatch is the lifecycle handle for one adopted browser
 // process. Exactly one watcher goroutine (watchProcess) owns
 // the process's exit cleanup; done is closed when that cleanup
@@ -353,14 +360,17 @@ func (s *InstanceService) applyEffectiveStatuses(list []model.Instance) {
 // browser exits after a DeBrowser restart — the watcher
 // performs the final cleanup exactly once: it unregisters the
 // process and, when a runtime record exists for it (the watch
-// is persisted), deletes the record, clears any stale unknown
-// hold, settles the persisted status from the exit code
-// (stopped for a clean exit, error for an abnormal one) and
-// records the fact. done is then closed, releasing any
-// operation waiting for the unified outcome. A watch that is
-// not yet persisted — a start still verifying its process — is
-// only observed: the start operation owns the outcome until it
-// marks the watch persisted.
+// is persisted), holds a "stopping" transition for the whole
+// cleanup (so the instance cannot be restarted into the path
+// of this cleanup's by-ID record and status writes), deletes
+// the record, clears any stale unknown hold, settles the
+// persisted status from the exit code (stopped for a clean
+// exit, error for an abnormal one) and records the fact. done
+// is then closed, releasing any operation waiting for the
+// unified outcome. A watch that is not yet persisted — a start
+// still verifying its process — is only observed: the start
+// operation owns the outcome until it marks the watch
+// persisted.
 func (s *InstanceService) watchProcess(instanceID string, w *procWatch) {
 	<-w.proc.Exited()
 	s.rtMu.Lock()
@@ -370,8 +380,24 @@ func (s *InstanceService) watchProcess(instanceID string, w *procWatch) {
 	w.exited = true
 	persisted := w.persisted
 	stopAsked := w.stopAsked
+	if persisted {
+		// The exit cleanup below rewrites this instance's
+		// record and status by ID: until it has run, the
+		// instance must not be startable again — a new start
+		// would persist a fresh record and running status that
+		// this cleanup would then delete and overwrite. Hold
+		// the "stopping" transition for the whole cleanup; it
+		// is released just before done closes. (A watch that
+		// never persisted belongs to a start still in flight:
+		// its "starting" transition already guards the window
+		// and is not touched here.)
+		s.transient[instanceID] = model.StatusStopping
+	}
 	s.rtMu.Unlock()
 	if persisted {
+		if watchSettleHook != nil {
+			watchSettleHook(instanceID)
+		}
 		c, cancel := ctx()
 		defer cancel()
 		_ = s.store.DeleteInstanceRuntime(c, instanceID)
@@ -394,6 +420,9 @@ func (s *InstanceService) watchProcess(instanceID string, w *procWatch) {
 			})
 		}
 		s.log.Info("browser process exited", "instance", instanceID, "pid", w.proc.PID(), "exitCode", code)
+		s.rtMu.Lock()
+		delete(s.transient, instanceID)
+		s.rtMu.Unlock()
 	}
 	close(w.done)
 }
@@ -784,18 +813,40 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	// A close error is not decisive either — an exit racing it
 	// still counts, through the same signal.
 	_ = w.proc.CloseGracefully(closeTimeout)
-	select {
-	case <-w.done:
+	finish := func() error {
 		clearTransient()
 		op.Step("关闭浏览器", logging.StatusSuccess, nil)
 		s.log.Info("browser instance stopped", "id", id, "pid", w.proc.PID())
 		return nil
-	case <-time.After(stopConfirmTimeout):
-		// The process is still alive and still watched: report
-		// the failure truthfully, with the instance still
-		// running — never a premature "stopped".
-		clearTransient()
-		op.Step("关闭浏览器", logging.StatusFailed, nil)
-		return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
 	}
+	select {
+	case <-w.done:
+		return finish()
+	case <-time.After(stopConfirmTimeout):
+	}
+	// The wait timed out — but the cleanup may have landed in
+	// the same instant; prefer its outcome over reporting a
+	// failure for a browser that did close.
+	select {
+	case <-w.done:
+		return finish()
+	default:
+	}
+	// The process is still alive and still watched: this stop
+	// attempt is over, so the watch must judge a later exit on
+	// its own again. Reset stopAsked under rtMu — the same lock
+	// the watcher reads it under when an exit lands. If the
+	// watcher HAS already observed the exit (w.exited), its
+	// settlement is already decided from the value it captured
+	// and stands untouched.
+	s.rtMu.Lock()
+	if !w.exited {
+		w.stopAsked = false
+	}
+	s.rtMu.Unlock()
+	// Report the failure truthfully, with the instance still
+	// running — never a premature "stopped".
+	clearTransient()
+	op.Step("关闭浏览器", logging.StatusFailed, nil)
+	return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
 }
