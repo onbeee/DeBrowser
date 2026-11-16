@@ -11,6 +11,8 @@ package runner
 
 import (
 	"errors"
+	"fmt"
+	"os/exec"
 	"time"
 )
 
@@ -38,9 +40,10 @@ type Info struct {
 	CreatedAt      int64 // platform creation timestamp (Windows FILETIME ticks; Unix /proc starttime ticks)
 	ExecutablePath string
 	// CommandLine is the process command line as one string (""
-	// when the platform could not read it). Arguments may be
-	// quoted; callers verify by looking for exact substrings,
-	// never by re-splitting.
+	// when the platform could not read it). Callers extract
+	// arguments with UserDataDirArg, which parses the command
+	// line properly; a substring search is never a valid
+	// identity check.
 	CommandLine    string
 	HasCommandLine bool
 }
@@ -81,6 +84,60 @@ type Launcher interface {
 	// ErrIdentityMismatch and ErrAccessDenied report why the
 	// re-attachment was refused.
 	Open(pid int, createdAt int64) (Process, error)
+}
+
+// UntrackedChildError reports a launch whose process was
+// started successfully but could not be brought under tracking
+// (its handle could not be opened, or its creation time could
+// not be read). Because an untracked browser would otherwise
+// keep running invisibly, Launch terminates exactly the child it
+// started before returning this error; ChildExited reports
+// whether that termination was CONFIRMED. When ChildExited is
+// false the child may still be running, and the caller must
+// treat the instance as unverifiable — never as simply stopped.
+type UntrackedChildError struct {
+	PID         int
+	ChildExited bool
+	Err         error
+}
+
+func (e *UntrackedChildError) Error() string {
+	if e.ChildExited {
+		return fmt.Sprintf("runner: started process %d could not be tracked and was terminated: %v", e.PID, e.Err)
+	}
+	return fmt.Sprintf("runner: started process %d could not be tracked and its exit could not be confirmed: %v", e.PID, e.Err)
+}
+
+func (e *UntrackedChildError) Unwrap() error { return e.Err }
+
+// terminateChildTimeout bounds the wait for a terminated
+// untracked child to exit.
+const terminateChildTimeout = 5 * time.Second
+
+// terminateStartedChild ends exactly the process cmd started and
+// reports whether its exit was confirmed. The termination goes
+// through cmd's own process handle — the precise child of this
+// launch, never a name or PID lookup — so it cannot touch the
+// user's own browsers or another instance's process. A child
+// that already exited on its own also counts as confirmed.
+var terminateChildFn = func(cmd *exec.Cmd) bool {
+	if cmd == nil || cmd.Process == nil {
+		return true
+	}
+	// Kill targets the exact started process; its error is
+	// expected (and harmless) when the child already exited.
+	_ = cmd.Process.Kill()
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(terminateChildTimeout):
+		return false
+	}
 }
 
 // System returns the platform Launcher.

@@ -81,25 +81,38 @@ func (p *winProcess) watch(cmd *exec.Cmd) {
 	})
 }
 
+// The post-start tracking steps, as variables so tests can
+// simulate their failure on a real started child.
+var (
+	openProcessFn      = openProcess
+	processCreatedAtFn = processCreatedAt
+)
+
 func (l winLauncher) Launch(executable string, args ...string) (Process, error) {
 	cmd := exec.Command(executable, args...)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("runner: start %s: %w", executable, err)
 	}
 	pid := cmd.Process.Pid
-	h, err := openProcess(pid)
-	if err != nil {
-		// The child is running but untracked: do not kill what we
-		// cannot manage; report the launch as failed so the caller
-		// records the truth (the window may still appear; startup
-		// reconciliation will classify the instance as stopped
-		// because no runtime record was written).
-		return nil, fmt.Errorf("runner: track started process %d: %w", pid, err)
+	// Tracking MUST be established for the launch to count. If
+	// it cannot be, the child this call just started is
+	// terminated exactly (see terminateStartedChild) and the
+	// failure is reported as an UntrackedChildError: leaving the
+	// child running invisibly while reporting a plain launch
+	// failure would strand a browser DeBrowser believes does not
+	// exist.
+	untracked := func(cause error) (Process, error) {
+		exited := terminateChildFn(cmd)
+		return nil, &UntrackedChildError{PID: pid, ChildExited: exited, Err: cause}
 	}
-	created, err := processCreatedAt(h)
+	h, err := openProcessFn(pid)
+	if err != nil {
+		return untracked(fmt.Errorf("runner: track started process %d: %w", pid, err))
+	}
+	created, err := processCreatedAtFn(h)
 	if err != nil {
 		_ = windows.CloseHandle(h)
-		return nil, fmt.Errorf("runner: read creation time of %d: %w", pid, err)
+		return untracked(fmt.Errorf("runner: read creation time of %d: %w", pid, err))
 	}
 	p := &winProcess{pid: pid, createdAt: created, handle: h, exited: make(chan struct{}), exitCode: -1}
 	p.watch(cmd)

@@ -26,8 +26,10 @@ import (
 //     instance folder in the command line.
 //   - A PID alone is never trusted: the OS recycles PIDs, so
 //     every re-identification verifies creation time, executable
-//     path, and — when the OS lets us read it — the command
-//     line's --user-data-dir argument.
+//     path, and the command line's --user-data-dir argument —
+//     parsed exactly, never substring-matched. Any signal that
+//     cannot be read makes the identity unconfirmed, never
+//     "close enough".
 //   - A process whose identity cannot be CONFIRMED is never
 //     closed, never adopted, and its instance is held in the
 //     "unknown" state, which blocks every operation that could
@@ -120,7 +122,13 @@ const (
 )
 
 // verifyRecordedProcess compares one runtime record with the live
-// process at its PID.
+// process at its PID. Confirmation requires EVERY identity signal
+// to check out: creation time, executable path, and the parsed
+// --user-data-dir argument naming exactly this instance's folder.
+// A signal that DISPROVES the identity (a different process now
+// owns the PID) clears the record; a signal that merely cannot
+// be READ leaves the instance at "unknown" — never adopted,
+// never acted on.
 func (s *InstanceService) verifyRecordedProcess(rt model.InstanceRuntime) (verifyOutcome, runner.Process) {
 	if rt.Platform != "" && rt.Platform != runtime.GOOS {
 		return verifyUnknown, nil // recorded on another OS: unverifiable here
@@ -134,52 +142,71 @@ func (s *InstanceService) verifyRecordedProcess(rt model.InstanceRuntime) (verif
 		// process may well be alive — nothing may be concluded.
 		return verifyUnknown, nil
 	}
-	if info.CreatedAt != rt.ProcessCreatedAt {
+	// unprovable collects the signals that could not be checked;
+	// any one of them caps the outcome at "unknown".
+	unprovable := false
+	if rt.ProcessCreatedAt <= 0 {
+		// The record was written when tracking failed at launch:
+		// no creation time was ever captured, so PID reuse can
+		// never be ruled out and the process can never be fully
+		// confirmed — at best it stays unknown while it lives.
+		unprovable = true
+	} else if info.CreatedAt != rt.ProcessCreatedAt {
 		return verifyNotOurs, nil // PID recycled by another process
 	}
-	if rt.ExecutablePath != "" && info.ExecutablePath != "" &&
-		!strings.EqualFold(filepath.Clean(info.ExecutablePath), filepath.Clean(rt.ExecutablePath)) {
-		return verifyNotOurs, nil
-	}
-	absDir := filepath.Join(s.layout.Data, filepath.FromSlash(rt.UserDataDir))
-	if info.HasCommandLine {
-		// The launch used the RESOLVED folder path; accept the
-		// command line naming either the lexical or the resolved
-		// form of the instance folder.
-		dirs := []string{absDir}
-		if resolved, rerr := resolveFinalPath(absDir); rerr == nil && resolved != absDir {
-			dirs = append(dirs, resolved)
-		}
-		uses := false
-		for _, d := range dirs {
-			if commandLineUsesDir(info.CommandLine, d) {
-				uses = true
-				break
-			}
-		}
-		if !uses {
+	if rt.ExecutablePath != "" {
+		if info.ExecutablePath == "" {
+			unprovable = true
+		} else if !strings.EqualFold(filepath.Clean(info.ExecutablePath), filepath.Clean(rt.ExecutablePath)) {
 			return verifyNotOurs, nil
 		}
-		proc, err := s.launcher.Open(rt.PID, rt.ProcessCreatedAt)
-		if err != nil {
-			return verifyUnknown, nil
-		}
-		return verifyConfirmed, proc
 	}
-	// The command line could not be read: PID + creation time +
-	// executable agree, but the instance-folder ownership — the
-	// fact that decides whether closing this process is safe —
-	// is unproven. Hold at unknown.
-	return verifyUnknown, nil
+	if !info.HasCommandLine {
+		// The instance-folder ownership — the fact that decides
+		// whether closing this process is safe — is unproven.
+		return verifyUnknown, nil
+	}
+	absDir := filepath.Join(s.layout.Data, filepath.FromSlash(rt.UserDataDir))
+	// The launch used the RESOLVED folder path; accept the
+	// argument naming either the lexical or the resolved form of
+	// the instance folder — each compared exactly.
+	dirs := []string{absDir}
+	if resolved, rerr := resolveFinalPath(absDir); rerr == nil && resolved != absDir {
+		dirs = append(dirs, resolved)
+	}
+	uses := false
+	for _, d := range dirs {
+		if commandLineUsesDir(info.CommandLine, d) {
+			uses = true
+			break
+		}
+	}
+	if !uses {
+		return verifyNotOurs, nil
+	}
+	if unprovable {
+		return verifyUnknown, nil
+	}
+	proc, err := s.launcher.Open(rt.PID, rt.ProcessCreatedAt)
+	if err != nil {
+		return verifyUnknown, nil
+	}
+	return verifyConfirmed, proc
 }
 
-// commandLineUsesDir reports whether a command line carries a
-// --user-data-dir argument naming exactly absDir. The check is a
-// substring test on the raw command line: argument values are
-// never re-split (paths may contain spaces), and absDir itself is
-// the exact absolute path that was passed at launch.
+// commandLineUsesDir reports whether the command line's
+// --user-data-dir argument names exactly absDir. The argument is
+// extracted by parsing (runner.UserDataDirArg) and the paths are
+// compared whole, after cleaning, case-insensitively per Windows
+// path semantics — a folder that merely shares a prefix (P-10
+// vs P-1) or a path appearing in any other argument never
+// matches.
 func commandLineUsesDir(commandLine, absDir string) bool {
-	return strings.Contains(commandLine, "--user-data-dir") && strings.Contains(commandLine, absDir)
+	value, ok := runner.UserDataDirArg(commandLine)
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(value), filepath.Clean(absDir))
 }
 
 func (s *InstanceService) reconcileOne(c context.Context, rt model.InstanceRuntime) {
@@ -291,6 +318,38 @@ func (s *InstanceService) watchProcess(instanceID string, proc runner.Process) {
 	s.log.Info("browser process exited", "instance", instanceID, "pid", proc.PID(), "exitCode", code)
 }
 
+// holdUntrackedInstance puts an instance whose browser may be
+// running without a tracking handle into the "unknown" hold: the
+// persisted status becomes running, a runtime record WITHOUT a
+// creation time is kept (so the next startup reconciles it —
+// such a record can never fully verify, so the process is never
+// adopted), and the in-memory unverified mark freezes every
+// risky operation for this session. If the database writes fail
+// the in-memory mark still holds for this session.
+func (s *InstanceService) holdUntrackedInstance(c context.Context, inst model.Instance, exe string, pid int) {
+	if pid > 0 {
+		rt := model.InstanceRuntime{
+			InstanceID:       inst.ID,
+			PID:              pid,
+			ProcessCreatedAt: 0, // never captured: tracking failed
+			Platform:         runtime.GOOS,
+			ExecutablePath:   exe,
+			UserDataDir:      inst.UserDataDir,
+			StartedAt:        time.Now().Format(time.RFC3339),
+		}
+		if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
+			s.log.Error("record untracked instance runtime failed", "id", inst.ID, "err", err)
+		}
+	}
+	if err := s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning); err != nil {
+		s.log.Error("hold untracked instance as running failed", "id", inst.ID, "err", err)
+	}
+	s.rtMu.Lock()
+	s.unverified[inst.ID] = true
+	s.rtMu.Unlock()
+	s.log.Warn("instance browser may be running untracked; held as unknown", "id", inst.ID, "pid", pid)
+}
+
 // StartInstance launches the instance's browser (recorded).
 func (s *InstanceService) StartInstance(operationID string, id string) error {
 	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.start", "instance", id)
@@ -398,6 +457,17 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	proc, err := s.launcher.Launch(exe, args...)
 	if err != nil {
 		op.Step("启动浏览器进程", logging.StatusFailed, nil)
+		var untracked *runner.UntrackedChildError
+		if errors.As(err, &untracked) && !untracked.ChildExited {
+			// The browser may genuinely be running with this
+			// instance's folder while DeBrowser holds no handle
+			// on it. Hold the instance at "unknown" so no risky
+			// operation — including a second start — can touch
+			// it until a later reconciliation resolves the
+			// record.
+			s.holdUntrackedInstance(c, inst, exe, untracked.PID)
+			return fail(fmt.Errorf("浏览器进程可能已启动，但无法建立进程跟踪，实例已进入无法确认状态：%w", err))
+		}
 		return fail(fmt.Errorf("浏览器启动失败：%w", err))
 	}
 	op.Step("启动浏览器进程", logging.StatusSuccess, map[string]string{"pid": strconv.Itoa(proc.PID())})
@@ -425,10 +495,21 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 		}
 		return abort(fmt.Errorf("无法确认浏览器进程状态：%w", ierr))
 	}
-	if info.ExecutablePath != "" && !strings.EqualFold(filepath.Clean(info.ExecutablePath), filepath.Clean(exe)) {
+	// Identity verification is fail-closed: a signal that cannot
+	// be read at all is a failed verification, never a skipped
+	// one. The launch counts as successful only when the
+	// executable matches the chosen kernel AND the parsed
+	// --user-data-dir argument names exactly this folder.
+	if info.ExecutablePath == "" {
+		return abort(fmt.Errorf("无法确认浏览器进程的可执行文件，已拒绝认定启动成功"))
+	}
+	if !strings.EqualFold(filepath.Clean(info.ExecutablePath), filepath.Clean(exe)) {
 		return abort(fmt.Errorf("启动的进程与所选浏览器内核不一致"))
 	}
-	if info.HasCommandLine && !commandLineUsesDir(info.CommandLine, launchDir) {
+	if !info.HasCommandLine {
+		return abort(fmt.Errorf("无法读取浏览器进程的命令行，不能确认其使用的实例文件，已拒绝认定启动成功"))
+	}
+	if !commandLineUsesDir(info.CommandLine, launchDir) {
 		return abort(fmt.Errorf("浏览器进程未使用该实例的实例文件，已拒绝认定启动成功"))
 	}
 	op.Step("确认浏览器运行", logging.StatusSuccess, nil)

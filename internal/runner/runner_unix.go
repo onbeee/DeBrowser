@@ -124,17 +124,26 @@ func procStat(pid int) (int64, error) {
 	return start, nil
 }
 
+// procStatFn is the identity read Launch performs right after
+// starting a child, as a variable so tests can simulate its
+// failure on a real started child.
+var procStatFn = procStat
+
 func (l unixLauncher) Launch(executable string, args ...string) (Process, error) {
 	cmd := exec.Command(executable, args...)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("runner: start %s: %w", executable, err)
 	}
 	pid := cmd.Process.Pid
-	created, err := procStat(pid)
+	created, err := procStatFn(pid)
 	if err != nil {
-		// Started but its identity cannot be recorded; leave it
-		// running (never kill what we cannot manage) and fail.
-		return nil, fmt.Errorf("runner: identify started process %d: %w", pid, err)
+		// Same rule as the Windows launcher: a child that cannot
+		// be tracked is terminated exactly and the failure is an
+		// UntrackedChildError, never a plain failure that strands
+		// a running browser.
+		exited := terminateChildFn(cmd)
+		return nil, &UntrackedChildError{PID: pid, ChildExited: exited,
+			Err: fmt.Errorf("runner: identify started process %d: %w", pid, err)}
 	}
 	p := &unixProcess{pid: pid, createdAt: created, exited: make(chan struct{}), exitCode: -1}
 	p.watchCmd(cmd)
@@ -151,8 +160,8 @@ func (l unixLauncher) Inspect(pid int) (Info, error) {
 		info.ExecutablePath = exe
 	}
 	if raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline")); err == nil {
-		// Keep the NUL separators: argument values (paths with
-		// spaces) stay intact for exact substring verification.
+		// Keep the NUL separators: they are the argument
+		// boundaries UserDataDirArg parses on.
 		info.CommandLine = string(raw)
 		info.HasCommandLine = true
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -59,7 +60,10 @@ type fakeLauncher struct {
 	exitOnLaunch *int // when set, launched processes exit immediately with this code
 	spoofDir     bool // Inspect reports a command line for a different folder
 	noCmdline    bool // Inspect cannot read the command line
-	lastProc     *fakeProcess
+	// cmdlineOverride, when set, replaces the command line
+	// Inspect reports for launched processes (verbatim).
+	cmdlineOverride string
+	lastProc        *fakeProcess
 }
 
 func newFakeLauncher() *fakeLauncher {
@@ -82,6 +86,9 @@ func (l *fakeLauncher) Launch(executable string, args ...string) (runner.Process
 	cmdline := executable + " " + strings.Join(args, " ")
 	if l.spoofDir {
 		cmdline = executable + ` --user-data-dir=C:\elsewhere\other-profile`
+	}
+	if l.cmdlineOverride != "" {
+		cmdline = l.cmdlineOverride
 	}
 	l.procs[pid] = p
 	l.infos[pid] = runner.Info{
@@ -620,5 +627,276 @@ func TestRuntimeOperationsAreRecorded(t *testing.T) {
 	// never reach the logs.
 	if strings.Contains(opLog+runLog, "记录实例") {
 		t.Error("logs contain the instance name (free-form user input)")
+	}
+}
+
+// --- Strict identity verification (Stage 9B review round) ---
+
+// resolvedProfileDir returns the exact absolute folder the
+// service launches the instance with: its stored folder resolved
+// the same way the service resolves it at launch.
+func resolvedProfileDir(t *testing.T, cfg config.Config, inst model.Instance) string {
+	t.Helper()
+	abs := filepath.Join(cfg.Layout.Data, filepath.FromSlash(inst.UserDataDir))
+	if resolved, err := resolveFinalPath(abs); err == nil && resolved != "" {
+		return resolved
+	}
+	return abs
+}
+
+func requireStartRefusedAndStopped(t *testing.T, svc *InstanceService, db *database.DB, inst model.Instance) {
+	t.Helper()
+	got, err := svc.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusStopped {
+		t.Errorf("status = %q, want stopped after refused start", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("runtime record exists after refused start: %v", err)
+	}
+}
+
+// The instance owns P-1; the process reports P-10 — a path that
+// has P-1 as a string prefix. Substring matching would accept
+// it; exact argument comparison must refuse the launch.
+func TestStartRejectsPrefixConfusableProfileDir(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "前缀混淆", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := resolvedProfileDir(t, cfg, inst)
+	fl.cmdlineOverride = "fake-browser.exe --user-data-dir=" + filepath.Join(filepath.Dir(dir), "P-10")
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start accepted a process using P-10 for the P-1 instance")
+	}
+	requireStartRefusedAndStopped(t, svc, db, inst)
+}
+
+// A repeated --user-data-dir argument is ambiguous even when
+// both copies name the right folder: refuse.
+func TestStartRejectsDuplicateUserDataDirArg(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "重复参数", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := resolvedProfileDir(t, cfg, inst)
+	fl.cmdlineOverride = "fake-browser.exe --user-data-dir=" + dir + " --user-data-dir=" + dir
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start accepted a duplicated --user-data-dir argument")
+	}
+	requireStartRefusedAndStopped(t, svc, db, inst)
+}
+
+// No --user-data-dir argument at all: the process's folder
+// ownership is unproven, refuse.
+func TestStartRejectsMissingUserDataDirArg(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "缺少参数", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.cmdlineOverride = "fake-browser.exe --no-first-run"
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start accepted a process without --user-data-dir")
+	}
+	requireStartRefusedAndStopped(t, svc, db, inst)
+}
+
+// The space-separated form is a legitimate launch shape and must
+// verify exactly like the equals form.
+func TestStartAcceptsSpaceSeparatedUserDataDirArg(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "空格形式", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.cmdlineOverride = "fake-browser.exe --user-data-dir " + resolvedProfileDir(t, cfg, inst)
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("start with space-separated argument: %v", err)
+	}
+	waitStatus(t, svc, inst.ID, model.StatusRunning)
+	if err := svc.StopInstance("", inst.ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// An unreadable command line at launch verification is a failed
+// verification (fail-closed), not a skipped check: the start is
+// refused, nothing is recorded, and the instance can still start
+// once the signal is readable.
+func TestStartFailsClosedWhenCommandLineUnreadable(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "不可读命令行", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.noCmdline = true
+	err = svc.StartInstance("", inst.ID)
+	if err == nil || !strings.Contains(err.Error(), "命令行") {
+		t.Fatalf("start with unreadable command line error = %v, want a fail-closed refusal", err)
+	}
+	requireStartRefusedAndStopped(t, svc, db, inst)
+	fl.noCmdline = false
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("start once the command line is readable: %v", err)
+	}
+	if err := svc.StopInstance("", inst.ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// A launch whose child could not be tracked and could NOT be
+// confirmed terminated leaves a possibly-running browser: the
+// instance is held at unknown with a creation-time-less runtime
+// record, and every risky operation is frozen.
+func TestStartUntrackedChildHoldsUnknown(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	registerFakeBrowser(t, db, "reg-b", "fake-browser-2.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "失联进程", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.launchErr = &runner.UntrackedChildError{PID: 4321, ChildExited: false, Err: errors.New("tracking failed")}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("untracked launch reported success")
+	}
+	got, err := svc.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown", got.Status)
+	}
+	rt, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID)
+	if err != nil {
+		t.Fatalf("runtime record: %v", err)
+	}
+	if rt.PID != 4321 || rt.ProcessCreatedAt != 0 {
+		t.Errorf("record = pid %d created %d, want pid 4321 and no creation time", rt.PID, rt.ProcessCreatedAt)
+	}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Error("second start allowed in the unknown hold")
+	}
+	if err := svc.StopInstance("", inst.ID); err == nil {
+		t.Error("stop allowed in the unknown hold")
+	}
+	if err := svc.DeleteInstance("", inst.ID); err == nil {
+		t.Error("delete allowed in the unknown hold")
+	}
+	if err := svc.DeleteInstanceAndProfile("", inst.ID); err == nil {
+		t.Error("delete with profile allowed in the unknown hold")
+	}
+	if _, err := svc.UpdateInstance("", UpdateInstanceInput{ID: inst.ID, Name: inst.Name, BrowserID: "reg-b"}); err == nil {
+		t.Error("kernel change allowed in the unknown hold")
+	}
+}
+
+// When the untracked child WAS confirmed terminated, the launch
+// is a plain failure: stopped, no record, and the instance can
+// start normally afterwards.
+func TestStartUntrackedChildExitedIsPlainFailure(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "已清理", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.launchErr = &runner.UntrackedChildError{PID: 4322, ChildExited: true, Err: errors.New("tracking failed")}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("untracked launch reported success")
+	}
+	requireStartRefusedAndStopped(t, svc, db, inst)
+	fl.launchErr = nil
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("start after the plain failure: %v", err)
+	}
+	if err := svc.StopInstance("", inst.ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// A runtime record without a creation time (written by the
+// untracked-launch hold) can never fully verify at the next
+// startup: even with executable and command line matching, the
+// process is NOT adopted and the instance stays unknown.
+func TestReconcileRecordWithoutCreationTimeStaysUnknown(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "无创建时间记录", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.plant(9999, runner.Info{
+		PID: 9999, CreatedAt: 4242, ExecutablePath: "fake-browser.exe",
+		CommandLine: "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst), HasCommandLine: true,
+	})
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9999, ProcessCreatedAt: 0, Platform: runtime.GOOS,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	got, err := fresh.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown (a creation-time-less record must never be adopted)", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Errorf("runtime record was dropped instead of held: %v", err)
+	}
+	if err := fresh.StartInstance("", inst.ID); err == nil {
+		t.Error("start allowed for an instance whose record cannot verify")
+	}
+}
+
+// The same record resolves itself once the process is gone: the
+// record is cleared and the instance returns to stopped.
+func TestReconcileRecordWithoutCreationTimeGoneClears(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "无创建时间已退出", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRuntimeRow(t, db, inst, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 9998, ProcessCreatedAt: 0, Platform: runtime.GOOS,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+	})
+	fresh, err := newInstanceService(db, cfg.Layout, slog.Default(), fl)
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	got, err := fresh.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("runtime record survived after the process was gone: %v", err)
 	}
 }
