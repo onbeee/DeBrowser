@@ -366,6 +366,13 @@ func TestRealStartAbortUnconfirmedExitHoldsUnknown(t *testing.T) {
 	if kerr := p.Kill(); kerr != nil {
 		t.Fatalf("cleanup kill: %v", kerr)
 	}
+	// Release this test's own handle at once: on Windows a
+	// terminated process stays openable — and thus inspectable,
+	// with an unreadable command line — while ANY handle to it
+	// exists, and FindProcess's handle counts. (The launcher's
+	// own handle is closed by its watcher once the exit is
+	// observed.)
+	_ = p.Release()
 	// "Gone" must be established, not assumed: a just-killed
 	// child can briefly linger as an unreaped zombie whose
 	// command line is already unreadable — correctly judged
