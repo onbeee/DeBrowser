@@ -18,6 +18,16 @@ const STATUS_LABEL: Record<string, string> = {
   unknown: "无法确认",
 };
 
+// Three statuses get a small colored dot plus matching text
+// color, using the shared theme tokens (gray / ok-green /
+// danger-red, each already low-saturation per theme). All other
+// statuses keep the neutral badge rendering.
+const STATUS_DOT: Record<string, { dot: string; text: string }> = {
+  stopped: { dot: "bg-(--text-dim)", text: "text-(--text-dim)" },
+  running: { dot: "bg-(--ok)", text: "text-(--ok)" },
+  unknown: { dot: "bg-(--danger)", text: "text-(--danger)" },
+};
+
 // Statuses in which the instance's browser may be alive: kernel
 // and instance-file changes, and deletion, are refused (the
 // backend enforces the same gates).
@@ -335,10 +345,10 @@ export default function InstancesPage() {
             <thead>
               <tr className="border-b border-(--border) text-left text-xs text-(--text-faint)">
                 <th className="px-4 py-2.5 font-medium">实例名称</th>
-                <th className="px-4 py-2.5 font-medium">代理节点</th>
-                <th className="px-4 py-2.5 font-medium">实例内核</th>
-                <th className="px-4 py-2.5 font-medium">状态</th>
-                <th className="px-4 py-2.5 text-right font-medium">操作</th>
+                <th className="px-4 py-2.5 text-center font-medium">代理节点</th>
+                <th className="px-4 py-2.5 text-center font-medium">实例内核</th>
+                <th className="px-4 py-2.5 text-center font-medium">状态</th>
+                <th className="px-4 py-2.5 text-center font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -348,23 +358,32 @@ export default function InstancesPage() {
                 return (
                   <tr key={inst.id} className="border-b border-(--border) last:border-0 hover:bg-(--hover-bg)">
                     <td className="px-4 py-2.5 font-medium">{inst.name}</td>
-                    <td className="px-4 py-2.5 text-(--text-dim)">
+                    <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       {inst.proxyId ? "已设置（历史关联）" : "未设置"}
                     </td>
-                    <td className="px-4 py-2.5 text-(--text-dim)">
+                    <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       <span title={inst.kernelExecutablePath || undefined}>
                         {inst.kernelName
                           ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
                           : "未指定"}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5">
-                      <span className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)">
-                        {STATUS_LABEL[inst.status] ?? inst.status}
-                      </span>
+                    <td className="px-4 py-2.5 text-center">
+                      {STATUS_DOT[inst.status] ? (
+                        <span
+                          className={`inline-flex items-center gap-1.5 text-xs ${STATUS_DOT[inst.status].text}`}
+                        >
+                          <span className={`h-[7px] w-[7px] shrink-0 rounded-full ${STATUS_DOT[inst.status].dot}`} />
+                          {STATUS_LABEL[inst.status]}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)">
+                          {STATUS_LABEL[inst.status] ?? inst.status}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
-                      <div className="flex justify-end gap-1">
+                      <div className="flex justify-center gap-1">
                         {inst.status === "running" || inst.status === "stopping" ? (
                           <button
                             type="button"
