@@ -141,11 +141,15 @@ func (s *Store) SetInstanceStatus(ctx context.Context, id string, status model.I
 // Instances WITH a runtime record are reconciled separately by
 // verifying the recorded process (see InstanceService startup
 // reconciliation) and are deliberately not touched here.
+// Instances carrying a protection journal entry are likewise
+// never reset here: their browser may still be running, and the
+// journal is reconciled by process verification, not by fiat.
 func (s *Store) ReconcileInstanceStatuses(ctx context.Context) (int64, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE browser_instances SET
 		status = 'stopped', updated_at = datetime('now')
 		WHERE status = 'running'
-		  AND id NOT IN (SELECT instance_id FROM instance_runtime)`)
+		  AND id NOT IN (SELECT instance_id FROM instance_runtime)
+		  AND id NOT IN (SELECT instance_id FROM instance_protection)`)
 	if err != nil {
 		return 0, fmt.Errorf("store: reconcile instance statuses: %w", err)
 	}

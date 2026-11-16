@@ -27,7 +27,7 @@
 
 ## Schema（当前状态）
 
-当前状态（migration 0001–0013，全部在启动时应用）：`app_settings`、`proxies`、`subscriptions`、`browser_instances`、`bookmarks`、`mihomo_configs`、`mihomo_proxy_groups` 与 `mihomo_proxy_group_members` 等表**存在**。在 PR #9 范围清理之后，代理/订阅/导入相关的表**只是历史数据结构——不是当前产品功能**。没有任何页面、服务或绑定为这些历史表暴露业务 CRUD 或列表操作。唯一剩余的读取是 Vault 引用保护查询 `SecretRefInUse` / `AllSecretRefs`，它们扫描这些表的 `secret_ref` 列，使历史凭据在仍被引用时永不被垃圾回收。这些表及其全部行出于兼容性保留（既有数据库保持数据与外键完好）。Stage 9A 增加了 `kernels` 表（migration 0010 创建的**历史表**，原为 DeBrowser 托管的 Chromium 构建；独立内核下载管理功能已取消，该表当前不被任何产品功能使用，见下方 `kernels` 一节）与 `external_browsers` 表（migration 0011/0012，用户手动添加程序的纯路径登记）；`browser_instances.kernel_id` 现在由实例表单写入，存的是所关联的 `external_browsers` 登记 ID（见下方 `browser_instances` 与 `external_browsers`）。本节未列出的任何东西都不存在于数据库中。
+当前状态（migration 0001–0014，全部在启动时应用）：`app_settings`、`proxies`、`subscriptions`、`browser_instances`、`bookmarks`、`mihomo_configs`、`mihomo_proxy_groups` 与 `mihomo_proxy_group_members` 等表**存在**。在 PR #9 范围清理之后，代理/订阅/导入相关的表**只是历史数据结构——不是当前产品功能**。没有任何页面、服务或绑定为这些历史表暴露业务 CRUD 或列表操作。唯一剩余的读取是 Vault 引用保护查询 `SecretRefInUse` / `AllSecretRefs`，它们扫描这些表的 `secret_ref` 列，使历史凭据在仍被引用时永不被垃圾回收。这些表及其全部行出于兼容性保留（既有数据库保持数据与外键完好）。Stage 9A 增加了 `kernels` 表（migration 0010 创建的**历史表**，原为 DeBrowser 托管的 Chromium 构建；独立内核下载管理功能已取消，该表当前不被任何产品功能使用，见下方 `kernels` 一节）与 `external_browsers` 表（migration 0011/0012，用户手动添加程序的纯路径登记）；`browser_instances.kernel_id` 现在由实例表单写入，存的是所关联的 `external_browsers` 登记 ID（见下方 `browser_instances` 与 `external_browsers`）。本节未列出的任何东西都不存在于数据库中。
 
 ID 是应用生成的 UUID（TEXT）。时间戳是 UTC 文本（`datetime('now')` 默认值；repository 在更新时刷新 `updated_at`）。
 
@@ -68,7 +68,7 @@ Stage 6（migration 0006）增加：`config_id`（外键 → `mihomo_configs`，
 | `user_data_dir` | UNIQUE（自 migration 0002 起）——实例与实例文件的一对一绑定由该约束与服务检查共同保证。相对便携数据目录的实例文件路径（例如 `profiles/P-1`），使整个应用文件夹可整体移动。Stage 9B 起，文件夹在创建实例时实际建立（默认/自定模式）或绑定既有保留文件夹（选择模式）；首次启动时缺失的文件夹会补建为空目录。实例文件内容是浏览器数据，永不存入 SQLite。 |
 | `proxy_id` | **历史兼容字段。** 外键 → `proxies(id)`，`ON DELETE SET NULL`（schema 行为：删除一行代理会使实例脱钩，而不是破坏实例）。当前产品中没有代理绑定界面或操作：实例创建总是写入 NULL，实例更新逐字保留某行已有的历史值。 |
 | `proxy_listen_port` | **历史兼容字段。** Stage 4A（migration 0004）增加，原为实例的 Mihomo 监听端口，本应由已取消的 Stage 7 从 `app_settings` 的 `proxy.port_range` 范围（默认 `19000-19499`）分配。它不再被任何当前业务逻辑分配或使用；已存值按原样保留。通过唯一索引实现唯一（SQLite 不能用 ALTER 增加 UNIQUE 列）；NULL 端口永不冲突。 |
-| `status` | `stopped` / `running` / `error`（CHECK）。持久化的生命周期记录，由 Stage 9B 运行时管理器按**已核验的进程事实**写入：启动成功写 `running`，观察到进程退出写 `stopped`（异常退出写 `error`）。`starting` / `stopping` 只是内存中的过渡状态，不落库；`unknown`（无法确认）同样不落库——它由「`running` 行 + 一条未能通过身份核验的 `instance_runtime` 记录」在启动对账时推导为生效状态（见 `instance_runtime` 一节）。 |
+| `status` | `stopped` / `running` / `error`（CHECK）。持久化的生命周期记录，由 Stage 9B 运行时管理器按**已核验的进程事实**写入：启动成功写 `running`，观察到进程退出写 `stopped`（异常退出写 `error`）。`starting` / `stopping` 只是内存中的过渡状态，不落库；`unknown`（无法确认）同样不落库——它由「`running` 行 + 一条未能通过身份核验的 `instance_runtime` 记录」在启动对账时推导为生效状态（见 `instance_runtime` 一节）；身份记录写入失败时改由 `instance_protection` 保护日志行承载同样的推导（migration 0014）。 |
 | `start_url`、`sort_order` | 可选的起始页；显示顺序。 |
 
 索引：`proxy_id`、`status`。
@@ -90,6 +90,8 @@ migration 0010 创建的历史表结构仍然存在：`id`、`version`、`channe
 ### `instance_runtime` 与 `profile_counter`（Stage 9B，migration 0013）
 
 `instance_runtime` 为每个已启动且尚未观察到退出的实例保存一行**浏览器主进程身份记录**：`instance_id`（主键，外键 → `browser_instances(id)`，随实例删除级联）、`pid`、`process_created_at`（进程创建时间：Windows 为 FILETIME、Unix 为 /proc starttime——PID 会被操作系统复用，只有 PID + 创建时间才足以区分同一 PID 的前后两个进程）、`platform`、`executable_path`、`user_data_dir`、`started_at`。启动成功时写入，观察到进程退出或启动对账证明记录已失效时删除。DeBrowser 重启后的重新识别逐项核验：PID 存在、创建时间一致、可执行路径一致、且命令行经严格参数解析后 `--user-data-dir` 的值与该实例的实例文件完整路径精确相等（子串/前缀相同不算一致；命令行不可读即无法确认）；全部通过才重新接管并监控该进程。例外一：启动时进程跟踪建立失败且退出无法确认的实例会写入一条 `process_created_at` 为 0 的记录——它缺少创建时间，永远无法完整核验，只用于让实例保持 `unknown` 冻结状态，进程消失后即被对账清除。例外二：启动后身份核验失败、且无法确认该进程已经退出的实例会写入**完整**记录（含真实创建时间与可执行路径），对账时按同一严格标准重新判定——身份完整吻合可重新接管，进程消失后清除。可执行路径是强制核验项：记录中缺失或进程路径不可读时一律无法确认，绝不接管。进程存在但身份无法确认时，记录与 `running` 状态都保留，实例的生效状态推导为 `unknown`（无法确认）：不关闭、不接管、不允许删除/更换内核/更换实例文件等可能危及数据的操作，留待下一次启动对账重新判定。表中永不保存任何浏览器 Profile 内容。
+
+**保护的持久性（migration 0014）**：无法确认状态的保护以记录成功写入为成立前提，绝不只依赖当前会话的内存标记。身份记录写入失败时，回退写入 `instance_protection` 保护日志（与 `instance_runtime` 相同的身份字段，另加 `marked_at`；外键随实例删除级联）：启动对账以同一严格标准核验日志行——身份完整吻合时先补写正式身份记录再删除日志并重新接管（补写仍失败则保留日志与冻结），证明进程已消失或不属于该实例时清除日志并置 `stopped`，无法确认时保留日志并保持 `unknown` 冻结；`ReconcileInstanceStatuses` 对持有日志行的 `running` 实例同样不做重置。身份记录与保护日志都写入失败时，本次操作以「严重错误」明确报告（中止路径会先用本次启动持有的准确进程对象再尝试一次关闭并确认退出），不冒充普通启动失败；该实例仅在本会话内由内存标记冻结。
 
 `profile_counter` 是默认实例文件编号的持久计数器（单行，`next_seq` 只增不减）：删除实例或删除实例文件都不会让编号被重新分配。分配时服务还会跳过已被绑定或已存在于磁盘的候选名，因此计数器之外的同名文件夹也不会被覆盖。
 
@@ -127,6 +129,7 @@ migration 0010 创建的历史表结构仍然存在：`id`、`version`、`channe
 | 11 | `0011_external_browsers.sql` | Stage 9A（当时的设计，已被 0012 取代）：`external_browsers`——用户在完整验证后手动登记的浏览器（绝对可执行路径、按路径唯一、`browser_type` CHECK chrome/brave、status `verified`/`invalid`）；DeBrowser 不做任何自动浏览器检测 |
 | 12 | `0012_external_browsers_path_only.sql` | Stage 9A（产品调整）：手动登记变为纯路径登记——重建 `external_browsers`，去掉验证列/CHECK（既有登记的 id、名称、路径与时间戳保留）；不再对用户所选可执行文件做任何身份或签名检查 |
 | 13 | `0013_instance_runtime.sql` | Stage 9B：新增 `instance_runtime`（每实例一行的浏览器主进程身份记录：PID、进程创建时间、平台、可执行路径、实例文件、启动时间；随实例删除级联）与 `profile_counter`（默认实例文件编号 P-<n> 的持久单调计数器，只进不退、永不复用）；`browser_instances` 不重建（书签对其有外键） |
+| 14 | `0014_instance_protection.sql` | Stage 9B（审查第三轮）：新增 `instance_protection`（无法确认状态的回退保护日志：身份记录写入失败时以相同身份字段落盘，启动对账以同一严格标准核验、提升或清除；随实例删除级联） |
 
 ### Migration 0005：移除分组与标签（Stage 4A 更正）
 

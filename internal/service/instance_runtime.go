@@ -103,15 +103,20 @@ func (s *InstanceService) ReportReconciliation() {
 // reconcileRuntimeAtStartup brings persisted state in line with
 // live process facts, once, at service construction:
 //
-//   - instances persisted "running" with NO runtime record are
-//     pre-tracking leftovers: stopped (store.ReconcileInstance
-//     Statuses);
+//   - instances persisted "running" with NO runtime record and
+//     NO protection journal entry are pre-tracking leftovers:
+//     stopped (store.ReconcileInstanceStatuses);
 //   - each runtime record is verified against the live process
 //     (see verifyRecordedProcess): verified processes are
 //     re-attached and watched; disproved records are removed and
 //     their instances stopped; processes that exist but cannot be
 //     confirmed are left recorded and their instances set to
-//     "unknown" — a safe hold, neither closed nor acted on.
+//     "unknown" — a safe hold, neither closed nor acted on;
+//   - each protection journal entry (written when a runtime
+//     record could not be) is verified with the same standard:
+//     confirmed processes are promoted to real runtime records
+//     and re-attached; disproved or gone processes clear the
+//     journal; anything unverifiable keeps the instance frozen.
 func (s *InstanceService) reconcileRuntimeAtStartup(c context.Context) error {
 	if n, err := s.store.ReconcileInstanceStatuses(c); err != nil {
 		return err
@@ -124,6 +129,13 @@ func (s *InstanceService) reconcileRuntimeAtStartup(c context.Context) error {
 	}
 	for _, rt := range records {
 		s.reconcileOne(c, rt)
+	}
+	protections, err := s.store.ListInstanceProtections(c)
+	if err != nil {
+		return err
+	}
+	for _, prot := range protections {
+		s.reconcileProtection(c, prot)
 	}
 	return nil
 }
@@ -244,11 +256,15 @@ func (s *InstanceService) reconcileOne(c context.Context, rt model.InstanceRunti
 		s.procs[inst.ID] = proc
 		s.rtMu.Unlock()
 		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning)
+		// A fallback journal entry for the same instance is
+		// superseded by the record's adoption.
+		_ = s.store.DeleteInstanceProtection(c, inst.ID)
 		go s.watchProcess(inst.ID, proc)
 		s.noteReconcile(inst.ID, "启动时重新识别运行中的实例", logging.StatusSuccess, "")
 		s.log.Info("re-attached to running browser instance", "id", inst.ID, "pid", rt.PID)
 	case verifyGone, verifyNotOurs:
 		_ = s.store.DeleteInstanceRuntime(c, rt.InstanceID)
+		_ = s.store.DeleteInstanceProtection(c, rt.InstanceID)
 		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusStopped)
 		action := "启动时确认实例已关闭"
 		if outcome == verifyNotOurs {
@@ -268,6 +284,79 @@ func (s *InstanceService) reconcileOne(c context.Context, rt model.InstanceRunti
 		s.rtMu.Unlock()
 		s.noteReconcile(inst.ID, "启动时无法确认实例运行状态", logging.StatusFailed, "进程身份无法确认，已进入安全保持状态")
 		s.log.Warn("instance process identity unconfirmed at startup", "id", inst.ID, "pid", rt.PID)
+	}
+}
+
+// reconcileProtection re-judges one fallback protection journal
+// entry at startup, with the same strict verification as a
+// runtime record. A confirmed process is promoted: the real
+// runtime record is written (only then is the journal dropped
+// and the process re-attached and watched). A process proven
+// gone or foreign clears the journal and stops the instance.
+// Anything unverifiable — including a confirmed process whose
+// record STILL cannot be written — keeps the journal and the
+// frozen "unknown" hold.
+func (s *InstanceService) reconcileProtection(c context.Context, prot model.InstanceProtection) {
+	inst, err := s.store.GetInstance(c, prot.InstanceID)
+	if err != nil {
+		// The instance is gone (its journal entry should have
+		// cascaded); drop the orphan entry.
+		_ = s.store.DeleteInstanceProtection(c, prot.InstanceID)
+		return
+	}
+	rt := model.InstanceRuntime{
+		InstanceID:       prot.InstanceID,
+		PID:              prot.PID,
+		ProcessCreatedAt: prot.ProcessCreatedAt,
+		Platform:         prot.Platform,
+		ExecutablePath:   prot.ExecutablePath,
+		UserDataDir:      prot.UserDataDir,
+		StartedAt:        prot.MarkedAt,
+	}
+	outcome, proc := s.verifyRecordedProcess(rt)
+	switch outcome {
+	case verifyConfirmed:
+		s.rtMu.Lock()
+		_, tracked := s.procs[inst.ID]
+		s.rtMu.Unlock()
+		if tracked {
+			// A runtime record for this instance already
+			// re-adopted the process in this same pass; the
+			// journal entry is superseded.
+			_ = s.store.DeleteInstanceProtection(c, inst.ID)
+			return
+		}
+		if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
+			s.rtMu.Lock()
+			s.unverified[inst.ID] = true
+			s.rtMu.Unlock()
+			s.noteReconcile(inst.ID, "启动时无法确认实例运行状态", logging.StatusFailed, "进程身份已确认，但运行记录仍无法写入，继续保持保护状态")
+			s.log.Warn("protection promotion failed; instance stays held", "id", inst.ID, "pid", prot.PID, "err", err)
+			return
+		}
+		_ = s.store.DeleteInstanceProtection(c, inst.ID)
+		s.rtMu.Lock()
+		s.procs[inst.ID] = proc
+		s.rtMu.Unlock()
+		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning)
+		go s.watchProcess(inst.ID, proc)
+		s.noteReconcile(inst.ID, "启动时重新识别运行中的实例", logging.StatusSuccess, "")
+		s.log.Info("re-attached to running browser instance (via protection journal)", "id", inst.ID, "pid", prot.PID)
+	case verifyGone, verifyNotOurs:
+		_ = s.store.DeleteInstanceProtection(c, inst.ID)
+		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusStopped)
+		action := "启动时确认实例已关闭"
+		if outcome == verifyNotOurs {
+			action = "启动时确认原记录进程已不属于该实例"
+		}
+		s.noteReconcile(inst.ID, action, logging.StatusSuccess, "")
+		s.log.Info("instance protection journal cleared at startup", "id", inst.ID, "outcome", int(outcome))
+	case verifyUnknown:
+		s.rtMu.Lock()
+		s.unverified[inst.ID] = true
+		s.rtMu.Unlock()
+		s.noteReconcile(inst.ID, "启动时无法确认实例运行状态", logging.StatusFailed, "进程身份无法确认，已进入安全保持状态")
+		s.log.Warn("instance process identity unconfirmed at startup (protection journal)", "id", inst.ID, "pid", prot.PID)
 	}
 }
 
@@ -340,40 +429,79 @@ func (s *InstanceService) watchProcess(instanceID string, proc runner.Process) {
 
 // holdUnconfirmedInstance puts an instance whose browser may
 // still be running — without DeBrowser being able to confirm
-// its exit or keep watching it — into the "unknown" hold: the
-// persisted status becomes running, a runtime record is kept so
-// the next startup reconciliation re-judges the process instead
-// of assuming it stopped, and the in-memory unverified mark
-// freezes every risky operation for this session. createdAt is
+// its exit or keep watching it — into the "unknown" hold, and
+// reports whether the hold was DURABLY established. The
+// in-memory unverified mark is set first, so this session
+// freezes every risky operation no matter what happens with
+// persistence. Durability comes from the database: primarily
+// the runtime record itself (with the persisted status set to
+// running, exactly like a verified launch), so the next
+// startup reconciliation re-judges the process instead of
+// assuming it stopped. If — and only if — that record cannot
+// be written, a fallback protection journal entry carrying the
+// same identity is written instead; startup reconciliation
+// re-verifies journal entries with the same strict standard,
+// promotes confirmed ones to real runtime records, clears
+// proven-gone ones, and keeps the rest frozen. createdAt is
 // the process creation time when it was captured (a launch
-// whose post-launch verification failed: the record is complete
-// and reconciliation may fully verify and re-adopt the process)
-// or 0 when tracking itself failed at launch (no creation time
-// was ever captured, so such a record can never fully verify
-// and the process is never adopted). If the database writes
-// fail the in-memory mark still holds for this session.
-func (s *InstanceService) holdUnconfirmedInstance(c context.Context, inst model.Instance, exe string, pid int, createdAt int64) {
-	if pid > 0 {
-		rt := model.InstanceRuntime{
+// whose post-launch verification failed: the identity is
+// complete and reconciliation may fully verify and re-adopt
+// the process) or 0 when tracking itself failed at launch (no
+// creation time was ever captured, so the process can never be
+// fully confirmed and is never adopted). A non-nil return
+// means NO durable protection exists — only this session's
+// memory mark — and the caller must treat the situation as a
+// severe error, never as an ordinary start failure.
+func (s *InstanceService) holdUnconfirmedInstance(c context.Context, inst model.Instance, exe string, pid int, createdAt int64) error {
+	s.rtMu.Lock()
+	s.unverified[inst.ID] = true
+	s.rtMu.Unlock()
+	if pid <= 0 {
+		return fmt.Errorf("没有可保护的进程标识")
+	}
+	now := time.Now().Format(time.RFC3339)
+	rt := model.InstanceRuntime{
+		InstanceID:       inst.ID,
+		PID:              pid,
+		ProcessCreatedAt: createdAt,
+		Platform:         runtime.GOOS,
+		ExecutablePath:   exe,
+		UserDataDir:      inst.UserDataDir,
+		StartedAt:        now,
+	}
+	if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
+		prot := model.InstanceProtection{
 			InstanceID:       inst.ID,
 			PID:              pid,
 			ProcessCreatedAt: createdAt,
 			Platform:         runtime.GOOS,
 			ExecutablePath:   exe,
 			UserDataDir:      inst.UserDataDir,
-			StartedAt:        time.Now().Format(time.RFC3339),
+			MarkedAt:         now,
 		}
-		if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
-			s.log.Error("record unconfirmed instance runtime failed", "id", inst.ID, "err", err)
+		if perr := s.store.UpsertInstanceProtection(c, prot); perr != nil {
+			return fmt.Errorf("运行记录与保护记录均写入失败（运行记录：%v；保护记录：%w）", err, perr)
 		}
+		s.log.Warn("runtime record write failed; instance held via protection journal", "id", inst.ID, "pid", pid, "err", err)
+		return nil
 	}
 	if err := s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning); err != nil {
+		// The record exists, and startup reconciliation derives
+		// the hold from the record itself; the persisted status
+		// is corrected there. Not a durability failure.
 		s.log.Error("hold unconfirmed instance as running failed", "id", inst.ID, "err", err)
 	}
-	s.rtMu.Lock()
-	s.unverified[inst.ID] = true
-	s.rtMu.Unlock()
 	s.log.Warn("instance browser exit unconfirmed; held as unknown", "id", inst.ID, "pid", pid)
+	return nil
+}
+
+// clearUnverifiedMark lifts the in-memory unknown hold (used
+// when an exit that looked unconfirmable is confirmed after
+// all, making the hold moot).
+func (s *InstanceService) clearUnverifiedMark(id string) {
+	s.rtMu.Lock()
+	delete(s.unverified, id)
+	s.rtMu.Unlock()
 }
 
 // StartInstance launches the instance's browser (recorded).
@@ -491,7 +619,10 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 			// operation — including a second start — can touch
 			// it until a later reconciliation resolves the
 			// record.
-			s.holdUnconfirmedInstance(c, inst, exe, untracked.PID, 0)
+			if herr := s.holdUnconfirmedInstance(c, inst, exe, untracked.PID, 0); herr != nil {
+				op.Step("写入无法确认保护记录", logging.StatusFailed, nil)
+				return fail(fmt.Errorf("严重错误：浏览器进程可能已启动但无法建立进程跟踪，且保护记录写入失败，重启后可能无法恢复该实例的保护状态：%w", herr))
+			}
 			return fail(fmt.Errorf("浏览器进程可能已启动，但无法建立进程跟踪，实例已进入无法确认状态：%w", err))
 		}
 		return fail(fmt.Errorf("浏览器启动失败：%w", err))
@@ -528,7 +659,26 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 		// record — re-adopting the browser if it is still this
 		// instance's, clearing it once the process is gone.
 		op.Step("清理未核验的浏览器进程", logging.StatusFailed, nil)
-		s.holdUnconfirmedInstance(c, inst, exe, proc.PID(), proc.CreatedAt())
+		if herr := s.holdUnconfirmedInstance(c, inst, exe, proc.PID(), proc.CreatedAt()); herr != nil {
+			// The hold itself could not be persisted. One last
+			// resort remains: this operation still holds the
+			// exact process object — try once more to close it
+			// and confirm the exit. If the exit is confirmed
+			// after all, the ordinary failure becomes truthful
+			// again and the in-memory mark comes off.
+			op.Step("写入无法确认保护记录", logging.StatusFailed, nil)
+			if processExited(proc) {
+				s.clearUnverifiedMark(inst.ID)
+				op.Step("清理未核验的浏览器进程", logging.StatusSuccess, nil)
+				return fail(err)
+			}
+			if cerr := proc.CloseGracefully(abortCloseTimeout); cerr == nil || processExited(proc) {
+				s.clearUnverifiedMark(inst.ID)
+				op.Step("清理未核验的浏览器进程", logging.StatusSuccess, nil)
+				return fail(err)
+			}
+			return fail(fmt.Errorf("严重错误：无法确认浏览器进程是否已退出，且保护记录写入失败，重启后可能无法恢复该实例的保护状态：%w", herr))
+		}
 		return fail(fmt.Errorf("无法确认浏览器进程是否已退出，实例已进入无法确认状态：%w", err))
 	}
 	select {
