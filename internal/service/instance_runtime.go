@@ -800,11 +800,6 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 		}
 		return fmt.Errorf("实例未在运行")
 	}
-	clearTransient := func() {
-		s.rtMu.Lock()
-		delete(s.transient, id)
-		s.rtMu.Unlock()
-	}
 	// Ask the exact tracked process to close and let the
 	// watcher own the outcome: the close request is not the
 	// cleanup. The watcher stays registered; when the exit is
@@ -812,9 +807,20 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	// the status, and its done signal releases this operation.
 	// A close error is not decisive either — an exit racing it
 	// still counts, through the same signal.
+	//
+	// Transient ownership: this operation set the "stopping"
+	// transition above to mark its wait, but from here the
+	// transition belongs to the watcher — for a persisted watch
+	// it holds the transition through its cleanup and deletes
+	// it BEFORE closing done. This operation therefore never
+	// deletes the transition on the success path (a newer
+	// start's own transition could already stand in its place),
+	// and on the timeout path it deletes it only in the same
+	// rtMu critical section that finds the watcher has not yet
+	// observed the exit — the transition is then still this
+	// operation's own.
 	_ = w.proc.CloseGracefully(closeTimeout)
 	finish := func() error {
-		clearTransient()
 		op.Step("关闭浏览器", logging.StatusSuccess, nil)
 		s.log.Info("browser instance stopped", "id", id, "pid", w.proc.PID())
 		return nil
@@ -834,19 +840,22 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	}
 	// The process is still alive and still watched: this stop
 	// attempt is over, so the watch must judge a later exit on
-	// its own again. Reset stopAsked under rtMu — the same lock
-	// the watcher reads it under when an exit lands. If the
-	// watcher HAS already observed the exit (w.exited), its
-	// settlement is already decided from the value it captured
-	// and stands untouched.
+	// its own again. In one rtMu critical section: if the
+	// watcher has NOT observed the exit, reset stopAsked (the
+	// same lock the watcher reads it under when an exit lands)
+	// and remove this operation's transition. If it HAS
+	// (w.exited), its settlement is already decided from the
+	// value it captured, and its cleanup transition stays
+	// untouched — the watcher removes it when its cleanup
+	// completes.
 	s.rtMu.Lock()
 	if !w.exited {
 		w.stopAsked = false
+		delete(s.transient, id)
 	}
 	s.rtMu.Unlock()
 	// Report the failure truthfully, with the instance still
 	// running — never a premature "stopped".
-	clearTransient()
 	op.Step("关闭浏览器", logging.StatusFailed, nil)
 	return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
 }

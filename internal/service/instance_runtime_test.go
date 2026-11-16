@@ -620,6 +620,12 @@ func TestStopTimeoutThenAbnormalSelfExitIsError(t *testing.T) {
 	if got, _ := svc.GetInstance(inst.ID); got.Status != model.StatusRunning {
 		t.Fatalf("status after the timed-out stop = %q, want running", got.Status)
 	}
+	svc.rtMu.Lock()
+	_, transientLeft := svc.transient[inst.ID]
+	svc.rtMu.Unlock()
+	if transientLeft {
+		t.Fatal("timed-out stop left its transition behind")
+	}
 	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
 		t.Fatalf("runtime record lost after the timed-out stop: %v", err)
 	}
@@ -685,6 +691,15 @@ func TestStopTimeoutRacingWatcherCleanupKeepsWatcherOutcome(t *testing.T) {
 	if err := <-stopDone; err == nil {
 		t.Fatal("stop reported success before the watcher cleanup landed")
 	}
+	// The timed-out stop must not have lifted the watcher's
+	// cleanup guard: a restart is still refused and creates no
+	// second process while the cleanup is held open.
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("restart allowed during the watcher cleanup after a timed-out stop")
+	}
+	if fl.seq != 1 {
+		t.Fatalf("launches = %d, want 1 (no second process)", fl.seq)
+	}
 	close(release)
 	// The exit answered a close request, so the watcher's
 	// captured outcome — stopped, despite the abnormal code —
@@ -693,6 +708,22 @@ func TestStopTimeoutRacingWatcherCleanupKeepsWatcherOutcome(t *testing.T) {
 	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("runtime record survived the raced cleanup: %v", err)
 	}
+	// Once the cleanup has completed, a restart works and its
+	// record is the new process's own.
+	if err := svc.StartInstance("", inst.ID); err != nil {
+		t.Fatalf("restart after the raced cleanup: %v", err)
+	}
+	if fl.seq != 2 {
+		t.Fatalf("launches after the raced cleanup = %d, want 2", fl.seq)
+	}
+	rt, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID)
+	if err != nil || rt.PID != fl.lastProc.pid {
+		t.Fatalf("runtime record after the restart = %+v, %v", rt, err)
+	}
+	if err := svc.StopInstance("", inst.ID); err != nil {
+		t.Fatalf("stop of the restarted instance: %v", err)
+	}
+	waitStatus(t, svc, inst.ID, model.StatusStopped)
 }
 
 // One instance's browser exiting on its own never disturbs
