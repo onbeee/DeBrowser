@@ -58,7 +58,7 @@ func TestGetDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDiagnostics: %v", err)
 	}
-	if view.AppVersion == "" || view.SchemaVersion != 14 {
+	if view.AppVersion == "" || view.SchemaVersion != 13 {
 		t.Fatalf("view = %+v, want version set and schema 11", view)
 	}
 	if len(view.Categories) != 3 {

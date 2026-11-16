@@ -43,23 +43,6 @@ type InstanceRuntime struct {
 	StartedAt        string `json:"startedAt"`
 }
 
-// InstanceProtection is the fallback protection journal entry for
-// an instance whose browser may still be running while its full
-// InstanceRuntime record could not be written. It carries the
-// same identity fields so startup reconciliation can re-verify
-// the process with the same strict standard; while an entry
-// exists and the process cannot be proven gone, the instance
-// stays frozen at "unknown" across restarts.
-type InstanceProtection struct {
-	InstanceID       string `json:"instanceId"`
-	PID              int    `json:"pid"`
-	ProcessCreatedAt int64  `json:"processCreatedAt"`
-	Platform         string `json:"platform"`
-	ExecutablePath   string `json:"executablePath"`
-	UserDataDir      string `json:"userDataDir"`
-	MarkedAt         string `json:"markedAt"`
-}
-
 // ProfileDirInfo describes one instance file (a directory directly
 // under data/profiles) that is not bound to any instance and is
 // safe to offer for selection: it exists, is a directory, and is
