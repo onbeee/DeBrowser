@@ -75,7 +75,8 @@ export function DeleteInstance(operationID: string, id: string): $CancellablePro
  *     leaves the data in the quarantine slot — reported in the
  *     error, never silently lost.
  * 
- * A persisted "running" instance is refused before any of this.
+ * An instance that is running (or whose runtime state cannot
+ * be confirmed) is refused before any of this.
  * DeleteInstanceAndProfile deletes an instance and its profile
  * directory (recorded with per-phase steps, unified recording).
  */
