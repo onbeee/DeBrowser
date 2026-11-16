@@ -50,26 +50,41 @@ export interface ClientEventInput {
 }
 
 /**
- * CreateInstanceInput carries the user-editable fields for creation.
- * UserDataDir is optional: empty means the default profiles/<id>.
- * There is deliberately no proxy field: instances are always created
- * unbound (proxy_id NULL). A historical instance's stored proxy_id is
- * data, not an editable binding.
+ * CreateInstanceInput carries the user-editable fields for creation
+ * (Stage 9B: exactly four — name, kernel, proxy node, instance
+ * file). There is deliberately no proxy field: the proxy-node
+ * association stays part of the data model, but proxy management
+ * is not open yet, so instances are always created unbound
+ * (proxy_id NULL) and can run without one.
  */
 export interface CreateInstanceInput {
     "name": string;
-    "startUrl": string;
 
     /**
-     * BrowserID optionally associates the instance with one
-     * registered browser (external_browsers ID) chosen in the form.
-     * Empty means no association. The association is by stable ID,
-     * never by name; the instance stores the registration's ID and
-     * a display snapshot of its name, and the executable path is
-     * always resolved live from the registration.
+     * BrowserID associates the instance with one registered
+     * browser (external_browsers ID) chosen in the form. It is
+     * REQUIRED: an instance must name a registered kernel before
+     * it can be created (and therefore started). The association
+     * is by stable ID, never by name; the instance stores the
+     * registration's ID and a display snapshot of its name, and
+     * the executable path is always resolved live from the
+     * registration.
      */
     "browserId": string;
-    "userDataDir": string;
+
+    /**
+     * ProfileMode selects how the instance file is provided:
+     * ProfileModeDefault, ProfileModeCustom or
+     * ProfileModeExisting. Empty means ProfileModeDefault.
+     */
+    "profileMode": string;
+
+    /**
+     * ProfileName is the folder name for the custom and existing
+     * modes (a single directory name directly under
+     * data/profiles, never a path).
+     */
+    "profileName": string;
 }
 
 /**
@@ -176,16 +191,14 @@ export interface Status {
 }
 
 /**
- * UpdateInstanceInput carries the editable fields of one instance.
- * The profile directory of an existing instance cannot be changed
- * here (moving live profile data is a separate, explicit operation).
- * The stored proxy_id is likewise not editable here: updates preserve
- * whatever value the row already has.
+ * UpdateInstanceInput carries the editable fields of one instance
+ * (Stage 9B: name, kernel, proxy node — preserved, not editable —
+ * and the instance file). The stored proxy_id is not editable
+ * here: updates preserve whatever value the row already has.
  */
 export interface UpdateInstanceInput {
     "id": string;
     "name": string;
-    "startUrl": string;
 
     /**
      * BrowserID is the form's registered-browser choice (see
@@ -193,7 +206,19 @@ export interface UpdateInstanceInput {
      * association, an empty BrowserID clears it; on an instance
      * without one, the historical free-text kernel name/version
      * recorded before associations existed are preserved verbatim.
+     * Changing the association is refused while the instance is
+     * running (or its state is unconfirmed).
      */
     "browserId": string;
     "sortOrder": number;
+
+    /**
+     * ProfileAction optionally operates on the bound instance
+     * file in the same save: ProfileActionRename renames the
+     * bound folder to ProfileName; ProfileActionSwap rebinds the
+     * instance to the existing unbound folder ProfileName. Both
+     * are refused while the instance is running (or unconfirmed).
+     */
+    "profileAction": string;
+    "profileName": string;
 }

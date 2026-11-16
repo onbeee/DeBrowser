@@ -1,41 +1,59 @@
 import { useCallback, useEffect, useState } from "react";
-import { AppWindow, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
+import { AppWindow, Pencil, Play, Plus, Square, Trash2, TriangleAlert } from "lucide-react";
 import {
   BrowserService,
   InstanceService,
   type BrowserView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
-import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
+import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 const STATUS_LABEL: Record<string, string> = {
-  stopped: "已停止",
+  stopped: "已关闭",
+  starting: "启动中",
   running: "运行中",
+  stopping: "关闭中",
   error: "异常",
+  unknown: "无法确认",
 };
+
+// Statuses in which the instance's browser may be alive: kernel
+// and instance-file changes, and deletion, are refused (the
+// backend enforces the same gates).
+const ACTIVE_STATUSES = new Set(["running", "starting", "stopping", "unknown"]);
+
+function profileFolderOf(inst: Instance): string {
+  return inst.userDataDir.startsWith("profiles/")
+    ? inst.userDataDir.slice("profiles/".length)
+    : inst.userDataDir;
+}
 
 interface FormState {
   id?: string;
   name: string;
-  startUrl: string;
   // browserId is the ID of one registered browser (「浏览器内核」
-  // page) associated with the instance; "" means no association.
-  // The options come only from actual registrations — never from
-  // free text — so an association always resolves to a real
-  // registered path.
+  // page) associated with the instance. The options come only
+  // from actual registrations — never from free text — so an
+  // association always resolves to a real registered path.
+  // Required when creating; on edit, "" clears an association.
   browserId: string;
+  // Create: "default" | "custom" | "existing".
+  // Edit: "rename" | "swap" (no default option on edit).
+  profileMode: string;
+  profileName: string;
 }
 
-const EMPTY_FORM: FormState = { name: "", startUrl: "", browserId: "" };
+const EMPTY_FORM: FormState = { name: "", browserId: "", profileMode: "default", profileName: "" };
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
 /**
- * 浏览器实例管理（Stage 3 基础能力）：实例元数据的增删改查。
- * 删除分为两种且含义明确区分：「删除记录」只删数据库记录，Profile
- * 文件保留；「删除记录并清理 Profile」才会删除磁盘上的浏览器数据，
- * 且必须二次确认。浏览器进程的启动/停止属于后续阶段。
+ * 浏览器实例管理（Stage 9B）：实例的新建、编辑、删除与真实运行。
+ * 每个实例绑定一个独立的实例文件（data/profiles 下的文件夹），
+ * 启动时以该文件夹作为浏览器的数据目录。删除分两种且含义明确
+ * 区分：「仅删除实例」保留实例文件；「删除实例及其实例文件」才
+ * 会删除磁盘上的浏览器数据，且必须由用户明确选择。
  */
 export default function InstancesPage() {
   const log = useAppStore((state) => state.log);
@@ -43,18 +61,30 @@ export default function InstancesPage() {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   // browsersLoaded is true only after ListBrowsers has succeeded.
-  // While it is false (still loading, or the load failed), editing
+  // While it is false (still loading, or the load failed), saving
   // is disabled: judging an association against a not-yet-loaded
   // list would mistake it for a missing registration, and saving
   // would then clear the association in the database.
   const [browsersLoaded, setBrowsersLoaded] = useState(false);
   const [browsersError, setBrowsersError] = useState<string | null>(null);
+  const [availableProfiles, setAvailableProfiles] = useState<ProfileDirInfo[]>([]);
   const [editing, setEditing] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
   const [busy, setBusy] = useState(false);
+  const [actingId, setActingId] = useState<string | null>(null);
+
+  const refreshInstances = useCallback(async () => {
+    try {
+      const list = await InstanceService.ListInstances();
+      setInstances(list ?? []);
+    } catch {
+      // A failed background refresh keeps the last known list;
+      // the next poll or action retries.
+    }
+  }, []);
 
   const load = useCallback(async () => {
     // Close the editing gate FIRST, before any await: on a reload,
@@ -91,34 +121,88 @@ export default function InstancesPage() {
     void load();
   }, [load]);
 
+  // Keep run states fresh while the page is open (a browser the
+  // user closed directly must flip to 已关闭 without a reload).
+  useEffect(() => {
+    const timer = setInterval(() => void refreshInstances(), 2500);
+    return () => clearInterval(timer);
+  }, [refreshInstances]);
+
+  const loadAvailableProfiles = useCallback(async () => {
+    try {
+      const list = await InstanceService.ListAvailableProfiles();
+      setAvailableProfiles(list ?? []);
+    } catch {
+      setAvailableProfiles([]);
+    }
+  }, []);
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    void loadAvailableProfiles();
+  };
+
+  const openEdit = (inst: Instance) => {
+    setEditing(inst);
+    setForm({
+      id: inst.id,
+      name: inst.name,
+      // A kernelId that no longer resolves to a registration is
+      // shown as unassociated (see the note in the form); saving
+      // then clears it.
+      browserId: browsers.some((b) => b.id === inst.kernelId) ? inst.kernelId : "",
+      profileMode: "rename",
+      profileName: profileFolderOf(inst),
+    });
+    void loadAvailableProfiles();
+  };
+
   const submitForm = async () => {
     if (!form) return;
-    if (form.id && !browsersLoaded) {
-      // Never let an edit save carry a browserId that was derived
-      // from an incompletely loaded registration list.
-      setError("内核列表尚未加载完成，无法保存编辑。请等待加载完成或重新加载页面。");
+    if (!browsersLoaded) {
+      // Never let a save carry a browserId that was derived from
+      // an incompletely loaded registration list.
+      setError("内核列表尚未加载完成，无法保存。请等待加载完成或重新加载页面。");
+      return;
+    }
+    if (!form.id && !form.browserId) {
+      setError("请选择实例内核。");
       return;
     }
     setBusy(true);
     const opId = newOperationId();
     const action = form.id ? "instance.update" : "instance.create";
     try {
-      if (form.id) {
+      if (form.id && editing) {
+        // Translate the form's instance-file choice into a backend
+        // action only when it actually changes something.
+        let profileAction = "";
+        let profileName = "";
+        const currentFolder = profileFolderOf(editing);
+        if (form.profileMode === "rename" && form.profileName.trim() !== currentFolder) {
+          profileAction = "rename";
+          profileName = form.profileName;
+        } else if (form.profileMode === "swap" && form.profileName) {
+          profileAction = "swap";
+          profileName = form.profileName;
+        }
         await InstanceService.UpdateInstance(opId, {
           id: form.id,
           name: form.name,
-          startUrl: form.startUrl,
           browserId: form.browserId,
-          sortOrder: 0,
+          sortOrder: editing.sortOrder,
+          profileAction,
+          profileName,
         });
         log("info", `实例已更新：${form.name}`);
         recordOperationFeedback(opId, true, `实例已更新：${form.name}`, "浏览器实例", action);
       } else {
         const created = await InstanceService.CreateInstance(opId, {
           name: form.name,
-          startUrl: form.startUrl,
           browserId: form.browserId,
-          userDataDir: "",
+          profileMode: form.profileMode,
+          profileName: form.profileMode === "default" ? "" : form.profileName,
         });
         log("info", `实例已创建：${created.name}`);
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
@@ -136,6 +220,32 @@ export default function InstancesPage() {
     }
   };
 
+  const runAction = async (inst: Instance, kind: "start" | "stop") => {
+    setActingId(inst.id);
+    const opId = newOperationId();
+    const action = kind === "start" ? "instance.start" : "instance.stop";
+    try {
+      if (kind === "start") {
+        await InstanceService.StartInstance(opId, inst.id);
+        log("info", `实例已启动：${inst.name}`);
+        recordOperationFeedback(opId, true, `实例已启动：${inst.name}`, "浏览器实例", action);
+      } else {
+        await InstanceService.StopInstance(opId, inst.id);
+        log("info", `实例已关闭：${inst.name}`);
+        recordOperationFeedback(opId, true, `实例已关闭：${inst.name}`, "浏览器实例", action);
+      }
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      log("error", `${kind === "start" ? "启动" : "关闭"}实例失败：${message}`);
+      recordOperationFeedback(opId, false, message, "浏览器实例", action);
+    } finally {
+      setActingId(null);
+      await refreshInstances();
+    }
+  };
+
   const confirmDelete = async () => {
     if (!pendingDelete) return;
     setBusy(true);
@@ -144,12 +254,12 @@ export default function InstancesPage() {
     try {
       if (pendingDelete.withProfile) {
         await InstanceService.DeleteInstanceAndProfile(opId, pendingDelete.instance.id);
-        log("info", `实例记录及 Profile 已删除：${pendingDelete.instance.name}`);
-        recordOperationFeedback(opId, true, `实例记录及 Profile 已删除：${pendingDelete.instance.name}`, "浏览器实例", action);
+        log("info", `实例及其实例文件已删除：${pendingDelete.instance.name}`);
+        recordOperationFeedback(opId, true, `实例及其实例文件已删除：${pendingDelete.instance.name}`, "浏览器实例", action);
       } else {
         await InstanceService.DeleteInstance(opId, pendingDelete.instance.id);
-        log("info", `实例记录已删除（Profile 文件保留）：${pendingDelete.instance.name}`);
-        recordOperationFeedback(opId, true, `实例记录已删除（Profile 文件保留）：${pendingDelete.instance.name}`, "浏览器实例", action);
+        log("info", `实例已删除（实例文件保留）：${pendingDelete.instance.name}`);
+        recordOperationFeedback(opId, true, `实例已删除（实例文件保留）：${pendingDelete.instance.name}`, "浏览器实例", action);
       }
       setPendingDelete(null);
       await load();
@@ -164,21 +274,22 @@ export default function InstancesPage() {
   };
 
   const inputCls =
-    "w-full rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)";
+    "w-full rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint) disabled:opacity-50";
   const labelCls = "mb-1 block text-xs text-(--text-dim)";
+  const radioCls = "flex items-center gap-2 text-sm text-(--text-main)";
+  const editingActive = editing ? ACTIVE_STATUSES.has(editing.status) : false;
+  const editingRunning = editing ? ["running", "starting", "stopping"].includes(editing.status) : false;
+  const editingUnknown = editing?.status === "unknown";
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-6">
       <div className="flex items-center justify-between">
         <p className="text-sm text-(--text-dim)">
-          管理浏览器实例的元数据。启动、停止浏览器进程将在后续阶段提供。
+          每个实例使用独立的实例文件，可独立启动、运行与关闭。
         </p>
         <button
           type="button"
-          onClick={() => {
-            setEditing(null);
-            setForm(EMPTY_FORM);
-          }}
+          onClick={openCreate}
           className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
         >
           <Plus size={14} /> 新建实例
@@ -196,7 +307,7 @@ export default function InstancesPage() {
         <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
           <TriangleAlert size={16} className="mt-0.5 shrink-0" />
           <span className="flex-1">
-            内核列表加载失败：{browsersError}。编辑功能已暂停，以免误清除实例的内核关联。
+            内核列表加载失败：{browsersError}。保存功能已暂停，以免误清除实例的内核关联。
           </span>
           <button
             type="button"
@@ -223,67 +334,81 @@ export default function InstancesPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-(--border) text-left text-xs text-(--text-faint)">
-                <th className="px-4 py-2.5 font-medium">名称</th>
+                <th className="px-4 py-2.5 font-medium">实例名称</th>
+                <th className="px-4 py-2.5 font-medium">代理节点</th>
+                <th className="px-4 py-2.5 font-medium">实例内核</th>
                 <th className="px-4 py-2.5 font-medium">状态</th>
-                <th className="px-4 py-2.5 font-medium">内核</th>
-                <th className="px-4 py-2.5 font-medium">数据目录</th>
                 <th className="px-4 py-2.5 text-right font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
-              {instances.map((inst) => (
-                <tr key={inst.id} className="border-b border-(--border) last:border-0 hover:bg-(--hover-bg)">
-                  <td className="px-4 py-2.5 font-medium">{inst.name}</td>
-                  <td className="px-4 py-2.5">
-                    <span className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)">
-                      {STATUS_LABEL[inst.status] ?? inst.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-(--text-dim)">
-                    <span title={inst.kernelExecutablePath || undefined}>
-                      {inst.kernelName
-                        ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
-                        : "未指定"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 font-mono text-xs text-(--text-faint)">{inst.userDataDir}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex justify-end gap-1">
-                      <button
-                        type="button"
-                        title={browsersLoaded ? "编辑" : "内核列表加载完成后可编辑"}
-                        disabled={!browsersLoaded}
-                        className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
-                        onClick={() => {
-                          setEditing(inst);
-                          setForm({
-                            id: inst.id,
-                            name: inst.name,
-                            startUrl: inst.startUrl,
-                            // A kernelId that no longer resolves
-                            // to a registration is shown as
-                            // unassociated (see the note in the
-                            // form); saving then clears it.
-                            browserId: browsers.some((b) => b.id === inst.kernelId)
-                              ? inst.kernelId
-                              : "",
-                          });
-                        }}
-                      >
-                        <Pencil size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        title="删除记录（保留 Profile 文件）"
-                        onClick={() => setPendingDelete({ instance: inst, withProfile: false })}
-                        className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg)"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {instances.map((inst) => {
+                const active = ACTIVE_STATUSES.has(inst.status);
+                const transitioning = inst.status === "starting" || inst.status === "stopping";
+                return (
+                  <tr key={inst.id} className="border-b border-(--border) last:border-0 hover:bg-(--hover-bg)">
+                    <td className="px-4 py-2.5 font-medium">{inst.name}</td>
+                    <td className="px-4 py-2.5 text-(--text-dim)">
+                      {inst.proxyId ? "已设置（历史关联）" : "未设置"}
+                    </td>
+                    <td className="px-4 py-2.5 text-(--text-dim)">
+                      <span title={inst.kernelExecutablePath || undefined}>
+                        {inst.kernelName
+                          ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
+                          : "未指定"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <span className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)">
+                        {STATUS_LABEL[inst.status] ?? inst.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex justify-end gap-1">
+                        {inst.status === "running" || inst.status === "stopping" ? (
+                          <button
+                            type="button"
+                            title="关闭"
+                            disabled={transitioning || actingId === inst.id || inst.status === "stopping"}
+                            onClick={() => void runAction(inst, "stop")}
+                            className="flex items-center gap-1 rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Square size={13} /> 关闭
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            title="启动"
+                            disabled={active || transitioning || actingId === inst.id}
+                            onClick={() => void runAction(inst, "start")}
+                            className="flex items-center gap-1 rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Play size={13} /> 启动
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          title={browsersLoaded ? "编辑" : "内核列表加载完成后可编辑"}
+                          disabled={!browsersLoaded || transitioning}
+                          className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+                          onClick={() => openEdit(inst)}
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          title={active ? "实例运行期间不能删除" : "删除实例"}
+                          disabled={active}
+                          onClick={() => setPendingDelete({ instance: inst, withProfile: false })}
+                          className="rounded p-1.5 text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -295,7 +420,7 @@ export default function InstancesPage() {
             <h3 className="text-base font-semibold">{form.id ? "编辑实例" : "新建实例"}</h3>
             <div className="mt-4 space-y-3">
               <div>
-                <label className={labelCls}>名称</label>
+                <label className={labelCls}>实例名称</label>
                 <input
                   className={inputCls}
                   value={form.name}
@@ -304,23 +429,14 @@ export default function InstancesPage() {
                 />
               </div>
               <div>
-                <label className={labelCls}>起始页（可选）</label>
-                <input
-                  className={inputCls}
-                  value={form.startUrl}
-                  onChange={(e) => setForm({ ...form, startUrl: e.target.value })}
-                  placeholder="https://"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>浏览器内核（可选）</label>
+                <label className={labelCls}>实例内核{form.id ? "" : "（必选）"}</label>
                 <select
                   className={inputCls}
                   value={form.browserId}
-                  disabled={!browsersLoaded}
+                  disabled={!browsersLoaded || editingRunning}
                   onChange={(e) => setForm({ ...form, browserId: e.target.value })}
                 >
-                  <option value="">不选择内核</option>
+                  <option value="">{form.id ? "不选择内核" : "请选择内核"}</option>
                   {browsers.map((b) => (
                     <option key={b.id} value={b.id}>
                       {b.name} — {b.executablePath}
@@ -359,6 +475,140 @@ export default function InstancesPage() {
                   </p>
                 ) : null}
               </div>
+              <div>
+                <label className={labelCls}>代理节点</label>
+                <select className={inputCls} value="" disabled>
+                  <option value="">未设置（代理节点功能暂未开放）</option>
+                </select>
+                <p className="mt-1 text-xs text-(--text-faint)">不设置代理节点时，实例可正常启动和运行。</p>
+              </div>
+              <div>
+                <label className={labelCls}>实例文件</label>
+                {!form.id ? (
+                  <div className="space-y-2">
+                    <label className={radioCls}>
+                      <input
+                        type="radio"
+                        name="profile-mode"
+                        checked={form.profileMode === "default"}
+                        onChange={() => setForm({ ...form, profileMode: "default", profileName: "" })}
+                      />
+                      默认（自动分配）
+                    </label>
+                    {form.profileMode === "default" && (
+                      <p className="pl-6 text-xs text-(--text-faint)">
+                        按顺序自动分配实例文件：P-1、P-2、P-3……已分配过的编号不会重复使用。
+                      </p>
+                    )}
+                    <label className={radioCls}>
+                      <input
+                        type="radio"
+                        name="profile-mode"
+                        checked={form.profileMode === "custom"}
+                        onChange={() => setForm({ ...form, profileMode: "custom", profileName: "" })}
+                      />
+                      自定（新建实例文件）
+                    </label>
+                    {form.profileMode === "custom" && (
+                      <input
+                        className={inputCls}
+                        value={form.profileName}
+                        onChange={(e) => setForm({ ...form, profileName: e.target.value })}
+                        placeholder="实例文件名称，例如：工作账号"
+                      />
+                    )}
+                    <label className={radioCls}>
+                      <input
+                        type="radio"
+                        name="profile-mode"
+                        checked={form.profileMode === "existing"}
+                        onChange={() => setForm({ ...form, profileMode: "existing", profileName: "" })}
+                      />
+                      选择（使用保留的实例文件）
+                    </label>
+                    {form.profileMode === "existing" &&
+                      (availableProfiles.length === 0 ? (
+                        <p className="pl-6 text-xs text-(--text-faint)">暂无可选择的实例文件。</p>
+                      ) : (
+                        <select
+                          className={inputCls}
+                          value={form.profileName}
+                          onChange={(e) => setForm({ ...form, profileName: e.target.value })}
+                        >
+                          <option value="">请选择实例文件</option>
+                          {availableProfiles.map((p) => (
+                            <option key={p.name} value={p.name}>
+                              {p.name} — {p.path}
+                            </option>
+                          ))}
+                        </select>
+                      ))}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-(--text-faint)">
+                      当前实例文件：{editing ? profileFolderOf(editing) : ""}
+                      <span className="font-mono">（{editing?.userDataDir}）</span>
+                    </p>
+                    <label className={radioCls}>
+                      <input
+                        type="radio"
+                        name="profile-mode-edit"
+                        checked={form.profileMode === "rename"}
+                        disabled={editingActive}
+                        onChange={() =>
+                          setForm({ ...form, profileMode: "rename", profileName: editing ? profileFolderOf(editing) : "" })
+                        }
+                      />
+                      自定（重命名当前实例文件）
+                    </label>
+                    {form.profileMode === "rename" && (
+                      <input
+                        className={inputCls}
+                        value={form.profileName}
+                        disabled={editingActive}
+                        onChange={(e) => setForm({ ...form, profileName: e.target.value })}
+                        placeholder="新的实例文件名称"
+                      />
+                    )}
+                    <label className={radioCls}>
+                      <input
+                        type="radio"
+                        name="profile-mode-edit"
+                        checked={form.profileMode === "swap"}
+                        disabled={editingActive}
+                        onChange={() => setForm({ ...form, profileMode: "swap", profileName: "" })}
+                      />
+                      选择（更换为保留的实例文件）
+                    </label>
+                    {form.profileMode === "swap" &&
+                      (availableProfiles.length === 0 ? (
+                        <p className="pl-6 text-xs text-(--text-faint)">暂无可选择的实例文件。</p>
+                      ) : (
+                        <select
+                          className={inputCls}
+                          value={form.profileName}
+                          disabled={editingActive}
+                          onChange={(e) => setForm({ ...form, profileName: e.target.value })}
+                        >
+                          <option value="">请选择要更换的实例文件</option>
+                          {availableProfiles.map((p) => (
+                            <option key={p.name} value={p.name}>
+                              {p.name} — {p.path}
+                            </option>
+                          ))}
+                        </select>
+                      ))}
+                    {editingActive && (
+                      <p className="text-xs text-(--text-faint)">
+                        {editingUnknown
+                          ? "实例运行状态无法确认时，不能更换实例文件；实例名称与内核可以修改。"
+                          : "实例运行中，不能更换内核或实例文件。"}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
@@ -390,16 +640,16 @@ export default function InstancesPage() {
             <h3 className="text-base font-semibold">删除实例「{pendingDelete.instance.name}」</h3>
             {pendingDelete.withProfile ? (
               <p className="mt-2 text-sm leading-relaxed text-(--text-dim)">
-                将同时删除数据库记录和磁盘上的 Profile 目录
+                将同时删除实例记录和实例文件
                 <span className="font-mono text-xs"> {pendingDelete.instance.userDataDir} </span>
                 中的全部浏览器数据（Cookie、登录状态、历史记录等），此操作不可恢复。
               </p>
             ) : (
               <>
                 <p className="mt-2 text-sm leading-relaxed text-(--text-dim)">
-                  仅删除数据库中的实例记录，磁盘上的 Profile 数据
+                  仅删除实例记录，实例文件
                   <span className="font-mono text-xs"> {pendingDelete.instance.userDataDir} </span>
-                  会保留，不会受影响。
+                  会保留在磁盘上，之后可以重新绑定到其他实例。
                 </p>
                 <button
                   type="button"
@@ -407,7 +657,7 @@ export default function InstancesPage() {
                   onClick={() => setPendingDelete({ ...pendingDelete, withProfile: true })}
                   className="mt-3 text-sm text-(--danger) underline underline-offset-2"
                 >
-                  改为同时清理 Profile 数据
+                  改为同时删除实例文件
                 </button>
               </>
             )}
@@ -425,7 +675,7 @@ export default function InstancesPage() {
                 onClick={() => void confirmDelete()}
                 className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-(--danger-contrast) hover:opacity-90 disabled:opacity-50"
               >
-                {pendingDelete.withProfile ? "确认删除并清理 Profile" : "确认删除记录"}
+                {pendingDelete.withProfile ? "确认删除实例及实例文件" : "确认仅删除实例"}
               </button>
             </div>
           </div>

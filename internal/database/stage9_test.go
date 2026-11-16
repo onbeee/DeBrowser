@@ -40,7 +40,7 @@ func TestMigration9DropsOverlayKeepsEverythingElse(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate to v9: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
 		t.Fatalf("applied version = %d (err %v), want 10", v, err)
 	}
 	if err := db.SQL().QueryRowContext(ctx,
@@ -75,7 +75,7 @@ func TestMigration9FreshDatabase(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
 		t.Fatalf("applied version = %d (err %v), want 10", v, err)
 	}
 	var n int

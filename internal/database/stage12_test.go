@@ -57,6 +57,13 @@ func TestMigration12PreservesRegistrations(t *testing.T) {
 	if _, err := db.SQL().ExecContext(ctx, externalBrowsers0011DDL); err != nil {
 		t.Fatal(err)
 	}
+	// A real v11 database also carries browser_instances (created
+	// by migration 0002); later migrations (0013) index it, so the
+	// fixture includes its minimal shape.
+	if _, err := db.SQL().ExecContext(ctx, `CREATE TABLE browser_instances (
+		id TEXT PRIMARY KEY, user_data_dir TEXT NOT NULL DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.SQL().ExecContext(ctx,
 		`INSERT INTO external_browsers
 		   (id, name, browser_type, version, executable_path, signature_status, signature_publisher, status, created_at, updated_at, last_verified_at)
@@ -67,7 +74,7 @@ func TestMigration12PreservesRegistrations(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 12", v, err)
 	}
 	// The registration survived as a pure path record.

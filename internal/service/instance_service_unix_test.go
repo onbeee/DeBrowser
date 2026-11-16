@@ -61,7 +61,7 @@ func TestPurgeSwapIntermediateAfterVerifyRefused(t *testing.T) {
 func TestPurgeRestoreWithSwappedRoot(t *testing.T) {
 	svc, cfg := testInstanceService(t)
 	outside := t.TempDir()
-	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "恢复"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "恢复", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/database"
@@ -15,24 +16,49 @@ import (
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/paths"
 	"github.com/onbeee/DeBrowser/internal/pfiles"
+	"github.com/onbeee/DeBrowser/internal/runner"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
 
 // InstanceService is the browser-instance management service exposed
-// to the frontend over Wails bindings (Stage 3). It is a thin,
-// validating layer over internal/store: all SQL lives in the store,
-// all filesystem effects are confined to the portable layout, and no
-// method ever touches a path outside it.
+// to the frontend over Wails bindings. It is a validating layer over
+// internal/store: all SQL lives in the store, all filesystem effects
+// are confined to the portable layout, and no method ever touches a
+// path outside it.
 //
-// Status semantics: model.Instance.Status is the PERSISTED lifecycle
-// record. Stage 3 has no browser process manager, so no instance can
-// actually be running: at construction, any row still marked
-// "running" (a leftover from a crashed or older process) is
-// reconciled to "stopped". Later stages will own live transitions.
+// Status semantics (Stage 9B): model.Instance.Status is the
+// PERSISTED lifecycle record, owned by the runtime manager in
+// instance_runtime.go. It is written from verified process facts —
+// a successful launch, an observed exit, a startup reconciliation
+// that re-verified (or disproved) a recorded process — never merely
+// assumed. Transient states (starting/stopping) live only in
+// memory and are overlaid onto reads; a crash mid-transition
+// therefore falls back to the last verified persisted state.
 type InstanceService struct {
 	store  *store.Store
 	layout paths.Layout
 	log    *slog.Logger
+	// launcher starts, inspects and re-attaches browser main
+	// processes. A field so tests can substitute a fake.
+	launcher runner.Launcher
+	// Runtime tracking (Stage 9B), guarded by rtMu: procs holds
+	// the verified live process of each running instance;
+	// transient holds the in-flight starting/stopping state of an
+	// instance whose persisted status has not caught up yet;
+	// unverified holds the instances whose recorded process could
+	// not be identity-verified at startup reconciliation — their
+	// effective status is "unknown" (a safe hold) while their
+	// persisted status stays "running" with the runtime record
+	// kept, so the next startup reconciles them again.
+	rtMu       sync.Mutex
+	procs      map[string]*procWatch
+	transient  map[string]model.InstanceStatus
+	unverified map[string]bool
+	// reconcileEvents accumulates the outcomes of the startup
+	// runtime reconciliation (which runs in the constructor,
+	// before the Auditor is wired) so ReportReconciliation can
+	// flush them into the unified record once logging is ready.
+	reconcileEvents []reconcileEvent
 	// auditor, when set, receives one operation-audit record per
 	// user-initiated mutation (Stage 5B).
 	Auditor *logging.System
@@ -52,57 +78,110 @@ type InstanceService struct {
 }
 
 // NewInstanceService builds the service and reconciles persisted
-// instance statuses (see the type comment). The database handle is
-// owned by the caller (main) and is never closed here.
+// instance statuses against live process facts (see
+// reconcileRuntimeAtStartup). The database handle is owned by the
+// caller (main) and is never closed here.
 func NewInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger) (*InstanceService, error) {
-	s := &InstanceService{store: store.New(db), layout: layout, log: log}
-	s.deleteRecord = s.store.DeleteInstance
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	n, err := s.store.ReconcileInstanceStatuses(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("instance service: %w", err)
+	return newInstanceService(db, layout, log, runner.System())
+}
+
+func newInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger, launcher runner.Launcher) (*InstanceService, error) {
+	s := &InstanceService{
+		store:      store.New(db),
+		layout:     layout,
+		log:        log,
+		launcher:   launcher,
+		procs:      map[string]*procWatch{},
+		transient:  map[string]model.InstanceStatus{},
+		unverified: map[string]bool{},
 	}
-	if n > 0 {
-		log.Info("reconciled stale running instances to stopped", "count", n)
+	s.deleteRecord = s.store.DeleteInstance
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.reconcileRuntimeAtStartup(ctx); err != nil {
+		return nil, fmt.Errorf("instance service: %w", err)
 	}
 	return s, nil
 }
 
-// CreateInstanceInput carries the user-editable fields for creation.
-// UserDataDir is optional: empty means the default profiles/<id>.
-// There is deliberately no proxy field: instances are always created
-// unbound (proxy_id NULL). A historical instance's stored proxy_id is
-// data, not an editable binding.
+// Instance-file (profile directory) creation modes for
+// CreateInstanceInput.ProfileMode (Stage 9B).
+const (
+	// ProfileModeDefault allocates the next sequential folder
+	// name P-1, P-2, ... from the persistent profile counter and
+	// creates the folder.
+	ProfileModeDefault = "default"
+	// ProfileModeCustom creates a NEW folder with the
+	// user-supplied name in ProfileName.
+	ProfileModeCustom = "custom"
+	// ProfileModeExisting binds an existing, currently unbound
+	// folder named by ProfileName without copying anything.
+	ProfileModeExisting = "existing"
+)
+
+// Instance-file actions for UpdateInstanceInput.ProfileAction.
+const (
+	// ProfileActionNone leaves the bound instance file untouched.
+	ProfileActionNone = ""
+	// ProfileActionRename renames the bound folder itself to
+	// ProfileName (a move, never a copy; data stays in place).
+	ProfileActionRename = "rename"
+	// ProfileActionSwap rebinds the instance to the existing
+	// unbound folder named by ProfileName; the previously bound
+	// folder stays on disk, unbound.
+	ProfileActionSwap = "swap"
+)
+
+// CreateInstanceInput carries the user-editable fields for creation
+// (Stage 9B: exactly four — name, kernel, proxy node, instance
+// file). There is deliberately no proxy field: the proxy-node
+// association stays part of the data model, but proxy management
+// is not open yet, so instances are always created unbound
+// (proxy_id NULL) and can run without one.
 type CreateInstanceInput struct {
-	Name     string `json:"name"`
-	StartURL string `json:"startUrl"`
-	// BrowserID optionally associates the instance with one
-	// registered browser (external_browsers ID) chosen in the form.
-	// Empty means no association. The association is by stable ID,
-	// never by name; the instance stores the registration's ID and
-	// a display snapshot of its name, and the executable path is
-	// always resolved live from the registration.
-	BrowserID   string `json:"browserId"`
-	UserDataDir string `json:"userDataDir"`
+	Name string `json:"name"`
+	// BrowserID associates the instance with one registered
+	// browser (external_browsers ID) chosen in the form. It is
+	// REQUIRED: an instance must name a registered kernel before
+	// it can be created (and therefore started). The association
+	// is by stable ID, never by name; the instance stores the
+	// registration's ID and a display snapshot of its name, and
+	// the executable path is always resolved live from the
+	// registration.
+	BrowserID string `json:"browserId"`
+	// ProfileMode selects how the instance file is provided:
+	// ProfileModeDefault, ProfileModeCustom or
+	// ProfileModeExisting. Empty means ProfileModeDefault.
+	ProfileMode string `json:"profileMode"`
+	// ProfileName is the folder name for the custom and existing
+	// modes (a single directory name directly under
+	// data/profiles, never a path).
+	ProfileName string `json:"profileName"`
 }
 
-// UpdateInstanceInput carries the editable fields of one instance.
-// The profile directory of an existing instance cannot be changed
-// here (moving live profile data is a separate, explicit operation).
-// The stored proxy_id is likewise not editable here: updates preserve
-// whatever value the row already has.
+// UpdateInstanceInput carries the editable fields of one instance
+// (Stage 9B: name, kernel, proxy node — preserved, not editable —
+// and the instance file). The stored proxy_id is not editable
+// here: updates preserve whatever value the row already has.
 type UpdateInstanceInput struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	StartURL string `json:"startUrl"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
 	// BrowserID is the form's registered-browser choice (see
 	// CreateInstanceInput). On an instance that already has an
 	// association, an empty BrowserID clears it; on an instance
 	// without one, the historical free-text kernel name/version
 	// recorded before associations existed are preserved verbatim.
+	// Changing the association is refused while the instance is
+	// running (or its state is unconfirmed).
 	BrowserID string `json:"browserId"`
 	SortOrder int    `json:"sortOrder"`
+	// ProfileAction optionally operates on the bound instance
+	// file in the same save: ProfileActionRename renames the
+	// bound folder to ProfileName; ProfileActionSwap rebinds the
+	// instance to the existing unbound folder ProfileName. Both
+	// are refused while the instance is running (or unconfirmed).
+	ProfileAction string `json:"profileAction"`
+	ProfileName   string `json:"profileName"`
 }
 
 func ctx() (context.Context, context.CancelFunc) {
@@ -121,6 +200,7 @@ func (s *InstanceService) ListInstances() ([]model.Instance, error) {
 		list = []model.Instance{}
 	}
 	s.resolveKernelPaths(c, list)
+	s.applyEffectiveStatuses(list)
 	return list, nil
 }
 
@@ -135,6 +215,7 @@ func (s *InstanceService) GetInstance(id string) (model.Instance, error) {
 	if err == nil {
 		one := []model.Instance{in}
 		s.resolveKernelPaths(c, one)
+		s.applyEffectiveStatuses(one)
 		in = one[0]
 	}
 	return in, err
@@ -185,13 +266,10 @@ func (s *InstanceService) resolveKernelPaths(c context.Context, list []model.Ins
 	}
 }
 
-// CreateInstance validates and creates an instance. The default
-// profile directory is profiles/<id>; an explicit directory must be
-// a relative path inside profiles/.
 // CreateInstance creates an instance (recorded, unified recording).
 func (s *InstanceService) CreateInstance(operationID string, input CreateInstanceInput) (model.Instance, error) {
 	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.create", "instance", "")
-	inst, err := s.createInstance(input)
+	inst, err := s.createInstance(input, op)
 	if err != nil {
 		finishOp(op, err)
 		return inst, err
@@ -200,61 +278,122 @@ func (s *InstanceService) CreateInstance(operationID string, input CreateInstanc
 	return inst, nil
 }
 
-func (s *InstanceService) createInstance(input CreateInstanceInput) (model.Instance, error) {
+func (s *InstanceService) createInstance(input CreateInstanceInput, op *logging.Operation) (model.Instance, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return model.Instance{}, fmt.Errorf("实例名称不能为空")
 	}
-	id, err := store.NewID()
-	if err != nil {
-		return model.Instance{}, err
-	}
-	// The raw (untrimmed) spelling goes to validation: trimming
-	// first would erase exactly the evidence the Windows
-	// reinterpretation rules look for (a trailing space or dot on
-	// the final component).
-	dir := input.UserDataDir
-	if strings.TrimSpace(dir) == "" {
-		dir = "profiles/" + id
-	} else {
-		cleaned, err := s.validateProfileDir(dir)
-		if err != nil {
-			return model.Instance{}, err
-		}
-		dir = cleaned
-	}
 	c, cancel := ctx()
 	defer cancel()
+	if n, err := s.store.CountInstancesByName(c, name, ""); err != nil {
+		return model.Instance{}, err
+	} else if n > 0 {
+		return model.Instance{}, fmt.Errorf("实例名称已存在，请使用其他名称")
+	}
+	// A kernel is required at creation time (Stage 9B): the
+	// choice must name an existing registration.
+	if strings.TrimSpace(input.BrowserID) == "" {
+		return model.Instance{}, fmt.Errorf("请选择实例内核")
+	}
 	kernelID, kernelName, err := s.kernelAssociation(c, input.BrowserID)
 	if err != nil {
 		return model.Instance{}, err
 	}
+	// Provide the instance file according to the chosen mode.
+	// createdDir is the folder THIS call created (default/custom);
+	// it is removed again if the database insert fails, so a
+	// failed creation never leaves an orphan folder behind. The
+	// existing mode creates nothing and needs no rollback.
+	var dirRel, createdDir string
+	switch mode := strings.TrimSpace(input.ProfileMode); mode {
+	case "", ProfileModeDefault:
+		folder, abs, err := s.allocateDefaultProfile(c)
+		if err != nil {
+			return model.Instance{}, err
+		}
+		dirRel, createdDir = "profiles/"+folder, abs
+		op.Step("分配默认实例文件", logging.StatusSuccess, map[string]string{"profile": folder})
+	case ProfileModeCustom:
+		folder := input.ProfileName
+		if err := s.validateProfileName(folder); err != nil {
+			return model.Instance{}, err
+		}
+		abs, err := s.createProfileDir(c, folder)
+		if err != nil {
+			return model.Instance{}, err
+		}
+		dirRel, createdDir = "profiles/"+folder, abs
+		op.Step("创建自定义实例文件", logging.StatusSuccess, map[string]string{"profile": folder})
+	case ProfileModeExisting:
+		canonical, err := s.requireAvailableProfile(c, strings.TrimSpace(input.ProfileName))
+		if err != nil {
+			return model.Instance{}, err
+		}
+		dirRel = "profiles/" + canonical
+		op.Step("选择已有实例文件", logging.StatusSuccess, map[string]string{"profile": canonical})
+	default:
+		return model.Instance{}, fmt.Errorf("实例文件方式无效")
+	}
+	id, err := store.NewID()
+	if err != nil {
+		s.rollbackCreatedDir(createdDir)
+		return model.Instance{}, err
+	}
 	created, err := s.store.CreateInstance(c, model.Instance{
-		ID: id, Name: name, UserDataDir: dir, // ProxyID stays nil: new instances are never bound
-		StartURL:   strings.TrimSpace(input.StartURL),
+		ID: id, Name: name, UserDataDir: dirRel, // ProxyID stays nil: no proxy nodes exist to bind yet
 		KernelID:   kernelID,
 		KernelName: kernelName,
 	})
 	if err != nil {
+		s.rollbackCreatedDir(createdDir)
 		return model.Instance{}, mapConstraintError(err)
 	}
 	one := []model.Instance{created}
 	s.resolveKernelPaths(c, one)
 	created = one[0]
-	s.log.Info("instance created", "id", created.ID, "name", created.Name)
+	s.log.Info("instance created", "id", created.ID, "name", created.Name, "dir", dirRel)
 	return created, nil
 }
 
-// UpdateInstance validates and updates an instance's editable fields.
+// rollbackCreatedDir removes a profile folder a failed creation
+// had just made. Only ever called with a folder this service
+// created moments ago (empty by construction); removal uses
+// os.Remove, which refuses a non-empty directory — a folder that
+// somehow gained content is left in place rather than destroyed.
+func (s *InstanceService) rollbackCreatedDir(abs string) {
+	if abs == "" {
+		return
+	}
+	if err := os.Remove(abs); err != nil {
+		s.log.Warn("rollback of a newly created profile directory failed", "dir", abs, "error", err)
+	}
+}
+
+// requireInstanceAtRest gates destructive or rebinding operations:
+// the instance must be verifiably at rest. A running (or starting/
+// stopping) instance refuses outright; an instance whose runtime
+// state cannot be confirmed also refuses — acting on an
+// unconfirmed browser could endanger its data.
+func (s *InstanceService) requireInstanceAtRest(inst model.Instance, action string) error {
+	switch s.effectiveStatus(inst) {
+	case model.StatusStopped, model.StatusError:
+		return nil
+	case model.StatusUnknown:
+		return fmt.Errorf("实例运行状态无法确认，不能%s", action)
+	default:
+		return fmt.Errorf("实例正在运行，不能%s", action)
+	}
+}
+
 // UpdateInstance updates an instance (recorded, unified recording).
 func (s *InstanceService) UpdateInstance(operationID string, input UpdateInstanceInput) (model.Instance, error) {
 	op := beginOp(s.Auditor, operationID, "浏览器实例", "instance.update", "instance", input.ID)
-	inst, err := s.updateInstance(input)
+	inst, err := s.updateInstance(input, op)
 	finishOp(op, err)
 	return inst, err
 }
 
-func (s *InstanceService) updateInstance(input UpdateInstanceInput) (model.Instance, error) {
+func (s *InstanceService) updateInstance(input UpdateInstanceInput, op *logging.Operation) (model.Instance, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return model.Instance{}, fmt.Errorf("实例名称不能为空")
@@ -268,38 +407,171 @@ func (s *InstanceService) updateInstance(input UpdateInstanceInput) (model.Insta
 		}
 		return model.Instance{}, err
 	}
-	current.Name = name
-	// current.ProxyID is intentionally left untouched: the stored
-	// historical binding is preserved verbatim by every update.
-	current.StartURL = strings.TrimSpace(input.StartURL)
+	if n, err := s.store.CountInstancesByName(c, name, input.ID); err != nil {
+		return model.Instance{}, err
+	} else if n > 0 {
+		return model.Instance{}, fmt.Errorf("实例名称已存在，请使用其他名称")
+	}
+
+	// Work out what this save changes beyond the display name.
+	kernelChange := strings.TrimSpace(input.BrowserID) != current.KernelID
+	profileAction := strings.TrimSpace(input.ProfileAction)
+	if profileAction != ProfileActionNone && profileAction != ProfileActionRename && profileAction != ProfileActionSwap {
+		return model.Instance{}, fmt.Errorf("实例文件操作无效")
+	}
+	// Instance-file changes are refused unless the instance is
+	// verifiably at rest: renaming or rebinding the folder under
+	// a running browser — or one whose state cannot be
+	// confirmed — could corrupt its data or strand its process.
+	// Only operations that can endanger the profile folder are
+	// gated this way.
+	if profileAction != ProfileActionNone {
+		switch s.effectiveStatus(current) {
+		case model.StatusStopped, model.StatusError:
+		case model.StatusUnknown:
+			return model.Instance{}, fmt.Errorf("实例运行状态无法确认，不能更换实例文件")
+		default:
+			return model.Instance{}, fmt.Errorf("实例正在运行，不能更换实例文件")
+		}
+	}
+	// A kernel change is metadata, like the display name: it
+	// takes effect at the next launch and never acts on a
+	// running process — the runtime record keeps the path the
+	// browser was launched with, and no launch is possible
+	// while the state is unconfirmed. It is refused only while
+	// the instance is actually running or transitioning.
+	if kernelChange {
+		switch s.effectiveStatus(current) {
+		case model.StatusRunning, model.StatusStarting, model.StatusStopping:
+			return model.Instance{}, fmt.Errorf("实例正在运行，不能更换内核")
+		}
+	}
+
+	updated := current
+	updated.Name = name
+	// updated.ProxyID and updated.StartURL are intentionally left
+	// untouched: the stored proxy binding is data compatibility
+	// (proxy management is not open yet), and the start URL is not
+	// one of the four editable fields.
 	switch {
 	case strings.TrimSpace(input.BrowserID) != "":
 		kernelID, kernelName, kerr := s.kernelAssociation(c, input.BrowserID)
 		if kerr != nil {
 			return model.Instance{}, kerr
 		}
-		current.KernelID = kernelID
-		current.KernelName = kernelName
-		current.KernelVersion = ""
+		updated.KernelID = kernelID
+		updated.KernelName = kernelName
+		updated.KernelVersion = ""
 	case current.KernelID != "":
 		// The form's empty choice explicitly clears an existing
 		// association.
-		current.KernelID = ""
-		current.KernelName = ""
-		current.KernelVersion = ""
+		updated.KernelID = ""
+		updated.KernelName = ""
+		updated.KernelVersion = ""
 	default:
 		// No association and none chosen: historical free-text
 		// kernel name/version recorded before associations existed
 		// stay untouched — an unrelated edit never drops them.
 	}
-	current.SortOrder = input.SortOrder
-	updated, err := s.store.UpdateInstance(c, current)
+	updated.SortOrder = input.SortOrder
+
+	// Instance-file operations run BEFORE the database write; a
+	// failed write rolls the filesystem back, so the record and
+	// the folder can never disagree about the binding.
+	var rollback func() error
+	switch profileAction {
+	case ProfileActionRename:
+		newDir, rb, rerr := s.renameProfileDir(c, current, input.ProfileName)
+		if rerr != nil {
+			return model.Instance{}, rerr
+		}
+		updated.UserDataDir = newDir
+		rollback = rb
+		op.Step("重命名实例文件", logging.StatusSuccess, map[string]string{
+			"from": profileFolder(current.UserDataDir), "to": profileFolder(newDir),
+		})
+	case ProfileActionSwap:
+		canonical, serr := s.requireAvailableProfile(c, strings.TrimSpace(input.ProfileName))
+		if serr != nil {
+			return model.Instance{}, serr
+		}
+		updated.UserDataDir = "profiles/" + canonical
+		op.Step("更换实例文件", logging.StatusSuccess, map[string]string{
+			"from": profileFolder(current.UserDataDir), "to": canonical,
+		})
+	}
+
+	saved, err := s.store.UpdateInstance(c, updated)
 	if err != nil {
+		if rollback != nil {
+			if rerr := rollback(); rerr != nil {
+				// The folder moved but the record could not
+				// follow, and the move-back failed too: surface
+				// the inconsistency loudly instead of hiding it.
+				_ = s.store.SetInstanceStatus(c, current.ID, model.StatusError)
+				return model.Instance{}, fmt.Errorf("保存实例失败，且实例文件恢复失败（记录与文件夹可能不一致，请勿启动该实例）：%w", err)
+			}
+		}
 		return model.Instance{}, mapConstraintError(err)
 	}
-	one := []model.Instance{updated}
+	one := []model.Instance{saved}
 	s.resolveKernelPaths(c, one)
+	s.applyEffectiveStatuses(one)
 	return one[0], nil
+}
+
+// renameProfileDir renames the instance's bound folder to newName
+// and returns the new stored user_data_dir plus a rollback that
+// undoes the filesystem move. Rules: the target must be a valid
+// folder name, free (not bound, not on disk — Windows
+// case-insensitively), and the move itself is a plain rename of
+// the verified folder inside data/profiles: no copy, no merge, no
+// data loss. When the bound folder does not exist on disk yet
+// (the instance was never started), an empty folder is created at
+// the new name instead — there is no data to move.
+func (s *InstanceService) renameProfileDir(c context.Context, inst model.Instance, newName string) (string, func() error, error) {
+	if err := s.validateProfileName(newName); err != nil {
+		return "", nil, err
+	}
+	oldFolder := profileFolder(inst.UserDataDir)
+	if oldFolder == "" {
+		return "", nil, fmt.Errorf("实例文件路径异常，无法重命名")
+	}
+	if foldName(oldFolder) == foldName(newName) && oldFolder != newName {
+		// A case-only rename is a real rename on Windows too;
+		// fall through and let the OS do it.
+	} else if oldFolder == newName {
+		return inst.UserDataDir, func() error { return nil }, nil
+	}
+	taken, err := s.profileFolderTaken(c, newName, foldName(oldFolder))
+	if err != nil {
+		return "", nil, err
+	}
+	if taken {
+		return "", nil, fmt.Errorf("目标实例文件名称 %q 已存在，无法重命名", newName)
+	}
+	src := filepath.Join(s.layout.Profiles, oldFolder)
+	dst := filepath.Join(s.layout.Profiles, newName)
+	_, lerr := os.Lstat(src)
+	switch {
+	case lerr == nil:
+		// The folder exists: it must be a real directory inside
+		// the managed root, never a link out of it.
+		if _, verr := s.verifiedProfileTarget(inst.UserDataDir); verr != nil {
+			return "", nil, fmt.Errorf("实例文件无法安全访问：%w", verr)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return "", nil, fmt.Errorf("重命名实例文件失败：%w", err)
+		}
+		return "profiles/" + newName, func() error { return os.Rename(dst, src) }, nil
+	case errors.Is(lerr, os.ErrNotExist):
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			return "", nil, fmt.Errorf("重命名实例文件失败：%w", err)
+		}
+		return "profiles/" + newName, func() error { return os.Remove(dst) }, nil
+	default:
+		return "", nil, fmt.Errorf("实例文件无法访问：%w", lerr)
+	}
 }
 
 // DeleteInstance removes ONLY the instance's metadata (and, via the
@@ -318,6 +590,16 @@ func (s *InstanceService) DeleteInstance(operationID string, id string) error {
 func (s *InstanceService) deleteInstance(id string) error {
 	c, cancel := ctx()
 	defer cancel()
+	inst, err := s.store.GetInstance(c, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("实例不存在")
+		}
+		return err
+	}
+	if err := s.requireInstanceAtRest(inst, "删除"); err != nil {
+		return err
+	}
 	if err := s.store.DeleteInstance(c, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("实例不存在")
@@ -352,7 +634,8 @@ func (s *InstanceService) deleteInstance(id string) error {
 //     leaves the data in the quarantine slot — reported in the
 //     error, never silently lost.
 //
-// A persisted "running" instance is refused before any of this.
+// An instance that is running (or whose runtime state cannot
+// be confirmed) is refused before any of this.
 // DeleteInstanceAndProfile deletes an instance and its profile
 // directory (recorded with per-phase steps, unified recording).
 func (s *InstanceService) DeleteInstanceAndProfile(operationID string, id string) error {
@@ -372,8 +655,8 @@ func (s *InstanceService) deleteInstanceAndProfile(id string, op *logging.Operat
 		}
 		return err
 	}
-	if in.Status == model.StatusRunning {
-		return fmt.Errorf("实例正在运行，不能删除其 Profile 数据")
+	if err := s.requireInstanceAtRest(in, "删除"); err != nil {
+		return err
 	}
 	target, err := s.verifiedProfileTarget(in.UserDataDir)
 	if err != nil {
@@ -459,68 +742,11 @@ func (s *InstanceService) moveToQuarantine(target string) (*pfiles.Quarantine, e
 	return nil, fmt.Errorf("无法分配隔离目录")
 }
 
-// validateProfileDir checks a user-supplied profile directory: it
-// must be relative, and its cleaned form must live under profiles/.
-// It returns the cleaned, slash-separated stored form.
-func (s *InstanceService) validateProfileDir(dir string) (string, error) {
-	if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "\\") {
-		return "", fmt.Errorf("数据目录必须是相对路径")
-	}
-	// Profile directories are specified in slash form only. A
-	// backslash is a separator on Windows but a plain name
-	// character elsewhere, so the same spelling would name
-	// different locations on different systems — reject it
-	// outright, deterministically on every platform.
-	if strings.Contains(dir, "\\") {
-		return "", fmt.Errorf("数据目录必须使用正斜杠分隔")
-	}
-	clean := filepath.Clean(strings.TrimSpace(dir))
-	slash := filepath.ToSlash(clean)
-	if slash == "profiles" || !strings.HasPrefix(slash, "profiles/") {
-		return "", fmt.Errorf("数据目录必须位于 profiles 目录之下")
-	}
-	if strings.Contains(slash, "../") || slash == ".." {
-		return "", fmt.Errorf("数据目录不能超出 profiles 目录")
-	}
-	// Every component under profiles/ must be a plain, portable
-	// directory name. Windows reinterprets several spellings, so
-	// they are rejected up front rather than discovered later:
-	// ':' would address an NTFS alternate data stream, a trailing
-	// dot or space is silently stripped by Windows (aliasing two
-	// spellings to one directory), the reserved device names (CON,
-	// PRN, AUX, NUL, CONIN$, CONOUT$, COM1-9, LPT1-9 and the
-	// superscript forms COM¹-³/LPT¹-³, with or without extension)
-	// name devices instead of directories, and a backslash inside
-	// a component is a smuggled separator on Windows even where
-	// the host OS treats it as a regular character. The check runs
-	// on the RAW spelling's segments (only "" and traversal
-	// segments are skipped — those are judged by the containment
-	// checks above), because Clean/TrimSpace would erase trailing
-	// dots and spaces before they could be seen.
-	for _, comp := range strings.Split(filepath.ToSlash(dir), "/") {
-		if comp == "" || comp == "." || comp == ".." || comp == "profiles" {
-			continue
-		}
-		if err := validateProfileComponent(comp); err != nil {
-			return "", err
-		}
-	}
-	// If the directory (or a path to it) already exists, it must also
-	// pass the same real-path verification used for deletion: a
-	// pre-planted symlink inside profiles must not legitimise an
-	// outside location as a profile directory.
-	full := filepath.Join(s.layout.Data, clean)
-	if _, err := os.Lstat(full); err == nil {
-		if _, err := s.verifiedProfileTarget(slash); err != nil {
-			return "", err
-		}
-	}
-	return slash, nil
-}
-
 // validateProfileComponent checks one profile directory name
-// component against the Windows reinterpretation rules described
-// in validateProfileDir.
+// component against the Windows reinterpretation rules: NTFS
+// alternate data streams (':'), trailing dot/space aliasing,
+// reserved device names, and smuggled separators are all refused
+// up front rather than discovered later.
 func validateProfileComponent(comp string) error {
 	if comp == "" || comp == "." || comp == ".." {
 		return fmt.Errorf("数据目录包含无效的路径组件")

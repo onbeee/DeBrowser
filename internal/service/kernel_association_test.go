@@ -69,14 +69,9 @@ func TestInstanceKernelAssociationLifecycle(t *testing.T) {
 	fx.register(t, "reg-a", "brave", `C:\Browsers\a\brave.exe`)
 	fx.register(t, "reg-b", "chrome", `C:\Browsers\b\chrome.exe`)
 
-	// No association chosen: everything stays empty.
-	plain, err := fx.inst.CreateInstance("", CreateInstanceInput{Name: "plain"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plain.KernelID != "" || plain.KernelName != "" || plain.KernelExecutablePath != "" {
-		t.Fatalf("unassociated instance carries kernel data: %+v", plain)
-	}
+	// (Since Stage 9B, creation requires a kernel: the
+	// kernel-less create is refused — covered in
+	// instance_service_test.go.)
 
 	// Association by ID at creation: ID + name snapshot stored,
 	// path resolved live from the registration.
@@ -119,8 +114,8 @@ func TestInstanceKernelAssociationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("instances = %d, want 2 (failed create must not persist)", len(list))
+	if len(list) != 1 {
+		t.Fatalf("instances = %d, want 1 (failed create must not persist)", len(list))
 	}
 }
 

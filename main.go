@@ -180,6 +180,10 @@ func run() error {
 	appService.Auditor = logSystem
 	instanceService.Auditor = logSystem
 	browserService.Auditor = logSystem
+	// The instance service reconciled runtime records against
+	// live processes in its constructor (before the Auditor could
+	// be wired); flush those outcomes into the unified record now.
+	instanceService.ReportReconciliation()
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
 

@@ -345,7 +345,7 @@ func TestBusinessOperationSurvivesBrokenRecording(t *testing.T) {
 	if err := logs.Close(); err != nil {
 		t.Fatal(err)
 	}
-	inst, err := instSvc.CreateInstance("", CreateInstanceInput{Name: "降级实例"})
+	inst, err := instSvc.CreateInstance("", CreateInstanceInput{Name: "降级实例", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("business operation failed because of logging: %v", err)
 	}
