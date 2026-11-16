@@ -295,7 +295,11 @@ func (s *InstanceService) reconcileOne(c context.Context, rt model.InstanceRunti
 // gone or foreign clears the journal and stops the instance.
 // Anything unverifiable — including a confirmed process whose
 // record STILL cannot be written — keeps the journal and the
-// frozen "unknown" hold.
+// frozen "unknown" hold. Definitive outcomes (confirmed, gone,
+// not-ours) also clear any unverified mark an earlier check in
+// the same startup pass left behind (the runtime record of the
+// same instance may have judged a stale process unknown); only
+// the unverifiable outcomes keep the mark.
 func (s *InstanceService) reconcileProtection(c context.Context, prot model.InstanceProtection) {
 	inst, err := s.store.GetInstance(c, prot.InstanceID)
 	if err != nil {
@@ -324,6 +328,7 @@ func (s *InstanceService) reconcileProtection(c context.Context, prot model.Inst
 			// re-adopted the process in this same pass; the
 			// journal entry is superseded.
 			_ = s.store.DeleteInstanceProtection(c, inst.ID)
+			s.clearUnverifiedMark(inst.ID)
 			return
 		}
 		if err := s.store.UpsertInstanceRuntime(c, rt); err != nil {
@@ -339,12 +344,23 @@ func (s *InstanceService) reconcileProtection(c context.Context, prot model.Inst
 		s.procs[inst.ID] = proc
 		s.rtMu.Unlock()
 		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusRunning)
+		// The identity is fully confirmed: any unverified mark
+		// left by this pass's runtime-record check (which may
+		// have judged a different, stale record unknown) is
+		// stale and must not keep the instance at "unknown".
+		s.clearUnverifiedMark(inst.ID)
 		go s.watchProcess(inst.ID, proc)
 		s.noteReconcile(inst.ID, "启动时重新识别运行中的实例", logging.StatusSuccess, "")
 		s.log.Info("re-attached to running browser instance (via protection journal)", "id", inst.ID, "pid", prot.PID)
 	case verifyGone, verifyNotOurs:
 		_ = s.store.DeleteInstanceProtection(c, inst.ID)
 		_ = s.store.SetInstanceStatus(c, inst.ID, model.StatusStopped)
+		// The process is definitively resolved: clear any
+		// unverified mark left by this pass's runtime-record
+		// check, or the instance would stay frozen at
+		// "unknown" for the whole session although its
+		// browser is proven gone / foreign.
+		s.clearUnverifiedMark(inst.ID)
 		action := "启动时确认实例已关闭"
 		if outcome == verifyNotOurs {
 			action = "启动时确认原记录进程已不属于该实例"

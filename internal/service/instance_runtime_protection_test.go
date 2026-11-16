@@ -301,3 +301,179 @@ func TestUntrackedHoldSevereErrorWhenProtectionWritesFail(t *testing.T) {
 		t.Fatalf("status = %q, want unknown (memory mark)", got)
 	}
 }
+
+// --- Round 4: a definitive protection outcome must clear a
+// stale unverified mark left by the same pass's runtime-record
+// check (an instance can carry both rows, judged separately).
+
+func seedRuntimeRecord(t *testing.T, db *database.DB, inst model.Instance, pid int, created int64) {
+	t.Helper()
+	rt := model.InstanceRuntime{
+		InstanceID: inst.ID, PID: pid, ProcessCreatedAt: created,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+		StartedAt: "2026-11-16T00:00:00Z",
+	}
+	if err := store.New(db).UpsertInstanceRuntime(t.Context(), rt); err != nil {
+		t.Fatalf("seed runtime record: %v", err)
+	}
+}
+
+func seedProtection(t *testing.T, db *database.DB, inst model.Instance, pid int, created int64) {
+	t.Helper()
+	prot := model.InstanceProtection{
+		InstanceID: inst.ID, PID: pid, ProcessCreatedAt: created,
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+		MarkedAt: "2026-11-16T00:00:00Z",
+	}
+	if err := store.New(db).UpsertInstanceProtection(t.Context(), prot); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+}
+
+// plantProc makes the fake launcher report a live process with
+// the given inspection facts.
+func plantProc(fl *fakeLauncher, pid int, created int64, info runner.Info) {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+	fl.procs[pid] = &fakeProcess{pid: pid, created: created, exited: make(chan struct{})}
+	info.PID = pid
+	info.CreatedAt = created
+	info.ExecutablePath = "fake-browser.exe"
+	fl.infos[pid] = info
+}
+
+func hasUnverifiedMark(svc *InstanceService, id string) bool {
+	svc.rtMu.Lock()
+	defer svc.rtMu.Unlock()
+	return svc.unverified[id]
+}
+
+// The runtime record judges unknown (its process exists but
+// cannot be confirmed) while the journal's process is proven
+// gone: the instance must end stopped, with the journal
+// cleared and NO stale unverified mark keeping it frozen.
+func TestReconcileRuntimeUnknownProtectionGone(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst := mustCreate(t, svc, "双行一")
+	seedRuntimeRecord(t, db, inst, 5101, 510100)
+	seedProtection(t, db, inst, 5102, 510200)
+	if err := store.New(db).SetInstanceStatus(t.Context(), inst.ID, model.StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	plantProc(fl, 5101, 510100, runner.Info{HasCommandLine: false})
+	// PID 5102 is never planted: inspection reports it gone.
+
+	svc2 := restartService(t, db, cfg, fl)
+	if got := statusOf(t, svc2, inst.ID); got != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped (the journal's process is proven gone)", got)
+	}
+	if hasUnverifiedMark(svc2, inst.ID) {
+		t.Error("stale unverified mark survived a proven-gone protection outcome")
+	}
+	if _, err := store.New(db).GetInstanceProtection(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("journal err = %v, want ErrNotFound", err)
+	}
+	if err := svc2.DeleteInstance("", inst.ID); err != nil {
+		t.Errorf("delete after resolution: %v", err)
+	}
+}
+
+// The runtime record judges unknown while the journal's
+// process fully verifies: it is promoted and adopted, the
+// journal is dropped, and no stale mark remains.
+func TestReconcileRuntimeUnknownProtectionConfirmed(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst := mustCreate(t, svc, "双行二")
+	seedRuntimeRecord(t, db, inst, 5201, 520100)
+	seedProtection(t, db, inst, 5202, 520200)
+	if err := store.New(db).SetInstanceStatus(t.Context(), inst.ID, model.StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	plantProc(fl, 5201, 520100, runner.Info{HasCommandLine: false})
+	plantProc(fl, 5202, 520200, runner.Info{
+		HasCommandLine: true,
+		CommandLine:    "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst),
+	})
+
+	svc2 := restartService(t, db, cfg, fl)
+	if got := statusOf(t, svc2, inst.ID); got != model.StatusRunning {
+		t.Fatalf("status = %q, want running (the journal's process verified and adopted)", got)
+	}
+	if hasUnverifiedMark(svc2, inst.ID) {
+		t.Error("stale unverified mark survived a confirmed protection outcome")
+	}
+	rt, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID)
+	if err != nil || rt.PID != 5202 {
+		t.Errorf("runtime record = %+v (err %v), want the promoted pid 5202", rt, err)
+	}
+	if _, err := store.New(db).GetInstanceProtection(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("journal err = %v, want ErrNotFound after promotion", err)
+	}
+}
+
+// Both rows judge unknown: the journal, the record and the
+// freeze all stay exactly as they were.
+func TestReconcileRuntimeAndProtectionBothUnknown(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst := mustCreate(t, svc, "双行三")
+	seedRuntimeRecord(t, db, inst, 5301, 530100)
+	seedProtection(t, db, inst, 5302, 530200)
+	if err := store.New(db).SetInstanceStatus(t.Context(), inst.ID, model.StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	plantProc(fl, 5301, 530100, runner.Info{HasCommandLine: false})
+	plantProc(fl, 5302, 530200, runner.Info{HasCommandLine: false})
+
+	svc2 := restartService(t, db, cfg, fl)
+	if got := statusOf(t, svc2, inst.ID); got != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown", got)
+	}
+	if !hasUnverifiedMark(svc2, inst.ID) {
+		t.Error("unverified mark missing although both checks were unknown")
+	}
+	if _, err := store.New(db).GetInstanceProtection(t.Context(), inst.ID); err != nil {
+		t.Errorf("journal lost although its check was unknown: %v", err)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); err != nil {
+		t.Errorf("runtime record lost although its check was unknown: %v", err)
+	}
+	if err := svc2.StartInstance("", inst.ID); err == nil {
+		t.Error("start allowed while both checks are unknown")
+	}
+}
+
+// The journal's process verifies, but promoting it to a real
+// runtime record still cannot be written (trigger-blocked):
+// the journal and the freeze both stay.
+func TestReconcileProtectionPromotionWriteFails(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, cfg, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst := mustCreate(t, svc, "提升失败")
+	seedProtection(t, db, inst, 5402, 540200)
+	plantProc(fl, 5402, 540200, runner.Info{
+		HasCommandLine: true,
+		CommandLine:    "fake-browser.exe --user-data-dir=" + resolvedProfileDir(t, cfg, inst),
+	})
+	blockWrites(t, db, "instance_runtime")
+
+	svc2 := restartService(t, db, cfg, fl)
+	if got := statusOf(t, svc2, inst.ID); got != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown (promotion could not be persisted)", got)
+	}
+	if !hasUnverifiedMark(svc2, inst.ID) {
+		t.Error("unverified mark missing although promotion failed")
+	}
+	if _, err := store.New(db).GetInstanceProtection(t.Context(), inst.ID); err != nil {
+		t.Errorf("journal lost although promotion failed: %v", err)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("runtime record err = %v, want ErrNotFound (writes blocked)", err)
+	}
+}
