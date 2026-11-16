@@ -63,12 +63,19 @@ func TestRealBrowserLaunchGracefulCloseAndExternalKill(t *testing.T) {
 	if err := svc.StartInstance("", inst.ID); err != nil {
 		t.Fatalf("start real browser: %v", err)
 	}
+	// Never leak the child on a failure path: a leftover fake
+	// browser keeps the test binary file locked on Windows and
+	// poisons the rest of the run.
+	defer func() { _ = svc.StopInstance("", inst.ID) }()
 	got, _ := svc.GetInstance(inst.ID)
 	if got.Status != model.StatusRunning {
 		t.Fatalf("status = %q, want running", got.Status)
 	}
 	// The child must have received THIS instance's folder as its
-	// user data directory.
+	// user data directory. Compare directory identity, not raw
+	// strings: the service launches with the fully resolved
+	// (long-form) path, while t.TempDir may spell the same
+	// directory in 8.3 short form on Windows ("RUNNER~1").
 	deadline := time.Now().Add(5 * time.Second)
 	var rawArgs []byte
 	for time.Now().Before(deadline) {
@@ -80,8 +87,26 @@ func TestRealBrowserLaunchGracefulCloseAndExternalKill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fake browser never recorded its arguments: %v", err)
 	}
-	if !strings.Contains(string(rawArgs), "--user-data-dir="+absProfile) {
-		t.Fatalf("fake browser args do not carry the instance folder:\n%s", strings.ReplaceAll(string(rawArgs), "\x00", " "))
+	recorded := string(rawArgs)
+	const marker = "--user-data-dir="
+	idx := strings.Index(recorded, marker)
+	if idx < 0 {
+		t.Fatalf("fake browser args lack %s:\n%s", marker, strings.ReplaceAll(recorded, "\x00", " "))
+	}
+	value := recorded[idx+len(marker):]
+	if end := strings.IndexByte(value, 0); end >= 0 {
+		value = value[:end]
+	}
+	wantInfo, err := os.Stat(absProfile)
+	if err != nil {
+		t.Fatalf("stat instance folder: %v", err)
+	}
+	gotInfo, err := os.Stat(value)
+	if err != nil {
+		t.Fatalf("stat recorded user data dir %q: %v", value, err)
+	}
+	if !os.SameFile(wantInfo, gotInfo) {
+		t.Fatalf("fake browser user data dir = %q, want the instance folder %q", value, absProfile)
 	}
 
 	// Graceful close through the service.
