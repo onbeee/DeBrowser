@@ -3,16 +3,19 @@
 
 /**
  * InstanceService is the browser-instance management service exposed
- * to the frontend over Wails bindings (Stage 3). It is a thin,
- * validating layer over internal/store: all SQL lives in the store,
- * all filesystem effects are confined to the portable layout, and no
- * method ever touches a path outside it.
+ * to the frontend over Wails bindings. It is a validating layer over
+ * internal/store: all SQL lives in the store, all filesystem effects
+ * are confined to the portable layout, and no method ever touches a
+ * path outside it.
  * 
- * Status semantics: model.Instance.Status is the PERSISTED lifecycle
- * record. Stage 3 has no browser process manager, so no instance can
- * actually be running: at construction, any row still marked
- * "running" (a leftover from a crashed or older process) is
- * reconciled to "stopped". Later stages will own live transitions.
+ * Status semantics (Stage 9B): model.Instance.Status is the
+ * PERSISTED lifecycle record, owned by the runtime manager in
+ * instance_runtime.go. It is written from verified process facts —
+ * a successful launch, an observed exit, a startup reconciliation
+ * that re-verified (or disproved) a recorded process — never merely
+ * assumed. Transient states (starting/stopping) live only in
+ * memory and are overlaid onto reads; a crash mid-transition
+ * therefore falls back to the last verified persisted state.
  * @module
  */
 
@@ -29,9 +32,6 @@ import * as model$0 from "../model/models.js";
 import * as $models from "./models.js";
 
 /**
- * CreateInstance validates and creates an instance. The default
- * profile directory is profiles/<id>; an explicit directory must be
- * a relative path inside profiles/.
  * CreateInstance creates an instance (recorded, unified recording).
  */
 export function CreateInstance(operationID: string, input: $models.CreateInstanceInput): $CancellablePromise<model$0.Instance> {
@@ -91,6 +91,15 @@ export function GetInstance(id: string): $CancellablePromise<model$0.Instance> {
 }
 
 /**
+ * ListAvailableProfiles returns the instance files that may be
+ * bound to a new or edited instance right now (see
+ * availableProfiles for the safety rules).
+ */
+export function ListAvailableProfiles(): $CancellablePromise<model$0.ProfileDirInfo[] | null> {
+    return $Call.ByID(1706145673);
+}
+
+/**
  * ListInstances returns all instances in display order.
  */
 export function ListInstances(): $CancellablePromise<model$0.Instance[] | null> {
@@ -98,7 +107,32 @@ export function ListInstances(): $CancellablePromise<model$0.Instance[] | null> 
 }
 
 /**
- * UpdateInstance validates and updates an instance's editable fields.
+ * ReportReconciliation flushes the startup runtime reconciliation
+ * outcomes into the unified record. main calls it right after
+ * wiring the Auditor (the reconciliation itself runs in the
+ * constructor, before an Auditor can exist).
+ */
+export function ReportReconciliation(): $CancellablePromise<void> {
+    return $Call.ByID(1131427935);
+}
+
+/**
+ * StartInstance launches the instance's browser (recorded).
+ */
+export function StartInstance(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(2083354835, operationID, id);
+}
+
+/**
+ * StopInstance gracefully closes the instance's browser
+ * (recorded). Only the tracked, identity-verified process of
+ * this instance is ever asked to close.
+ */
+export function StopInstance(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(2872543479, operationID, id);
+}
+
+/**
  * UpdateInstance updates an instance (recorded, unified recording).
  */
 export function UpdateInstance(operationID: string, input: $models.UpdateInstanceInput): $CancellablePromise<model$0.Instance> {

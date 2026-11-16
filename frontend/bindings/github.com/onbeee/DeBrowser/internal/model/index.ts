@@ -6,5 +6,6 @@ export {
 } from "./models.js";
 
 export type {
-    Instance
+    Instance,
+    ProfileDirInfo
 } from "./models.js";

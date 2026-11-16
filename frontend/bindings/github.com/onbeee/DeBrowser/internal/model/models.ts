@@ -43,6 +43,33 @@ export enum InstanceStatus {
     $zero = "",
 
     StatusStopped = "stopped",
+    StatusStarting = "starting",
     StatusRunning = "running",
+    StatusStopping = "stopping",
     StatusError = "error",
+
+    /**
+     * StatusUnknown means a previously launched process could not
+     * be confirmed as this instance's browser (or confirmed not
+     * to be) during startup reconciliation. It is an EFFECTIVE
+     * state only — never written to the database (whose status
+     * vocabulary is stopped/running/error): it is derived from a
+     * persisted "running" row plus an instance_runtime record
+     * whose process could not be verified, and held in memory by
+     * the runtime manager. It is a safe hold: the instance is
+     * neither treated as closed nor acted on until the situation
+     * resolves (at the latest, the next reconciliation).
+     */
+    StatusUnknown = "unknown",
 };
+
+/**
+ * ProfileDirInfo describes one instance file (a directory directly
+ * under data/profiles) that is not bound to any instance and is
+ * safe to offer for selection: it exists, is a directory, and is
+ * not in use by a running instance.
+ */
+export interface ProfileDirInfo {
+    "name": string;
+    "path": string;
+}

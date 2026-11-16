@@ -22,7 +22,7 @@ func TestOperationAuditRecords(t *testing.T) {
 	}
 	instSvc.Auditor = logs
 
-	inst, err := instSvc.CreateInstance("", CreateInstanceInput{Name: "审计实例"})
+	inst, err := instSvc.CreateInstance("", CreateInstanceInput{Name: "审计实例", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}

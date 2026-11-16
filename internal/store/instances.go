@@ -133,15 +133,19 @@ func (s *Store) SetInstanceStatus(ctx context.Context, id string, status model.I
 }
 
 // ReconcileInstanceStatuses resets every instance persisted as
-// "running" back to "stopped" and returns how many rows changed. It
-// runs once at application startup: with the app-level single
-// instance guarantee, a "running" row found at startup can only be a
-// leftover from a previous process that no longer exists (there is
-// no instance process manager yet — Stage 3's runtime states come
-// from the reconciliation, later stages will own live transitions).
+// "running" WITHOUT a Stage 9B runtime record back to "stopped"
+// and returns how many rows changed. Such a row can only be a
+// leftover from before process tracking existed (or from a launch
+// that died before its record was written): no live process can
+// be re-identified for it, so "stopped" is the only safe state.
+// Instances WITH a runtime record are reconciled separately by
+// verifying the recorded process (see InstanceService startup
+// reconciliation) and are deliberately not touched here.
 func (s *Store) ReconcileInstanceStatuses(ctx context.Context) (int64, error) {
 	res, err := s.q.ExecContext(ctx, `UPDATE browser_instances SET
-		status = 'stopped', updated_at = datetime('now') WHERE status = 'running'`)
+		status = 'stopped', updated_at = datetime('now')
+		WHERE status = 'running'
+		  AND id NOT IN (SELECT instance_id FROM instance_runtime)`)
 	if err != nil {
 		return 0, fmt.Errorf("store: reconcile instance statuses: %w", err)
 	}

@@ -42,56 +42,96 @@ func testInstanceService(t *testing.T) (*InstanceService, config.Config) {
 	return svc, cfg
 }
 
+// testBrowserID registers one pure-path browser through the store
+// and returns its registration ID, so service-level creates (which
+// require a kernel since Stage 9B) have one to reference. The path
+// deliberately does not exist on disk: registration and
+// association never check it.
+func testBrowserID(t *testing.T, cfg config.Config) string {
+	t.Helper()
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	st := store.New(db)
+	const id = "test-browser"
+	if _, err := st.GetExternalBrowser(t.Context(), id); err == nil {
+		return id
+	}
+	if _, err := st.CreateExternalBrowser(t.Context(), model.ExternalBrowser{
+		ID: id, Name: "测试浏览器", ExecutablePath: `C:\Test\browser.exe`,
+	}); err != nil {
+		t.Fatalf("register test browser: %v", err)
+	}
+	return id
+}
+
 func TestInstanceCreateDefaultsAndValidation(t *testing.T) {
-	svc, _ := testInstanceService(t)
+	svc, cfg := testInstanceService(t)
+	browserID := testBrowserID(t, cfg)
 
 	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "  "}); err == nil {
 		t.Error("empty name accepted, want error")
 	}
-	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "工作号"})
+	// A kernel is required at creation (Stage 9B).
+	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "无内核"}); err == nil ||
+		!strings.Contains(err.Error(), "请选择实例内核") {
+		t.Errorf("kernel-less create error = %v, want 请选择实例内核", err)
+	}
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "工作号", BrowserID: browserID})
 	if err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
-	if created.UserDataDir != "profiles/"+created.ID {
-		t.Errorf("default user_data_dir = %q, want profiles/<id>", created.UserDataDir)
+	// The default instance file is the first sequential folder.
+	if created.UserDataDir != "profiles/P-1" {
+		t.Errorf("default user_data_dir = %q, want profiles/P-1", created.UserDataDir)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Layout.Profiles, "P-1")); err != nil {
+		t.Errorf("default instance file was not created on disk: %v", err)
 	}
 	if created.Status != model.StatusStopped {
 		t.Errorf("status = %q, want stopped", created.Status)
 	}
 	// Duplicate name -> friendly Chinese error.
-	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "工作号"}); err == nil ||
+	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "工作号", BrowserID: browserID}); err == nil ||
 		!strings.Contains(err.Error(), "实例名称已存在") {
 		t.Errorf("duplicate name error = %v, want 实例名称已存在", err)
 	}
-	// Duplicate explicit dir -> friendly error.
-	if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "x", UserDataDir: created.UserDataDir}); err == nil ||
-		!strings.Contains(err.Error(), "数据目录已被") {
-		t.Errorf("duplicate dir error = %v, want 数据目录已被占用", err)
+	// A custom instance-file name that is taken -> friendly error.
+	if _, err := svc.CreateInstance("", CreateInstanceInput{
+		Name: "x", BrowserID: browserID, ProfileMode: ProfileModeCustom, ProfileName: "P-1",
+	}); err == nil || !strings.Contains(err.Error(), "已存在") {
+		t.Errorf("duplicate folder error = %v, want 已存在", err)
 	}
-	// Unsafe explicit dirs are refused.
-	for _, bad := range []string{"/abs/path", "../escape", "profiles/../secret", "profiles", "elsewhere/x"} {
-		if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
-			t.Errorf("unsafe dir %q accepted, want error", bad)
+	// Unsafe folder names are refused: separators, traversal,
+	// dot-prefixed internal names.
+	for _, bad := range []string{"/abs/path", "../escape", "..", ".", "a/b", `a\b`, ".hidden", ""} {
+		if _, err := svc.CreateInstance("", CreateInstanceInput{
+			Name: "bad", BrowserID: browserID, ProfileMode: ProfileModeCustom, ProfileName: bad,
+		}); err == nil {
+			t.Errorf("unsafe folder name %q accepted, want error", bad)
 		}
 	}
 	// Windows reinterpretation spellings are refused: NTFS ADS
 	// (':'), reserved device names, trailing dot/space aliasing,
-	// illegal characters, and smuggled backslash separators.
+	// illegal characters.
 	for _, bad := range []string{
-		"profiles/x:stream", "profiles/CON", "profiles/con.txt", "profiles/AUX",
-		"profiles/COM1", "profiles/lpt9.dat", "profiles/NUL",
-		"profiles/name.", "profiles/name ", "profiles/a<b", "profiles/a|b",
-		`profiles/a\b`,
+		"x:stream", "CON", "con.txt", "AUX",
+		"COM1", "lpt9.dat", "NUL",
+		"name.", "name ", "a<b", "a|b",
 		// Reserved-name variants pinned by Microsoft's naming
 		// rules: superscript device digits (¹ ² ³ count as digits
 		// in COM#/LPT# names), the console device aliases, and
 		// reserved stems followed by multiple extensions.
-		"profiles/com¹", "profiles/LPT²", "profiles/lpt³.dat",
-		"profiles/conin$", "profiles/CONOUT$", "profiles/conout$.txt",
-		"profiles/nul.tar.gz",
+		"com¹", "LPT²", "lpt³.dat",
+		"conin$", "CONOUT$", "conout$.txt",
+		"nul.tar.gz",
 	} {
-		if _, err := svc.CreateInstance("", CreateInstanceInput{Name: "bad", UserDataDir: bad}); err == nil {
-			t.Errorf("windows-unsafe dir %q accepted, want error", bad)
+		if _, err := svc.CreateInstance("", CreateInstanceInput{
+			Name: "bad", BrowserID: browserID, ProfileMode: ProfileModeCustom, ProfileName: bad,
+		}); err == nil {
+			t.Errorf("windows-unsafe folder name %q accepted, want error", bad)
 		}
 	}
 	if created.ProxyID != nil {
@@ -133,12 +173,14 @@ func TestInstanceUpdatePreservesHistoricalProxyID(t *testing.T) {
 	proxyID := "hist-proxy"
 	historical, err := seedStore.CreateInstance(ctx, model.Instance{
 		Name: "历史实例", UserDataDir: "profiles/historical", ProxyID: &proxyID,
+		StartURL: "https://example.org",
 	})
 	if err != nil {
 		t.Fatalf("seed historical instance: %v", err)
 	}
 
-	// Edit the name, then the start URL: proxy_id must not move.
+	// Edit the name twice: neither the stored proxy_id nor the
+	// stored start URL (no longer an editable field) may move.
 	renamed, err := svc.UpdateInstance("", UpdateInstanceInput{ID: historical.ID, Name: "改名后的历史实例"})
 	if err != nil {
 		t.Fatalf("rename update: %v", err)
@@ -147,13 +189,16 @@ func TestInstanceUpdatePreservesHistoricalProxyID(t *testing.T) {
 		t.Fatalf("proxy_id after rename = %v, want %q preserved", renamed.ProxyID, proxyID)
 	}
 	moved, err := svc.UpdateInstance("", UpdateInstanceInput{
-		ID: historical.ID, Name: "改名后的历史实例", StartURL: "https://example.org",
+		ID: historical.ID, Name: "再次改名",
 	})
 	if err != nil {
-		t.Fatalf("start-url update: %v", err)
+		t.Fatalf("second update: %v", err)
 	}
 	if moved.ProxyID == nil || *moved.ProxyID != proxyID {
-		t.Fatalf("proxy_id after start-url edit = %v, want %q preserved", moved.ProxyID, proxyID)
+		t.Fatalf("proxy_id after second edit = %v, want %q preserved", moved.ProxyID, proxyID)
+	}
+	if moved.StartURL != "https://example.org" {
+		t.Fatalf("start_url after edits = %q, want the stored value preserved", moved.StartURL)
 	}
 
 	// Historical rows and vault ref recognition survive the edits.
@@ -174,7 +219,7 @@ func TestInstanceUpdatePreservesHistoricalProxyID(t *testing.T) {
 
 func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "可删"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "可删", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -189,12 +234,12 @@ func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 	}
 
 	updated, err := svc.UpdateInstance("", UpdateInstanceInput{
-		ID: created.ID, Name: "改名后", StartURL: "https://example.com",
+		ID: created.ID, Name: "改名后",
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if updated.Name != "改名后" || updated.StartURL != "https://example.com" {
+	if updated.Name != "改名后" || updated.UserDataDir != created.UserDataDir {
 		t.Errorf("updated = %+v", updated)
 	}
 	if _, err := svc.UpdateInstance("", UpdateInstanceInput{ID: "missing", Name: "x"}); err == nil {
@@ -218,7 +263,7 @@ func TestInstanceUpdateAndDeleteMetadataOnly(t *testing.T) {
 
 func TestDeleteInstanceAndProfileSafety(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "连删"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "连删", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -384,7 +429,7 @@ func TestPurgeAllowsIntermediateSymlinkStayingInside(t *testing.T) {
 
 func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "可恢复"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "可恢复", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -423,7 +468,7 @@ func TestPurgeRestoresProfileWhenRecordDeleteFails(t *testing.T) {
 
 func TestPurgeWipeFailureReportsQuarantine(t *testing.T) {
 	svc, cfg := testInstanceService(t)
-	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "清理失败"})
+	created, err := svc.CreateInstance("", CreateInstanceInput{Name: "清理失败", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

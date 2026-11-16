@@ -74,7 +74,7 @@ func TestPurgeRefusesJunctionAsProfileDirOnWindows(t *testing.T) {
 		t.Errorf("metadata removed despite refusal: %v", err)
 	}
 	// Sanity: a normal profile still purges on Windows.
-	normal, err := svc.CreateInstance("", CreateInstanceInput{Name: "正常"})
+	normal, err := svc.CreateInstance("", CreateInstanceInput{Name: "正常", BrowserID: testBrowserID(t, cfg)})
 	if err != nil {
 		t.Fatalf("create normal: %v", err)
 	}

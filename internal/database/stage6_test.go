@@ -73,7 +73,7 @@ func TestUpgradeFromV5ToV6PreservesData(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate (v5 -> v6): %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 11", v, err)
 	}
 
@@ -148,7 +148,7 @@ func TestFreshDatabaseReachesV6(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 12 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 11", v, err)
 	}
 	var n int
