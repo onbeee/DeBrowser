@@ -278,6 +278,8 @@ export default function InstancesPage() {
   const labelCls = "mb-1 block text-xs text-(--text-dim)";
   const radioCls = "flex items-center gap-2 text-sm text-(--text-main)";
   const editingActive = editing ? ACTIVE_STATUSES.has(editing.status) : false;
+  const editingRunning = editing ? ["running", "starting", "stopping"].includes(editing.status) : false;
+  const editingUnknown = editing?.status === "unknown";
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-6">
@@ -431,7 +433,7 @@ export default function InstancesPage() {
                 <select
                   className={inputCls}
                   value={form.browserId}
-                  disabled={!browsersLoaded || editingActive}
+                  disabled={!browsersLoaded || editingRunning}
                   onChange={(e) => setForm({ ...form, browserId: e.target.value })}
                 >
                   <option value="">{form.id ? "不选择内核" : "请选择内核"}</option>
@@ -599,7 +601,9 @@ export default function InstancesPage() {
                       ))}
                     {editingActive && (
                       <p className="text-xs text-(--text-faint)">
-                        实例运行中或运行状态无法确认时，不能更换内核或实例文件。
+                        {editingUnknown
+                          ? "实例运行状态无法确认时，不能更换实例文件；实例名称与内核可以修改。"
+                          : "实例运行中，不能更换内核或实例文件。"}
                       </p>
                     )}
                   </div>

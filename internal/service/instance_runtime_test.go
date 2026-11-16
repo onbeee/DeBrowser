@@ -424,6 +424,10 @@ func TestRunningInstanceGates(t *testing.T) {
 	if updated.KernelID != "reg-b" {
 		t.Errorf("kernel after change = %q", updated.KernelID)
 	}
+	// And a stopped instance deletes normally.
+	if err := svc.DeleteInstance("", inst.ID); err != nil {
+		t.Errorf("delete after stop: %v", err)
+	}
 }
 
 func TestTwoInstancesRunIndependently(t *testing.T) {
@@ -820,8 +824,19 @@ func TestStartUntrackedChildHoldsUnknown(t *testing.T) {
 	if err := svc.DeleteInstanceAndProfile("", inst.ID); err == nil {
 		t.Error("delete with profile allowed in the unknown hold")
 	}
-	if _, err := svc.UpdateInstance("", UpdateInstanceInput{ID: inst.ID, Name: inst.Name, BrowserID: "reg-b"}); err == nil {
-		t.Error("kernel change allowed in the unknown hold")
+	// Metadata edits endanger no profile data and stay
+	// available in the unknown hold: a kernel change takes
+	// effect at the next launch (impossible while held) and a
+	// name change touches nothing but the record.
+	updated, err := svc.UpdateInstance("", UpdateInstanceInput{ID: inst.ID, Name: inst.Name, BrowserID: "reg-b"})
+	if err != nil {
+		t.Fatalf("kernel change refused in the unknown hold: %v", err)
+	}
+	if updated.KernelID != "reg-b" {
+		t.Errorf("kernel after change = %q, want reg-b", updated.KernelID)
+	}
+	if _, err := svc.UpdateInstance("", UpdateInstanceInput{ID: inst.ID, Name: "未知时改名", BrowserID: "reg-b"}); err != nil {
+		t.Errorf("name-only edit refused in the unknown hold: %v", err)
 	}
 }
 
@@ -1075,9 +1090,11 @@ func TestStartAbortCloseFailsProcessAliveHoldsUnknown(t *testing.T) {
 	if err := svc.DeleteInstanceAndProfile("", inst.ID); err == nil {
 		t.Error("delete-with-profile allowed while exit unconfirmed")
 	}
+	// Metadata edits stay available while the exit is
+	// unconfirmed; only profile operations stay frozen.
 	upd := UpdateInstanceInput{ID: inst.ID, Name: "中止无法确认退出", BrowserID: "reg-b"}
-	if _, err := svc.UpdateInstance("", upd); err == nil {
-		t.Error("kernel change allowed while exit unconfirmed")
+	if _, err := svc.UpdateInstance("", upd); err != nil {
+		t.Errorf("kernel change refused while exit unconfirmed: %v", err)
 	}
 	upd.ProfileAction = "rename"
 	upd.ProfileName = "改名尝试"

@@ -419,17 +419,31 @@ func (s *InstanceService) updateInstance(input UpdateInstanceInput, op *logging.
 	if profileAction != ProfileActionNone && profileAction != ProfileActionRename && profileAction != ProfileActionSwap {
 		return model.Instance{}, fmt.Errorf("实例文件操作无效")
 	}
-	// Kernel and instance-file changes are refused unless the
-	// instance is verifiably at rest: changing either under a
-	// running browser (or one whose state cannot be confirmed)
-	// could corrupt its data or strand its process.
-	if kernelChange || profileAction != ProfileActionNone {
+	// Instance-file changes are refused unless the instance is
+	// verifiably at rest: renaming or rebinding the folder under
+	// a running browser — or one whose state cannot be
+	// confirmed — could corrupt its data or strand its process.
+	// Only operations that can endanger the profile folder are
+	// gated this way.
+	if profileAction != ProfileActionNone {
 		switch s.effectiveStatus(current) {
 		case model.StatusStopped, model.StatusError:
 		case model.StatusUnknown:
-			return model.Instance{}, fmt.Errorf("实例运行状态无法确认，不能更换内核或实例文件")
+			return model.Instance{}, fmt.Errorf("实例运行状态无法确认，不能更换实例文件")
 		default:
-			return model.Instance{}, fmt.Errorf("实例正在运行，不能更换内核或实例文件")
+			return model.Instance{}, fmt.Errorf("实例正在运行，不能更换实例文件")
+		}
+	}
+	// A kernel change is metadata, like the display name: it
+	// takes effect at the next launch and never acts on a
+	// running process — the runtime record keeps the path the
+	// browser was launched with, and no launch is possible
+	// while the state is unconfirmed. It is refused only while
+	// the instance is actually running or transitioning.
+	if kernelChange {
+		switch s.effectiveStatus(current) {
+		case model.StatusRunning, model.StatusStarting, model.StatusStopping:
+			return model.Instance{}, fmt.Errorf("实例正在运行，不能更换内核")
 		}
 	}
 
