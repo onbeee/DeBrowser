@@ -22,7 +22,8 @@
     "build:dev": "tsc && vite build --minify false --mode development",
     "dev": "vite",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/instancesLogic.test.ts"
   },
   "type": "module",
   "version": "0.1.0"

@@ -1,5 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
-import { AppWindow, Pencil, Play, Plus, Square, Trash2, TriangleAlert } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  AppWindow,
+  ChevronDown,
+  Layers,
+  Pencil,
+  Play,
+  Plus,
+  Square,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import {
   BrowserService,
   InstanceService,
@@ -8,6 +19,16 @@ import {
 import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import {
+  kernelOptionLabels,
+  planBatch,
+  planBatchCreate,
+  pruneSelection,
+  sortInstancesByName,
+  MAX_BATCH_CREATE,
+  type BatchAction,
+  type BatchPlanItem,
+} from "./instancesLogic";
 
 const STATUS_LABEL: Record<string, string> = {
   stopped: "已关闭",
@@ -16,6 +37,16 @@ const STATUS_LABEL: Record<string, string> = {
   stopping: "关闭中",
   error: "异常",
   unknown: "无法确认",
+};
+
+// Three statuses get a small colored dot plus matching text
+// color, using the shared theme tokens (gray / ok-green /
+// danger-red, each already low-saturation per theme). All other
+// statuses keep the neutral badge rendering.
+const STATUS_DOT: Record<string, { dot: string; text: string }> = {
+  stopped: { dot: "bg-(--text-dim)", text: "text-(--text-dim)" },
+  running: { dot: "bg-(--ok)", text: "text-(--ok)" },
+  unknown: { dot: "bg-(--danger)", text: "text-(--danger)" },
 };
 
 // Statuses in which the instance's browser may be alive: kernel
@@ -48,12 +79,47 @@ const EMPTY_FORM: FormState = { name: "", browserId: "", profileMode: "default",
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
+// The outcome of one batch operation, shown in a dismissible
+// banner: what succeeded, what was skipped (and why), what
+// failed (and why). Partial success is reported as partial.
+interface BatchResult {
+  title: string;
+  okNames: string[];
+  skipped: { name: string; reason: string }[];
+  failed: { name: string; reason: string }[];
+}
+
+interface BatchCreateState {
+  prefix: string;
+  count: string;
+  browserId: string;
+}
+
+// The instance-file picker dialog: the options are fetched fresh
+// at open time (never the form-open cache), exactly one may be
+// picked, and nothing is applied until 「选择」 confirms.
+interface ProfilePickerState {
+  options: ProfileDirInfo[];
+  picked: string;
+}
+
+const BATCH_VERB: Record<BatchAction, string> = { start: "启动", stop: "关闭", delete: "删除" };
+const BATCH_OP_ACTION: Record<BatchAction, string> = {
+  start: "instance.start",
+  stop: "instance.stop",
+  delete: "instance.delete",
+};
+
 /**
  * 浏览器实例管理（Stage 9B）：实例的新建、编辑、删除与真实运行。
  * 每个实例绑定一个独立的实例文件（data/profiles 下的文件夹），
  * 启动时以该文件夹作为浏览器的数据目录。删除分两种且含义明确
  * 区分：「仅删除实例」保留实例文件；「删除实例及其实例文件」才
  * 会删除磁盘上的浏览器数据，且必须由用户明确选择。
+ *
+ * 列表按实例名称自然排序显示；批量启动/关闭/删除与批量创建都
+ * 逐项复用单实例操作与其安全门禁，逐项记录结果，部分失败如实
+ * 汇报，不引入额外的任务调度机制。
  */
 export default function InstancesPage() {
   const log = useAppStore((state) => state.log);
@@ -67,7 +133,6 @@ export default function InstancesPage() {
   // would then clear the association in the database.
   const [browsersLoaded, setBrowsersLoaded] = useState(false);
   const [browsersError, setBrowsersError] = useState<string | null>(null);
-  const [availableProfiles, setAvailableProfiles] = useState<ProfileDirInfo[]>([]);
   const [editing, setEditing] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +140,23 @@ export default function InstancesPage() {
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
   const [busy, setBusy] = useState(false);
   const [actingId, setActingId] = useState<string | null>(null);
+  // Batch management state.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchResult, setBatchResult] = useState<BatchResult | null>(null);
+  const [batchDeletePlan, setBatchDeletePlan] = useState<BatchPlanItem[] | null>(null);
+  const [batchCreate, setBatchCreate] = useState<BatchCreateState | null>(null);
+  const [batchCreateError, setBatchCreateError] = useState<string | null>(null);
+  const [batchCreateBusy, setBatchCreateBusy] = useState(false);
+  // Instance-file picker state (inside the create/edit form).
+  const [profilePicker, setProfilePicker] = useState<ProfilePickerState | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
+  const [profileNote, setProfileNote] = useState<string | null>(null);
+
+  // The list is displayed in natural name order; selection and
+  // select-all always refer to exactly this displayed list.
+  const displayInstances = useMemo(() => sortInstancesByName(instances), [instances]);
+  const kernelLabels = useMemo(() => kernelOptionLabels(browsers), [browsers]);
 
   const refreshInstances = useCallback(async () => {
     try {
@@ -128,19 +210,22 @@ export default function InstancesPage() {
     return () => clearInterval(timer);
   }, [refreshInstances]);
 
-  const loadAvailableProfiles = useCallback(async () => {
-    try {
-      const list = await InstanceService.ListAvailableProfiles();
-      setAvailableProfiles(list ?? []);
-    } catch {
-      setAvailableProfiles([]);
-    }
-  }, []);
+  // Selection never outlives the displayed list: ids that vanish
+  // (deleted instances, reloads) are dropped from the selection.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const next = pruneSelection(
+        prev,
+        instances.map((i) => i.id),
+      );
+      return next.size === prev.size ? prev : next;
+    });
+  }, [instances]);
 
   const openCreate = () => {
     setEditing(null);
     setForm(EMPTY_FORM);
-    void loadAvailableProfiles();
+    setProfileNote(null);
   };
 
   const openEdit = (inst: Instance) => {
@@ -155,7 +240,7 @@ export default function InstancesPage() {
       profileMode: "rename",
       profileName: profileFolderOf(inst),
     });
-    void loadAvailableProfiles();
+    setProfileNote(null);
   };
 
   const submitForm = async () => {
@@ -168,6 +253,14 @@ export default function InstancesPage() {
     }
     if (!form.id && !form.browserId) {
       setError("请选择实例内核。");
+      return;
+    }
+    if (!form.id && form.profileMode === "existing" && !form.profileName) {
+      setError("请选择实例文件。");
+      return;
+    }
+    if (form.id && form.profileMode === "swap" && !form.profileName) {
+      setError("请选择要更换的实例文件。");
       return;
     }
     setBusy(true);
@@ -273,38 +366,239 @@ export default function InstancesPage() {
     }
   };
 
+  // --- Batch operations -------------------------------------------------
+  // Batch start/stop/delete run the existing single-instance
+  // operations sequentially, in displayed order. Eligibility is
+  // planned up front (planBatch mirrors the single-instance
+  // gates); one failure never stops the remaining items, and the
+  // outcome is reported per item when the batch finishes.
+
+  const toggleSelected = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (checked: boolean) => {
+    setSelectedIds(checked ? new Set(displayInstances.map((i) => i.id)) : new Set());
+  };
+
+  const executeBatch = async (action: BatchAction, plan: BatchPlanItem[]) => {
+    setBatchBusy(true);
+    setBatchResult(null);
+    const verb = BATCH_VERB[action];
+    const okNames: string[] = [];
+    const failed: { name: string; reason: string }[] = [];
+    const skipped = plan
+      .filter((p) => !p.run)
+      .map((p) => ({ name: p.name, reason: p.reason }));
+    for (const item of plan.filter((p) => p.run)) {
+      const opId = newOperationId();
+      try {
+        if (action === "start") await InstanceService.StartInstance(opId, item.id);
+        else if (action === "stop") await InstanceService.StopInstance(opId, item.id);
+        else await InstanceService.DeleteInstance(opId, item.id);
+        okNames.push(item.name);
+        const doneMessage =
+          action === "delete" ? `实例已删除（实例文件保留）：${item.name}` : `实例已${verb}：${item.name}`;
+        log("info", doneMessage);
+        recordOperationFeedback(opId, true, doneMessage, "浏览器实例", BATCH_OP_ACTION[action]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failed.push({ name: item.name, reason: message });
+        log("error", `${verb}实例失败：${item.name}：${message}`);
+        recordOperationFeedback(opId, false, `${verb}实例失败：${message}`, "浏览器实例", BATCH_OP_ACTION[action]);
+      }
+    }
+    await refreshInstances();
+    setSelectedIds(new Set());
+    setBatchResult({ title: `批量${verb}完成`, okNames, skipped, failed });
+    setBatchBusy(false);
+  };
+
+  const runBatch = (action: BatchAction) => {
+    const plan = planBatch(
+      action,
+      displayInstances.filter((i) => selectedIds.has(i.id)),
+    );
+    // Deletion always asks first — unless nothing is deletable,
+    // in which case the skip reasons are the whole answer.
+    if (action === "delete" && plan.some((p) => p.run)) {
+      setBatchDeletePlan(plan);
+      return;
+    }
+    void executeBatch(action, plan);
+  };
+
+  // --- Batch create -------------------------------------------------------
+
+  const openBatchCreate = () => {
+    setBatchCreate({ prefix: "", count: "1", browserId: "" });
+    setBatchCreateError(null);
+  };
+
+  const submitBatchCreate = async () => {
+    if (!batchCreate) return;
+    if (!browsersLoaded) {
+      setBatchCreateError("内核列表尚未加载完成，无法创建。请等待加载完成或重新加载页面。");
+      return;
+    }
+    if (!batchCreate.browserId) {
+      setBatchCreateError("请选择实例内核。");
+      return;
+    }
+    setBatchCreateBusy(true);
+    try {
+      // Conflict-check against a fresh list, not the polled
+      // cache; the backend still re-checks every single name.
+      const fresh = await InstanceService.ListInstances();
+      const plan = planBatchCreate(
+        batchCreate.prefix,
+        Number(batchCreate.count),
+        new Set((fresh ?? []).map((i) => i.name)),
+      );
+      if (!plan.ok) {
+        setBatchCreateError(plan.error);
+        return;
+      }
+      const okNames: string[] = [];
+      const failed: { name: string; reason: string }[] = [];
+      for (const name of plan.names) {
+        const opId = newOperationId();
+        try {
+          const created = await InstanceService.CreateInstance(opId, {
+            name,
+            browserId: batchCreate.browserId,
+            profileMode: "default",
+            profileName: "",
+          });
+          okNames.push(created.name);
+          log("info", `实例已创建：${created.name}`);
+          recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", "instance.create");
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          failed.push({ name, reason: message });
+          log("error", `创建实例失败：${name}：${message}`);
+          recordOperationFeedback(opId, false, `创建实例失败：${message}`, "浏览器实例", "instance.create");
+        }
+      }
+      setBatchCreate(null);
+      await load();
+      setBatchResult({ title: "批量创建完成", okNames, skipped: [], failed });
+    } catch (err) {
+      setBatchCreateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBatchCreateBusy(false);
+    }
+  };
+
+  // --- Instance-file picker -------------------------------------------------
+  // The picker list is fetched fresh on every open attempt: if no
+  // unbound instance file exists right now, the dialog does not
+  // open at all and the form keeps its current value.
+
+  const openProfilePicker = async () => {
+    if (!form) return;
+    setProfileNote(null);
+    setPickerBusy(true);
+    try {
+      const list = await InstanceService.ListAvailableProfiles();
+      const options = list ?? [];
+      if (options.length === 0) {
+        setProfileNote("目前没有未绑定的实例文件。");
+        return;
+      }
+      setProfilePicker({
+        options,
+        picked: options.some((o) => o.name === form.profileName) ? form.profileName : "",
+      });
+    } catch (err) {
+      setProfileNote(`获取实例文件列表失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPickerBusy(false);
+    }
+  };
+
+  const confirmProfilePicker = () => {
+    if (!profilePicker || !form || !profilePicker.picked) return;
+    setForm({ ...form, profileName: profilePicker.picked });
+    setProfilePicker(null);
+  };
+
   const inputCls =
     "w-full rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint) disabled:opacity-50";
   const labelCls = "mb-1 block text-xs text-(--text-dim)";
-  const radioCls = "flex items-center gap-2 text-sm text-(--text-main)";
+  const modeGroupCls = "inline-flex overflow-hidden rounded-md border border-(--border-strong)";
+  const modeButtonCls = (active: boolean) =>
+    `h-8 px-3.5 text-sm transition-colors ${
+      active
+        ? "bg-(--accent) font-medium text-(--accent-contrast)"
+        : "bg-(--input-bg) text-(--text-dim) hover:bg-(--hover-bg)"
+    } disabled:cursor-not-allowed disabled:opacity-50`;
   const editingActive = editing ? ACTIVE_STATUSES.has(editing.status) : false;
   const editingRunning = editing ? ["running", "starting", "stopping"].includes(editing.status) : false;
   const editingUnknown = editing?.status === "unknown";
+  const allSelected =
+    displayInstances.length > 0 && displayInstances.every((i) => selectedIds.has(i.id));
+  const batchDeleteRunnable = batchDeletePlan?.filter((p) => p.run) ?? [];
+  const batchDeleteSkipped = batchDeletePlan?.filter((p) => !p.run) ?? [];
+
+  // The clickable box shown in the form's 选择 mode: it never
+  // expands inline; it opens the picker dialog (or explains why
+  // there is nothing to pick).
+  const profilePickerBox = (disabled: boolean) => (
+    <>
+      <button
+        type="button"
+        disabled={disabled || pickerBusy}
+        onClick={() => void openProfilePicker()}
+        className={`${inputCls} flex items-center justify-between text-left`}
+      >
+        <span className={form?.profileName ? "" : "text-(--text-faint)"}>
+          {form?.profileName || "点击选择实例文件"}
+        </span>
+        <ChevronDown size={14} className="shrink-0 text-(--text-faint)" />
+      </button>
+      {profileNote && <p className="mt-1 text-xs text-(--text-faint)">{profileNote}</p>}
+    </>
+  );
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-6">
-      <div className="flex items-center justify-between">
+    <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-6">
+      <div className="flex shrink-0 items-center justify-between gap-3">
         <p className="text-sm text-(--text-dim)">
           每个实例使用独立的实例文件，可独立启动、运行与关闭。
         </p>
-        <button
-          type="button"
-          onClick={openCreate}
-          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
-        >
-          <Plus size={14} /> 新建实例
-        </button>
+        <div className="flex shrink-0 gap-2">
+          <button
+            type="button"
+            onClick={openBatchCreate}
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+          >
+            <Layers size={14} /> 批量创建
+          </button>
+          <button
+            type="button"
+            onClick={openCreate}
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
+          >
+            <Plus size={14} /> 新建实例
+          </button>
+        </div>
       </div>
 
       {error && (
-        <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
+        <div className="mt-4 flex shrink-0 items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
           <TriangleAlert size={16} className="mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {browsersError && (
-        <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
+        <div className="mt-4 flex shrink-0 items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
           <TriangleAlert size={16} className="mt-0.5 shrink-0" />
           <span className="flex-1">
             内核列表加载失败：{browsersError}。保存功能已暂停，以免误清除实例的内核关联。
@@ -319,7 +613,77 @@ export default function InstancesPage() {
         </div>
       )}
 
-      <div className="mt-5 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+      {batchResult && (
+        <div className="mt-4 shrink-0 rounded-lg border border-(--border) bg-(--panel-bg) px-3 py-2 text-sm text-(--text-dim)">
+          <div className="flex items-start justify-between gap-2">
+            <p className="font-medium text-(--text-main)">
+              {batchResult.title}：成功 {batchResult.okNames.length} 个
+              {batchResult.skipped.length > 0 && `，跳过 ${batchResult.skipped.length} 个`}
+              {batchResult.failed.length > 0 && `，失败 ${batchResult.failed.length} 个`}
+            </p>
+            <button
+              type="button"
+              title="关闭"
+              onClick={() => setBatchResult(null)}
+              className="shrink-0 rounded p-0.5 text-(--text-faint) hover:bg-(--hover-bg)"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          {batchResult.skipped.map((s) => (
+            <p key={`skip-${s.name}`} className="mt-1 text-xs">
+              跳过「{s.name}」：{s.reason}
+            </p>
+          ))}
+          {batchResult.failed.map((f) => (
+            <p key={`fail-${f.name}`} className="mt-1 text-xs text-(--danger)">
+              「{f.name}」失败：{f.reason}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {selectedIds.size > 0 && (
+        <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-(--border) bg-(--panel-bg) px-3 py-2">
+          <span className="text-sm text-(--text-main)">已选择 {selectedIds.size} 个实例</span>
+          <div className="ml-auto flex gap-1">
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={() => runBatch("start")}
+              className="rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              批量启动
+            </button>
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={() => runBatch("stop")}
+              className="rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              批量关闭
+            </button>
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={() => runBatch("delete")}
+              className="rounded px-2 py-1.5 text-xs text-(--danger) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              批量删除
+            </button>
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={() => setSelectedIds(new Set())}
+              className="rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              取消选择
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-5 min-h-0 flex-1 overflow-y-auto rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (
           <p className="px-4 py-10 text-center text-sm text-(--text-faint)">加载中…</p>
         ) : instances.length === 0 ? (
@@ -333,38 +697,70 @@ export default function InstancesPage() {
         ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-(--border) text-left text-xs text-(--text-faint)">
-                <th className="px-4 py-2.5 font-medium">实例名称</th>
-                <th className="px-4 py-2.5 font-medium">代理节点</th>
-                <th className="px-4 py-2.5 font-medium">实例内核</th>
-                <th className="px-4 py-2.5 font-medium">状态</th>
-                <th className="px-4 py-2.5 text-right font-medium">操作</th>
+              <tr className="text-left text-xs text-(--text-faint)">
+                <th className="sticky top-0 z-[1] w-10 border-b border-(--border) bg-(--panel-bg) px-2 py-2.5 text-center">
+                  <input
+                    type="checkbox"
+                    aria-label="全选"
+                    className="h-4 w-4 accent-(--accent)"
+                    checked={allSelected}
+                    disabled={batchBusy}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !allSelected && selectedIds.size > 0;
+                    }}
+                    onChange={(e) => toggleSelectAll(e.target.checked)}
+                  />
+                </th>
+                <th className="sticky top-0 z-[1] border-b border-(--border) bg-(--panel-bg) px-4 py-2.5 font-medium">实例名称</th>
+                <th className="sticky top-0 z-[1] border-b border-(--border) bg-(--panel-bg) px-4 py-2.5 text-center font-medium">代理节点</th>
+                <th className="sticky top-0 z-[1] border-b border-(--border) bg-(--panel-bg) px-4 py-2.5 text-center font-medium">实例内核</th>
+                <th className="sticky top-0 z-[1] border-b border-(--border) bg-(--panel-bg) px-4 py-2.5 text-center font-medium">状态</th>
+                <th className="sticky top-0 z-[1] border-b border-(--border) bg-(--panel-bg) px-4 py-2.5 text-center font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
-              {instances.map((inst) => {
+              {displayInstances.map((inst) => {
                 const active = ACTIVE_STATUSES.has(inst.status);
                 const transitioning = inst.status === "starting" || inst.status === "stopping";
                 return (
                   <tr key={inst.id} className="border-b border-(--border) last:border-0 hover:bg-(--hover-bg)">
+                    <td className="px-2 py-2.5 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label={`选择实例 ${inst.name}`}
+                        className="h-4 w-4 accent-(--accent)"
+                        checked={selectedIds.has(inst.id)}
+                        disabled={batchBusy}
+                        onChange={(e) => toggleSelected(inst.id, e.target.checked)}
+                      />
+                    </td>
                     <td className="px-4 py-2.5 font-medium">{inst.name}</td>
-                    <td className="px-4 py-2.5 text-(--text-dim)">
+                    <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       {inst.proxyId ? "已设置（历史关联）" : "未设置"}
                     </td>
-                    <td className="px-4 py-2.5 text-(--text-dim)">
+                    <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       <span title={inst.kernelExecutablePath || undefined}>
                         {inst.kernelName
                           ? `${inst.kernelName}${inst.kernelVersion ? ` ${inst.kernelVersion}` : ""}`
                           : "未指定"}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5">
-                      <span className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)">
-                        {STATUS_LABEL[inst.status] ?? inst.status}
-                      </span>
+                    <td className="px-4 py-2.5 text-center">
+                      {STATUS_DOT[inst.status] ? (
+                        <span
+                          className={`inline-flex items-center gap-1.5 text-xs ${STATUS_DOT[inst.status].text}`}
+                        >
+                          <span className={`h-[7px] w-[7px] shrink-0 rounded-full ${STATUS_DOT[inst.status].dot}`} />
+                          {STATUS_LABEL[inst.status]}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-(--badge-bg) px-2 py-0.5 text-xs text-(--text-dim)">
+                          {STATUS_LABEL[inst.status] ?? inst.status}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
-                      <div className="flex justify-end gap-1">
+                      <div className="flex justify-center gap-1">
                         {inst.status === "running" || inst.status === "stopping" ? (
                           <button
                             type="button"
@@ -439,7 +835,7 @@ export default function InstancesPage() {
                   <option value="">{form.id ? "不选择内核" : "请选择内核"}</option>
                   {browsers.map((b) => (
                     <option key={b.id} value={b.id}>
-                      {b.name} — {b.executablePath}
+                      {kernelLabels.get(b.id) ?? b.name}
                     </option>
                   ))}
                 </select>
@@ -485,122 +881,107 @@ export default function InstancesPage() {
               <div>
                 <label className={labelCls}>实例文件</label>
                 {!form.id ? (
-                  <div className="space-y-2">
-                    <label className={radioCls}>
-                      <input
-                        type="radio"
-                        name="profile-mode"
-                        checked={form.profileMode === "default"}
-                        onChange={() => setForm({ ...form, profileMode: "default", profileName: "" })}
-                      />
-                      默认（自动分配）
-                    </label>
+                  <div>
+                    <div className={modeGroupCls} role="group" aria-label="实例文件方式">
+                      <button
+                        type="button"
+                        aria-pressed={form.profileMode === "default"}
+                        className={modeButtonCls(form.profileMode === "default")}
+                        onClick={() => {
+                          setForm({ ...form, profileMode: "default", profileName: "" });
+                          setProfileNote(null);
+                        }}
+                      >
+                        默认
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={form.profileMode === "custom"}
+                        className={modeButtonCls(form.profileMode === "custom")}
+                        onClick={() => {
+                          setForm({ ...form, profileMode: "custom", profileName: "" });
+                          setProfileNote(null);
+                        }}
+                      >
+                        自定
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={form.profileMode === "existing"}
+                        className={modeButtonCls(form.profileMode === "existing")}
+                        onClick={() => {
+                          setForm({ ...form, profileMode: "existing", profileName: "" });
+                          setProfileNote(null);
+                        }}
+                      >
+                        选择
+                      </button>
+                    </div>
                     {form.profileMode === "default" && (
-                      <p className="pl-6 text-xs text-(--text-faint)">
-                        按顺序自动分配实例文件：P-1、P-2、P-3……已分配过的编号不会重复使用。
+                      <p className="mt-2 text-xs text-(--text-faint)">
+                        自动分配实例文件：P-1、P-2、P-3……已分配过的编号不会重复使用。
                       </p>
                     )}
-                    <label className={radioCls}>
-                      <input
-                        type="radio"
-                        name="profile-mode"
-                        checked={form.profileMode === "custom"}
-                        onChange={() => setForm({ ...form, profileMode: "custom", profileName: "" })}
-                      />
-                      自定（新建实例文件）
-                    </label>
                     {form.profileMode === "custom" && (
                       <input
-                        className={inputCls}
+                        className={`${inputCls} mt-2`}
                         value={form.profileName}
                         onChange={(e) => setForm({ ...form, profileName: e.target.value })}
                         placeholder="实例文件名称，例如：工作账号"
                       />
                     )}
-                    <label className={radioCls}>
-                      <input
-                        type="radio"
-                        name="profile-mode"
-                        checked={form.profileMode === "existing"}
-                        onChange={() => setForm({ ...form, profileMode: "existing", profileName: "" })}
-                      />
-                      选择（使用保留的实例文件）
-                    </label>
-                    {form.profileMode === "existing" &&
-                      (availableProfiles.length === 0 ? (
-                        <p className="pl-6 text-xs text-(--text-faint)">暂无可选择的实例文件。</p>
-                      ) : (
-                        <select
-                          className={inputCls}
-                          value={form.profileName}
-                          onChange={(e) => setForm({ ...form, profileName: e.target.value })}
-                        >
-                          <option value="">请选择实例文件</option>
-                          {availableProfiles.map((p) => (
-                            <option key={p.name} value={p.name}>
-                              {p.name} — {p.path}
-                            </option>
-                          ))}
-                        </select>
-                      ))}
+                    {form.profileMode === "existing" && <div className="mt-2">{profilePickerBox(false)}</div>}
                   </div>
                 ) : (
-                  <div className="space-y-2">
+                  <div>
                     <p className="text-xs text-(--text-faint)">
                       当前实例文件：{editing ? profileFolderOf(editing) : ""}
                       <span className="font-mono">（{editing?.userDataDir}）</span>
                     </p>
-                    <label className={radioCls}>
-                      <input
-                        type="radio"
-                        name="profile-mode-edit"
-                        checked={form.profileMode === "rename"}
+                    <div className={`${modeGroupCls} mt-2`} role="group" aria-label="实例文件方式">
+                      <button
+                        type="button"
+                        aria-pressed={form.profileMode === "rename"}
                         disabled={editingActive}
-                        onChange={() =>
-                          setForm({ ...form, profileMode: "rename", profileName: editing ? profileFolderOf(editing) : "" })
-                        }
-                      />
-                      自定（重命名当前实例文件）
-                    </label>
+                        className={modeButtonCls(form.profileMode === "rename")}
+                        onClick={() => {
+                          setForm({
+                            ...form,
+                            profileMode: "rename",
+                            profileName: editing ? profileFolderOf(editing) : "",
+                          });
+                          setProfileNote(null);
+                        }}
+                      >
+                        自定
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={form.profileMode === "swap"}
+                        disabled={editingActive}
+                        className={modeButtonCls(form.profileMode === "swap")}
+                        onClick={() => {
+                          setForm({ ...form, profileMode: "swap", profileName: "" });
+                          setProfileNote(null);
+                        }}
+                      >
+                        选择
+                      </button>
+                    </div>
                     {form.profileMode === "rename" && (
                       <input
-                        className={inputCls}
+                        className={`${inputCls} mt-2`}
                         value={form.profileName}
                         disabled={editingActive}
                         onChange={(e) => setForm({ ...form, profileName: e.target.value })}
                         placeholder="新的实例文件名称"
                       />
                     )}
-                    <label className={radioCls}>
-                      <input
-                        type="radio"
-                        name="profile-mode-edit"
-                        checked={form.profileMode === "swap"}
-                        disabled={editingActive}
-                        onChange={() => setForm({ ...form, profileMode: "swap", profileName: "" })}
-                      />
-                      选择（更换为保留的实例文件）
-                    </label>
-                    {form.profileMode === "swap" &&
-                      (availableProfiles.length === 0 ? (
-                        <p className="pl-6 text-xs text-(--text-faint)">暂无可选择的实例文件。</p>
-                      ) : (
-                        <select
-                          className={inputCls}
-                          value={form.profileName}
-                          disabled={editingActive}
-                          onChange={(e) => setForm({ ...form, profileName: e.target.value })}
-                        >
-                          <option value="">请选择要更换的实例文件</option>
-                          {availableProfiles.map((p) => (
-                            <option key={p.name} value={p.name}>
-                              {p.name} — {p.path}
-                            </option>
-                          ))}
-                        </select>
-                      ))}
+                    {form.profileMode === "swap" && (
+                      <div className="mt-2">{profilePickerBox(editingActive)}</div>
+                    )}
                     {editingActive && (
-                      <p className="text-xs text-(--text-faint)">
+                      <p className="mt-2 text-xs text-(--text-faint)">
                         {editingUnknown
                           ? "实例运行状态无法确认时，不能更换实例文件；实例名称与内核可以修改。"
                           : "实例运行中，不能更换内核或实例文件。"}
@@ -628,6 +1009,47 @@ export default function InstancesPage() {
                 className="rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
               >
                 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {profilePicker && form && (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/50 px-4">
+          <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
+            <h3 className="text-base font-semibold">选择实例文件</h3>
+            <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-(--border)">
+              {profilePicker.options.map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  aria-pressed={profilePicker.picked === p.name}
+                  onClick={() => setProfilePicker({ ...profilePicker, picked: p.name })}
+                  className={`block w-full px-3 py-2 text-left hover:bg-(--hover-bg) ${
+                    profilePicker.picked === p.name ? "bg-(--hover-bg)" : ""
+                  }`}
+                >
+                  <span className="text-sm font-medium text-(--text-main)">{p.name}</span>
+                  <span className="block truncate text-xs text-(--text-faint)">{p.path}</span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-4 flex shrink-0 justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setProfilePicker(null)}
+                className="rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={!profilePicker.picked}
+                onClick={confirmProfilePicker}
+                className="rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
+              >
+                选择
               </button>
             </div>
           </div>
@@ -676,6 +1098,136 @@ export default function InstancesPage() {
                 className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-(--danger-contrast) hover:opacity-90 disabled:opacity-50"
               >
                 {pendingDelete.withProfile ? "确认删除实例及实例文件" : "确认仅删除实例"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {batchDeletePlan && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
+          <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
+            <h3 className="text-base font-semibold">批量删除实例</h3>
+            <p className="mt-2 shrink-0 text-sm leading-relaxed text-(--text-dim)">
+              将删除 {batchDeleteRunnable.length} 个实例，仅删除实例记录；实例文件会保留在磁盘上，之后可以重新绑定到其他实例。
+            </p>
+            <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-(--border) px-3 py-2">
+              {batchDeleteRunnable.map((p) => (
+                <p key={p.id} className="py-0.5 text-sm text-(--text-main)">
+                  {p.name}
+                </p>
+              ))}
+            </div>
+            {batchDeleteSkipped.length > 0 && (
+              <p className="mt-2 shrink-0 text-xs text-(--text-faint)">
+                另有 {batchDeleteSkipped.length} 个所选实例不会删除：
+                {batchDeleteSkipped.map((p) => `「${p.name}」${p.reason}`).join("；")}。
+              </p>
+            )}
+            <div className="mt-5 flex shrink-0 justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setBatchDeletePlan(null)}
+                className="rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={batchBusy}
+                onClick={() => {
+                  const plan = batchDeletePlan;
+                  setBatchDeletePlan(null);
+                  void executeBatch("delete", plan);
+                }}
+                className="rounded-md bg-(--danger) px-3 py-1.5 text-sm font-medium text-(--danger-contrast) hover:opacity-90 disabled:opacity-50"
+              >
+                确认删除 {batchDeleteRunnable.length} 个实例
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {batchCreate && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-md rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
+            <h3 className="text-base font-semibold">批量创建实例</h3>
+            <div className="mt-4 space-y-3">
+              <div>
+                <label className={labelCls}>实例名称前缀（必填）</label>
+                <input
+                  className={inputCls}
+                  value={batchCreate.prefix}
+                  onChange={(e) => setBatchCreate({ ...batchCreate, prefix: e.target.value })}
+                  placeholder="例如：测试浏览器"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>创建数量（必填，一次最多 {MAX_BATCH_CREATE} 个）</label>
+                <input
+                  className={inputCls}
+                  type="number"
+                  min={1}
+                  max={MAX_BATCH_CREATE}
+                  step={1}
+                  value={batchCreate.count}
+                  onChange={(e) => setBatchCreate({ ...batchCreate, count: e.target.value })}
+                />
+                {batchCreate.prefix.trim() !== "" &&
+                  Number.isInteger(Number(batchCreate.count)) &&
+                  Number(batchCreate.count) >= 1 &&
+                  Number(batchCreate.count) <= MAX_BATCH_CREATE && (
+                    <p className="mt-1 text-xs text-(--text-faint)">
+                      将创建：{batchCreate.prefix.trim()}1、{batchCreate.prefix.trim()}2
+                      {Number(batchCreate.count) > 2 && ` …… ${batchCreate.prefix.trim()}${Number(batchCreate.count)}`}
+                      （共 {Number(batchCreate.count)} 个），每个实例自动分配独立的实例文件。
+                    </p>
+                  )}
+              </div>
+              <div>
+                <label className={labelCls}>实例内核（必选）</label>
+                <select
+                  className={inputCls}
+                  value={batchCreate.browserId}
+                  disabled={!browsersLoaded}
+                  onChange={(e) => setBatchCreate({ ...batchCreate, browserId: e.target.value })}
+                >
+                  <option value="">请选择内核</option>
+                  {browsers.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {kernelLabels.get(b.id) ?? b.name}
+                    </option>
+                  ))}
+                </select>
+                {!browsersLoaded && <p className="mt-1 text-xs text-(--text-faint)">内核列表加载中…</p>}
+                {browsersLoaded && browsers.length === 0 && (
+                  <p className="mt-1 text-xs text-(--text-faint)">尚未登记任何浏览器内核，请先在「浏览器内核」页面添加。</p>
+                )}
+              </div>
+              <div>
+                <label className={labelCls}>代理节点</label>
+                <select className={inputCls} value="" disabled>
+                  <option value="">未设置（代理节点功能暂未开放）</option>
+                </select>
+              </div>
+              {batchCreateError && <p className="text-sm text-(--danger)">{batchCreateError}</p>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setBatchCreate(null)}
+                className="rounded-md border border-(--border) px-3 py-1.5 text-sm text-(--text-dim) hover:bg-(--hover-bg)"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={batchCreateBusy}
+                onClick={() => void submitBatchCreate()}
+                className="rounded-md bg-(--accent) px-3 py-1.5 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
+              >
+                创建
               </button>
             </div>
           </div>
