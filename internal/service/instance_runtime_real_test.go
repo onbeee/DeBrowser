@@ -1,6 +1,8 @@
 package service
 
 import (
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +13,7 @@ import (
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/model"
+	"github.com/onbeee/DeBrowser/internal/runner"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
 
@@ -147,4 +150,249 @@ func TestRealBrowserLaunchGracefulCloseAndExternalKill(t *testing.T) {
 	}
 	got, _ = svc.GetInstance(inst.ID)
 	t.Fatalf("status after external kill = %q, want not running", got.Status)
+}
+
+// --- Real-process proof for the post-verification abort ---
+
+// exeMismatchLauncher wraps the real system launcher and makes
+// Inspect report a different executable path than the one the
+// process was really launched from. The child process, its
+// close and its exit are all real; only the reported path is
+// perturbed, which deterministically drives the launch into
+// the verification-failure abort on every platform. (Registering
+// the binary under an alternate textual form of its path does
+// NOT work: the OS reports the path in the form it was launched
+// with, so it always matches the registration.)
+type exeMismatchLauncher struct {
+	runner.Launcher
+}
+
+func (l exeMismatchLauncher) Inspect(pid int) (runner.Info, error) {
+	info, err := l.Launcher.Inspect(pid)
+	if err == nil {
+		info.ExecutablePath = "not-the-registered-browser.exe"
+	}
+	return info, err
+}
+
+func realServiceWithLauncher(t *testing.T, launcher runner.Launcher) (*InstanceService, config.Config) {
+	t.Helper()
+	cfg, err := config.Load(func(key string) string {
+		if key == config.EnvAppRoot {
+			return t.TempDir()
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc, err := newInstanceService(db, cfg.Layout, slog.Default(), launcher)
+	if err != nil {
+		t.Fatalf("service: %v", err)
+	}
+	return svc, cfg
+}
+
+func heartbeatSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+func heartbeatAlive(path string) bool {
+	s1 := heartbeatSize(path)
+	time.Sleep(300 * time.Millisecond)
+	return heartbeatSize(path) > s1
+}
+
+func heartbeatDead(path string) bool {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s1 := heartbeatSize(path)
+		time.Sleep(250 * time.Millisecond)
+		if s1 > 0 && heartbeatSize(path) == s1 {
+			return true
+		}
+	}
+	return false
+}
+
+// killHeldChild is a test backstop: if a runtime record exists
+// for the instance, end that process from outside so a failed
+// assertion can never leak a fake browser (a leftover child
+// keeps the test binary locked on Windows).
+func killHeldChild(t *testing.T, cfg config.Config, instanceID string) {
+	t.Helper()
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		return
+	}
+	defer func() { _ = db.Close() }()
+	rt, err := store.New(db).GetInstanceRuntime(t.Context(), instanceID)
+	if err != nil {
+		return
+	}
+	if p, ferr := os.FindProcess(rt.PID); ferr == nil {
+		_ = p.Kill()
+	}
+}
+
+// Verification fails for a real child that CAN be closed
+// gracefully (window on Windows, SIGTERM disposition on Unix):
+// the abort confirms the real exit — the heartbeat stops — and
+// stays an ordinary start failure: stopped, no record.
+func TestRealStartAbortGracefulCloseExitsChild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-process test skipped in -short mode")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, cfg := realServiceWithLauncher(t, exeMismatchLauncher{Launcher: runner.System()})
+	registerExecutable(t, cfg, "self-browser", exe)
+	hb := filepath.Join(t.TempDir(), "heartbeat.log")
+	t.Setenv("DEBROWSER_FAKE_BROWSER", "1")
+	t.Setenv("DEBROWSER_FAKE_HEARTBEAT", hb)
+	if runtime.GOOS == "windows" {
+		t.Setenv("DEBROWSER_FAKE_WINDOW", "1")
+	}
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "中止真实关闭", BrowserID: "self-browser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer killHeldChild(t, cfg, inst.ID)
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Fatal("start succeeded although the inspected executable cannot match the registration")
+	}
+	got, err := svc.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusStopped {
+		t.Fatalf("status = %q, want stopped after a confirmed-exit abort", got.Status)
+	}
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record held after a confirmed exit: %v", err)
+	}
+	if !heartbeatDead(hb) {
+		t.Fatal("the aborted child is still running (heartbeat continues) — the close did not really exit it")
+	}
+}
+
+// Verification fails for a real child that does NOT react to
+// the graceful close (windowless on Windows, so WM_CLOSE has
+// nowhere to go; ignoring SIGTERM on Unix): its exit cannot be
+// confirmed, so the instance is held at "unknown" with a
+// complete runtime record while the child provably keeps
+// running (heartbeat continues). Once the child is gone, a
+// restart's reconciliation clears the hold.
+func TestRealStartAbortUnconfirmedExitHoldsUnknown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-process test skipped in -short mode")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, cfg := realServiceWithLauncher(t, exeMismatchLauncher{Launcher: runner.System()})
+	registerExecutable(t, cfg, "self-browser", exe)
+	hb := filepath.Join(t.TempDir(), "heartbeat.log")
+	t.Setenv("DEBROWSER_FAKE_BROWSER", "1")
+	t.Setenv("DEBROWSER_FAKE_HEARTBEAT", hb)
+	if runtime.GOOS != "windows" {
+		t.Setenv("DEBROWSER_FAKE_IGNORE_TERM", "1")
+	}
+	// On Windows no DEBROWSER_FAKE_WINDOW: the child is
+	// windowless, so the graceful close cannot reach it.
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "中止无法确认退出", BrowserID: "self-browser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer killHeldChild(t, cfg, inst.ID)
+	err = svc.StartInstance("", inst.ID)
+	if err == nil {
+		t.Fatal("start succeeded although the inspected executable cannot match the registration")
+	}
+	if !strings.Contains(err.Error(), "无法确认") {
+		t.Fatalf("error = %v, want it to state the exit could not be confirmed", err)
+	}
+	got, err := svc.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusUnknown {
+		t.Fatalf("status = %q, want unknown while the child's exit is unconfirmed", got.Status)
+	}
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	rt, rerr := store.New(db).GetInstanceRuntime(t.Context(), inst.ID)
+	if rerr != nil {
+		t.Fatalf("runtime record missing for the held instance: %v", rerr)
+	}
+	if rt.ProcessCreatedAt == 0 {
+		t.Fatal("held record has no creation time; this launch captured a complete identity")
+	}
+	if !heartbeatAlive(hb) {
+		t.Fatal("heartbeat stopped — the child is gone, so the unknown hold has no basis")
+	}
+	if err := svc.StartInstance("", inst.ID); err == nil {
+		t.Error("second start allowed while the exit is unconfirmed")
+	}
+	// End the child from outside; a restart must then clear the
+	// record and report the instance stopped.
+	p, ferr := os.FindProcess(rt.PID)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	if kerr := p.Kill(); kerr != nil {
+		t.Fatalf("cleanup kill: %v", kerr)
+	}
+	// "Gone" must be established, not assumed: a just-killed
+	// child can briefly linger as an unreaped zombie whose
+	// command line is already unreadable — correctly judged
+	// unknown — so wait until inspection reports it gone.
+	sys := runner.System()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, ierr := sys.Inspect(rt.PID); errors.Is(ierr, runner.ErrProcessGone) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child still inspectable 3s after being killed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	fresh, err := NewInstanceService(db, cfg.Layout, slog.Default())
+	if err != nil {
+		t.Fatalf("fresh service: %v", err)
+	}
+	got, err = fresh.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.StatusStopped {
+		t.Fatalf("after restart with the child gone: status = %q, want stopped", got.Status)
+	}
+	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("runtime record not cleared after the child disappeared: %v", err)
+	}
 }

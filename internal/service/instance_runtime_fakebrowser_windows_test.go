@@ -11,6 +11,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// ignoreCloseSignals is a no-op on Windows: the runner's
+// graceful close there is WM_CLOSE, and the "does not react"
+// scenario is covered by running the fake browser windowless.
+func ignoreCloseSignals() {}
+
 // On Windows the fake browser needs a real top-level window: the
 // runner's graceful close delivers WM_CLOSE to it, exactly like a
 // user closing a browser window. With DEBROWSER_FAKE_WINDOW=1 the

@@ -22,6 +22,7 @@ func TestMain(m *testing.M) {
 }
 
 func fakeBrowserMain() {
+	ignoreCloseSignals()
 	if f := os.Getenv("DEBROWSER_FAKE_ARGS_FILE"); f != "" {
 		_ = os.WriteFile(f, []byte(strings.Join(os.Args, "\x00")), 0o644)
 	}
