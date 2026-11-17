@@ -1,91 +1,110 @@
 # DeBrowser 开发指南
 
-## 前置条件
+本文档是开发环境、命令、测试、构建与 Git 流程的唯一记录。工程规则以 [AGENTS.md](../AGENTS.md) 为准；系统架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，数据库规则见 [DATABASE.md](DATABASE.md)，阶段状态见 [ROADMAP.md](ROADMAP.md)。
+
+## 开发环境要求
 
 目标平台：**Windows 11 x64**。
 
 | 工具 | 版本 | 说明 |
 | --- | --- | --- |
 | Go | 1.26.x | Wails v3.0.0 要求 Go 1.26 或更新 |
-| Node.js | 22 LTS 或更新 | 包含 npm；用于前端与 Vite |
+| Node.js | 22 LTS 或更新 | 含 npm；用于前端与 Vite（CI 使用 Node 22） |
 | Wails CLI | v3.0.0 | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0` |
-| Task（可选） | 近期任意版本 | 脚手架工作流是 Taskfile：https://taskfile.dev |
-| WebView2 运行时 | — | Windows 11 已预装 |
 | Git | 近期任意版本 | |
+| WebView2 运行时 | — | Windows 11 已预装 |
+| Task（可选） | 近期任意版本 | Taskfile 工作流：https://taskfile.dev |
 
 用 `wails3 doctor` 检查本地环境。
 
-## 开始开发
+## 获取项目
 
 ```powershell
 git clone https://github.com/onbeee/DeBrowser.git
 cd DeBrowser
-git checkout feature/<your-feature>   # 永不直接在 main 上工作
+git checkout -b feature/<your-feature>   # 从最新 main 创建功能分支，永不直接在 main 上工作
 cd frontend; npm install; cd ..
-wails3 dev                            # 开发模式：前端热重载，后端自动重启
+```
+
+## 启动开发环境
+
+```powershell
+wails3 dev   # 开发模式：前端热重载，后端自动重启
 ```
 
 ## 环境变量
 
 | 变量 | 作用 |
 | --- | --- |
-| `DEBROWSER_APP_ROOT` | 覆盖应用根目录（仅开发/测试用；默认是可执行文件所在目录）。全部数据路径都由它派生。 |
+| `DEBROWSER_APP_ROOT` | 覆盖应用根目录（仅开发/测试用；默认是可执行文件所在目录）。全部数据路径都由它派生 |
 | `DEBROWSER_LOG_LEVEL` | `debug` / `info` / `warn` / `error`（默认 `info`） |
 
-## 常用任务
+## 常用开发命令
+
+修改 Go 服务后，在仓库根目录重新生成 bindings（生成物提交进仓库，CI 会校验一致性）：
 
 ```powershell
-task build            # 通过 build/windows/Taskfile.yml 做 Windows x64 生产构建
-task package          # NSIS 安装包（需要 makensis）
-wails3 generate bindings -clean=true -ts -i   # 修改 Go 服务后重新生成 frontend/bindings（若提交的绑定与生成结果不一致，CI 会失败）
+wails3 generate bindings -clean=true -ts -i
 ```
 
-完整的 `task build` 还会生成 Windows 图标与 `.syso` 资源，这需要 `build/appicon.png`（一张 1024×1024 的 PNG 应用图标）。该二进制资源**尚未进入仓库**——见下方「已知限制」。在它补齐之前，生成 Wails 的示例图标作为占位：在 `build/` 目录内运行 `wails3 generate icons -example`，这正是 CI 的做法。
-
-## 数据层（Stage 2）
-
-- 结构变更以新文件形式进入 `internal/database/migrations/`（`NNNN_name.sql`，只追加——永不编辑已合并的 migration）。
-- 核心模型的全部 SQL 属于 `internal/store`；业务代码使用 repository 与 `Store.WithTx` 做多行原子操作，不得把裸 SQL 散落到各个包中。
-- 测试必须使用 `t.TempDir()` 数据库；永不让测试（或用生产代码路径做的人工实验）指向真实用户数据库。
-
-## 检查（打开 PR 之前运行）
+前端命令（在 `frontend/` 目录）：
 
 ```powershell
-gofmt -l .                       # 必须无任何输出
+npm run dev          # 仅前端的 Vite 开发服务器（常规开发请用 wails3 dev）
+npm test             # 前端单元测试（node --test）
+npm run typecheck    # tsc --noEmit
+npm run build        # 前端生产构建（tsc + vite build）
+```
+
+## 测试与质量检查
+
+打开 PR 之前运行：
+
+```powershell
+gofmt -l .            # 必须无任何输出
 go vet ./...
 go test ./...
 cd frontend
-npm run typecheck                # tsc --noEmit
-npm run build                    # 前端生产构建
+npm test
+npm run typecheck
+npm run build
 cd ..
 ```
 
-## CI
+测试约定：
 
-GitHub Actions（`.github/workflows/ci.yml`）在 Windows x64 runner（`windows-latest`）上运行，触发条件为向 `main`/`develop` 的推送以及每一个 Pull Request：
+- Go 测试必须使用 `t.TempDir()` 数据库；永不让测试（或用生产代码路径做的人工实验）指向真实用户数据库。
+- bindings 生成后不要再修改导出服务方法的注释，否则生成结果会与已提交的 bindings 不一致。
 
-1. Go 格式检查（`gofmt`）
-2. 前端安装、绑定生成、类型检查与生产构建
-3. `go vet ./...` 与 `go test ./...`
-4. 安装 Wails CLI v3.0.0，生成占位图标（见下），并运行官方完整的 `wails3 build` 做 Windows x64 构建（绑定 → 前端 → 图标 → `.syso` → Go 构建）
-5. 把构建出的可执行文件作为 workflow artifact 上传以供评审
+### CI
 
-任何内容都不会自动发布；发布是人工批准的步骤（AGENTS.md 第 8 节）。
+GitHub Actions（`.github/workflows/ci.yml`）在 Windows x64 runner（`windows-latest`）上运行，触发条件为向 `main`/`develop` 的推送以及每一个 Pull Request。步骤依次为：Go 格式检查、安装 Wails CLI、前端依赖安装、生成 bindings 并校验与已提交版本一致、界面语言检查（仅简体中文）、前端类型检查、前端单元测试、前端生产构建、`go vet`、Go 全部测试、生成占位图标（见「已知限制」）、`wails3 build` 完整 Windows x64 构建、上传构建产物（artifact 名 `DeBrowser-windows-amd64`）。
 
-版本兼容性：Go 1.26 + Wails v3.0.0（第一个要求 Go 1.26 的 Wails 版本）、Node.js 22 LTS 配 Vite 8 / React 18——与 `go.mod` 和 `frontend/package-lock.json` 中锁定的版本相同。
+任何内容都不会自动发布；发布是人工批准的步骤。
 
-## Git 工作流（AGENTS.md 第 7 节）
+## 构建与产物
 
-- `main` 是稳定的生产分支；`develop` 是集成分支；功能在 `feature/*` 分支上开发。
-- 每个功能通过 Pull Request 交付，且自动化检查必须全绿。
-- 未经批准不得强推或删除分支；不得直接向 `main` 提交；未经项目负责人明确批准不得合并 PR。
+```powershell
+task build      # Windows x64 生产构建（经 build/windows/Taskfile.yml）
+task package    # NSIS 安装包（需要 makensis；尚未在 CI 中运行）
+```
+
+Windows 构建产物只包含应用可执行文件（`bin/*.exe`）。没有任何代理核心或其他 sidecar 二进制被打包或下载：应用在运行时不安装、不启动任何外部核心。
+
+## Git 与 PR 工作流
+
+- 从最新 `main` 创建 `feature/*` 分支；一个阶段一个 PR；不直接向 `main` 提交。
+- PR 的自动化检查必须全绿；未经项目负责人明确批准不得合并 PR。
+- 未经批准不得强推、不得删除分支。
+
+## 开发注意事项
+
+- 结构变更以新文件进入 `internal/database/migrations/`（`NNNN_name.sql`，只追加，永不编辑已合并的 migration）；迁移规则与数据保护见 [DATABASE.md](DATABASE.md)。
+- 核心模型的全部 SQL 属于 `internal/store`；业务代码使用 repository 与 `Store.WithTx` 做多行原子操作，不把裸 SQL 散落到各个包。
+- 用户数据库、浏览器 Profile、凭据与订阅 URL 永不提交到仓库（`.gitignore` 已覆盖数据库与构建产物）。
+- 界面只使用简体中文（CI 有专门检查步骤）；主题颜色一律使用设计 token（CSS 变量），不硬编码颜色。
 
 ## 已知限制
 
-- **应用图标**：`build/appicon.png` 与 `build/windows/icon.ico` 是二进制资源，尚未提交（两者都作为生成文件被 git 忽略）。CI 与本地构建生成 Wails 的示例图标作为占位，使完整构建（包括 `.syso` 版本资源）能端到端跑通；占位图标不是 DeBrowser 的正式品牌图标。正式图标就绪后，用 `git add -f build/appicon.png` 添加，并从 `.gitignore` 中移除两行图标规则。
-- NSIS 安装包任务（`task package`）已定义，但尚未在 CI 中实际运行。
-- 业务模块现状：实例元数据管理已交付（Stage 3）；实例真实运行已实施（Stage 9B，待评审与 Windows 11 实机验收）：实例文件（`data/profiles/` 下文件夹）随创建实际建立（默认顺序编号 P-<n> 永不复用 / 自定新建 / 选择保留文件夹），编辑可重命名或更换实例文件，启动以实例文件为 `--user-data-dir` 启动关联内核的真实进程并按 PID + 创建时间 + 可执行路径 + 命令行核验进程身份，关闭走优雅关闭，DeBrowser 重启后重新识别仍在运行的实例（无法确认时进入「无法确认」安全保持）；浏览器内核页面已交付（Stage 9A）：用户手动选择程序可执行文件、DeBrowser 只登记路径的纯路径登记（不做任何文件检查），页面布局与浏览器实例页一致（顶部说明 +「添加内核」按钮、下方统一列表），DeBrowser 独立内核的下载/安装/管理功能已按产品决定取消（PR #11）；创建/编辑实例时可按稳定 ID 关联一个已登记内核（路径由服务按登记实时解析，登记改路径即时生效；被实例引用的登记禁止移除且不级联删除实例）；统一自动记录系统已交付（随 PR #10：统一事件模型与 operation_id 关联、用户可配置的日志总容量与最旧优先自动清理、数据管理页四类记录导出，见 `docs/ARCHITECTURE.md` 的日志一节；日志是唯一的记录系统，没有独立操作审计模块与诊断导出）；界面结构与视觉系统已统一（PR #11：顶部栏为页面标题唯一所有者、无底部固定状态栏、浅色/暖色/深色三套主题变量、首次启动默认浅色且用户选择持久化）；书签前端、多开同步、备份界面属于后续阶段——见 `docs/ROADMAP.md`。代理相关功能已在 PR #9 范围清理中移除，不再是后续阶段内容。
-
-## 构建产物内容
-
-Windows 构建产物只包含应用可执行文件（`bin/*.exe`）。没有任何代理核心或其他 sidecar 二进制被打包、下载或由 CI 验证：Mihomo 核心集成已在 PR #9 范围清理中移除，应用在运行时既不安装也不启动任何核心。
+- **应用图标**：`build/appicon.png`（1024×1024 PNG）是二进制品牌资源，尚未进入仓库（与 `build/windows/icon.ico` 一起作为生成文件被 git 忽略）。CI 与本地构建在 `build/` 目录运行 `wails3 generate icons -example` 生成 Wails 示例图标作为占位，使完整构建（含 `.syso` 版本资源）能端到端跑通；占位图标不是正式品牌图标。正式图标就绪后用 `git add -f build/appicon.png` 添加，并移除 `.gitignore` 中两行图标规则。
+- **业务模块现状**：以 [ROADMAP.md](ROADMAP.md) 为准。当前边界简述：书签只有数据层（前端在 Stage 9C 接入）；过去的代理服务器管理、订阅管理与配置导入、Mihomo 核心运行时等历史实现已在 PR #9 中移除；代理配置 Stage 6C 仍属于后续开发计划，当前尚未实施，具体状态与范围见 [ROADMAP.md](ROADMAP.md)。
