@@ -107,4 +107,4 @@ Windows 构建产物只包含应用可执行文件（`bin/*.exe`）。没有任�
 ## 已知限制
 
 - **应用图标**：`build/appicon.png`（1024×1024 PNG）是二进制品牌资源，尚未进入仓库（与 `build/windows/icon.ico` 一起作为生成文件被 git 忽略）。CI 与本地构建在 `build/` 目录运行 `wails3 generate icons -example` 生成 Wails 示例图标作为占位，使完整构建（含 `.syso` 版本资源）能端到端跑通；占位图标不是正式品牌图标。正式图标就绪后用 `git add -f build/appicon.png` 添加，并移除 `.gitignore` 中两行图标规则。
-- **业务模块现状**：以 [ROADMAP.md](ROADMAP.md) 为准。当前边界简述：书签只有数据层（前端在 Stage 9C 接入）；代理相关功能已在 PR #9 范围清理中移除，不是后续阶段内容。
+- **业务模块现状**：以 [ROADMAP.md](ROADMAP.md) 为准。当前边界简述：书签只有数据层（前端在 Stage 9C 接入）；过去的代理服务器管理、订阅管理与配置导入、Mihomo 核心运行时等历史实现已在 PR #9 中移除；代理配置 Stage 6C 仍属于后续开发计划，当前尚未实施，具体状态与范围见 [ROADMAP.md](ROADMAP.md)。
