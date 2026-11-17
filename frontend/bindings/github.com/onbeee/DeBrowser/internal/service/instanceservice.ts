@@ -93,10 +93,12 @@ export function GetInstance(id: string): $CancellablePromise<model$0.Instance> {
 
 /**
  * InstanceBookmarkAccess resolves an instance for bookmark file
- * operations: the instance, its absolute profile directory and
- * the gate state. It is a status query only — it does NOT hold
- * the instance. Callers that actually read or write the file must
- * use acquireBookmarkAccess so no start/stop can interleave.
+ * operations: the instance, its absolute profile directory and the
+ * gate state. The gate reuses the runtime's effective status —
+ * never the persisted status alone — plus the runtime record: an
+ * instance in the persisted "error" state with no runtime record
+ * has no process (its launch failed before one existed), so it
+ * counts as confirmed stopped; with a record it stays unknown.
  */
 export function InstanceBookmarkAccess(id: string): $CancellablePromise<[model$0.Instance, string, string]> {
     return $Call.ByID(1380432297, id);

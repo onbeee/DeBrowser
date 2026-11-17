@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -428,5 +429,57 @@ func TestLibraryStoreRoundTrip(t *testing.T) {
 	// children first.
 	if err := st.DeleteBookmarkNode(c, n.ID); err == nil {
 		t.Error("folder with children deleted at store level")
+	}
+}
+
+// The gate's "error state with no runtime record counts as
+// stopped" rule must only apply when the runtime query PROVES
+// there is no record (store.ErrNotFound). A runtime query that
+// fails for any other reason must never be read as "no process":
+// the instance stays unknown and nothing is read or written.
+func TestRuntimeQueryErrorIsNotConfirmedStopped(t *testing.T) {
+	bs, isvc, db := bookmarkTestServices(t)
+	inst, err := isvc.CreateInstance("", CreateInstanceInput{Name: "gate-err", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := profileDirOf(t, bs, inst)
+	writeProfileBookmarks(t, dir, bookmarkFixture)
+	ctx := context.Background()
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE browser_instances SET status = 'error' WHERE id = ?`, inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Control: error state + provably no runtime record = stopped.
+	if _, _, gate, err := isvc.InstanceBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateStopped {
+		t.Fatalf("control gate = %q err %v, want stopped", gate, err)
+	}
+	// Break the runtime query itself (not a NotFound): the gate
+	// must fall back to unknown, and sync must skip the instance
+	// without touching its file.
+	if _, err := db.SQL().ExecContext(ctx,
+		`ALTER TABLE instance_runtime RENAME TO instance_runtime_broken`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, gate, err := isvc.InstanceBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateUnknown {
+		t.Fatalf("broken-query gate = %q err %v, want unknown", gate, err)
+	}
+	node, err := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := bs.SyncBookmarks("", []string{node.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Instances) != 1 || res.Instances[0].Status != "skipped" {
+		t.Fatalf("sync with broken runtime query = %+v, want one skipped instance", res.Instances)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "Bookmarks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != bookmarkFixture {
+		t.Fatal("bookmarks file was modified despite the unconfirmable state")
 	}
 }

@@ -54,11 +54,6 @@ type InstanceService struct {
 	procs      map[string]*procWatch
 	transient  map[string]model.InstanceStatus
 	unverified map[string]bool
-	// bookmarkHolds marks instances with a bookmark file operation
-	// in flight (Stage 9C mutex): while held, the instance cannot
-	// be started or stopped, and no second bookmark operation can
-	// begin. Guarded by rtMu like the rest of the runtime state.
-	bookmarkHolds map[string]bool
 	// reconcileEvents accumulates the outcomes of the startup
 	// runtime reconciliation (which runs in the constructor,
 	// before the Auditor is wired) so ReportReconciliation can
@@ -92,14 +87,13 @@ func NewInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger) 
 
 func newInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger, launcher runner.Launcher) (*InstanceService, error) {
 	s := &InstanceService{
-		store:         store.New(db),
-		layout:        layout,
-		log:           log,
-		launcher:      launcher,
-		procs:         map[string]*procWatch{},
-		transient:     map[string]model.InstanceStatus{},
-		unverified:    map[string]bool{},
-		bookmarkHolds: map[string]bool{},
+		store:      store.New(db),
+		layout:     layout,
+		log:        log,
+		launcher:   launcher,
+		procs:      map[string]*procWatch{},
+		transient:  map[string]model.InstanceStatus{},
+		unverified: map[string]bool{},
 	}
 	s.deleteRecord = s.store.DeleteInstance
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

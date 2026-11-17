@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bookmark,
   ChevronDown,
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   BookmarkService,
+  InstanceService,
   type BookmarkInstanceInfo,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { BookmarkNode } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
@@ -21,8 +22,10 @@ import {
   buildTree,
   folderOptions,
   searchVisibleIds,
+  notStoppedCount,
   selectionScope,
   siblingIds,
+  syncEntryDecision,
   visibleRows,
   type VisibleRow,
 } from "./bookmarksLogic";
@@ -60,8 +63,89 @@ export default function BookmarksPage() {
   const [editNode, setEditNode] = useState<BookmarkNode | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
+  // 同步入口状态：idle 无窗口；confirm 显示「关闭实例」确认窗口；
+  // closing 正在关闭全部运行中实例并等待确认停止。
+  const [syncGate, setSyncGate] = useState<"idle" | "confirm" | "closing">("idle");
+  const closingRef = useRef(false);
 
   const [dragId, setDragId] = useState<string | null>(null);
+
+  // 点击「同步」：先检查全部实例的生效状态。全部确认停止才直接
+  // 打开同步弹窗；存在运行类实例时先弹确认窗口；只有状态无法
+  // 确认的实例时关闭也无济于事，直接提示。
+  const handleSyncClick = async () => {
+    setError(null);
+    setNotice(null);
+    setBusy("sync-check");
+    try {
+      const list = (await InstanceService.ListInstances()) ?? [];
+      const statuses = list.map((i) => i.status);
+      const decision = syncEntryDecision(statuses);
+      if (decision === "open") {
+        setSyncOpen(true);
+      } else if (decision === "confirm") {
+        setSyncGate("confirm");
+      } else {
+        setError(
+          "有 " + notStoppedCount(statuses) + " 个浏览器实例的状态无法确认停止，无法打开书签同步。请先在浏览器实例页面处理后再试。",
+        );
+      }
+    } catch (err) {
+      setError("检查浏览器实例状态失败：" + errText(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // 确认窗口的「关闭实例」：用既有正常关闭服务逐个关闭运行中
+  // 实例，等待启动/关闭中的实例走完现有流程，反复复查，直到
+  // 全部确认停止才打开同步弹窗；超时或仍有实例未停止时明确
+  // 失败，不打开弹窗、不修改任何书签。
+  const closeInstancesThenSync = async () => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setSyncGate("closing");
+    try {
+      const opId = newOperationId();
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const list = (await InstanceService.ListInstances()) ?? [];
+        for (const inst of list) {
+          if (inst.status === "running") {
+            try {
+              await InstanceService.StopInstance(opId, inst.id);
+            } catch {
+              // 单个关闭失败不中断其余实例，最终以复查结果为准。
+            }
+          }
+        }
+        const fresh = (await InstanceService.ListInstances()) ?? [];
+        const statuses = fresh.map((i) => i.status);
+        if (statuses.every((st) => st === "stopped")) {
+          setSyncGate("idle");
+          setSyncOpen(true);
+          void reload();
+          return;
+        }
+        const transitioning = statuses.some(
+          (st) => st === "running" || st === "starting" || st === "stopping",
+        );
+        if (!transitioning || Date.now() > deadline) {
+          setSyncGate("idle");
+          setError(
+            "仍有 " + notStoppedCount(statuses) + " 个浏览器实例未能关闭或无法确认停止，无法打开书签同步。",
+          );
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    } catch (err) {
+      setSyncGate("idle");
+      setError("关闭浏览器实例失败：" + errText(err));
+    } finally {
+      closingRef.current = false;
+    }
+  };
 
   const reload = useCallback(async () => {
     try {
@@ -221,7 +305,7 @@ export default function BookmarksPage() {
           type="button"
           className="flex items-center gap-1 rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm text-(--text-main) disabled:opacity-50"
           disabled={busy !== null}
-          onClick={() => setSyncOpen(true)}
+          onClick={() => void handleSyncClick()}
         >
           <Send size={15} /> 同步
         </button>
@@ -409,6 +493,50 @@ export default function BookmarksPage() {
                 删除
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {syncGate !== "idle" && (
+        <div
+          className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4"
+          onClick={() => {
+            // 点击窗口外区域等同于取消（关闭处理中不允许取消）。
+            if (syncGate === "confirm") setSyncGate("idle");
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-(--panel-bg) p-4 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold">同步前关闭实例</h3>
+            {syncGate === "closing" ? (
+              <p className="mt-2 flex items-center gap-2 text-sm text-(--text-dim)">
+                <Loader2 size={15} className="animate-spin" /> 正在关闭浏览器实例，请稍候……
+              </p>
+            ) : (
+              <>
+                <p className="mt-2 text-sm text-(--text-dim)">
+                  检测到仍有浏览器实例正在运行，书签同步前需要先关闭所有浏览器实例。
+                </p>
+                <div className="mt-4 flex flex-col gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md bg-(--accent) px-3 py-1.5 text-sm text-white"
+                    onClick={() => void closeInstancesThenSync()}
+                  >
+                    关闭实例
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm"
+                    onClick={() => setSyncGate("idle")}
+                  >
+                    取消
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -352,14 +352,13 @@ func (s *BookmarkService) ListBookmarkInstances() ([]BookmarkInstanceInfo, error
 	out := make([]BookmarkInstanceInfo, 0, len(list))
 	for _, inst := range list {
 		info := BookmarkInstanceInfo{ID: inst.ID, Name: inst.Name, BookmarkCount: -1}
-		_, dir, gate, release, gerr := s.instances.acquireBookmarkAccess(inst.ID)
+		_, dir, gate, gerr := s.instances.InstanceBookmarkAccess(inst.ID)
 		if gerr == nil && gate == BookmarkGateStopped {
 			unlock := chromebookmarks.LockProfile(dir)
 			if file, lerr := chromebookmarks.Load(dir); lerr == nil {
 				info.BookmarkCount = file.CountBookmarks()
 			}
 			unlock()
-			release()
 		}
 		out = append(out, info)
 	}
@@ -468,7 +467,7 @@ func (s *BookmarkService) syncBookmarks(nodeIDs []string, instanceIDs []string) 
 }
 
 func (s *BookmarkService) syncToInstance(instanceID string, tops []model.BookmarkNode, children map[string][]model.BookmarkNode) SyncInstanceResult {
-	inst, dir, gate, release, err := s.instances.acquireBookmarkAccess(instanceID)
+	inst, dir, gate, err := s.instances.InstanceBookmarkAccess(instanceID)
 	res := SyncInstanceResult{InstanceID: instanceID, InstanceName: inst.Name}
 	if err != nil {
 		res.Status = "failed"
@@ -485,12 +484,7 @@ func (s *BookmarkService) syncToInstance(instanceID string, tops []model.Bookmar
 		res.Status = "skipped"
 		res.Reason = "实例运行状态无法确认，已跳过以保护书签数据"
 		return res
-	case BookmarkGateBusy:
-		res.Status = "skipped"
-		res.Reason = "实例正在进行其他操作，请稍后重试"
-		return res
 	}
-	defer release()
 	unlock := chromebookmarks.LockProfile(dir)
 	defer unlock()
 	loaded, err := chromebookmarks.Load(dir)

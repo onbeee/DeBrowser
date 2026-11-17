@@ -10,6 +10,8 @@ import {
   searchVisibleIds,
   siblingIds,
   folderOptions,
+  syncEntryDecision,
+  notStoppedCount,
   type LibraryNodeLike,
 } from "../src/pages/bookmarksLogic.ts";
 
@@ -82,4 +84,19 @@ test("siblingIds and folderOptions", () => {
     { id: "f1", name: "Work", depth: 0 },
     { id: "f2", name: "Sub", depth: 1 },
   ]);
+});
+
+test("syncEntryDecision gates the sync dialog on instance states", () => {
+  // All confirmed stopped (or no instances at all): open directly.
+  assert.equal(syncEntryDecision([]), "open");
+  assert.equal(syncEntryDecision(["stopped", "stopped"]), "open");
+  // Any running/transitioning instance: confirmation first.
+  assert.equal(syncEntryDecision(["stopped", "running"]), "confirm");
+  assert.equal(syncEntryDecision(["starting"]), "confirm");
+  assert.equal(syncEntryDecision(["stopping", "unknown"]), "confirm");
+  // Only unconfirmable states: closing cannot help, do not open.
+  assert.equal(syncEntryDecision(["unknown"]), "blocked");
+  assert.equal(syncEntryDecision(["stopped", "error"]), "blocked");
+  assert.equal(notStoppedCount(["stopped", "running", "unknown"]), 2);
+  assert.equal(notStoppedCount(["stopped"]), 0);
 });
