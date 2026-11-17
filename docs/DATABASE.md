@@ -29,7 +29,7 @@
 
 ## 当前有效表
 
-以下六张表是当前产品实际使用的结构（`app_settings` 例外，见其说明）。
+当前产品实际使用的数据表共五张：`browser_instances`、`bookmarks`、`external_browsers`、`instance_runtime`、`profile_counter`。
 
 ### `browser_instances`
 
@@ -70,9 +70,11 @@ DeBrowser 重启后的重新识别逐项核验记录（PID 存在、创建时间
 
 默认实例文件编号的持久计数器（单行，`next_seq` 只增不减）。删除实例或实例文件都不会让编号被重新分配；分配时服务还会跳过已被绑定或已存在于磁盘的候选名。
 
+## 遗留表（当前未使用）
+
 ### `app_settings`
 
-应用级键值表（migration 0001）。**当前没有任何生产代码读写此表**（其 store 访问器已在 PR #9 清理中移除）；表中可能存在的历史键（如已取消 Stage 7 的 `proxy.port_range`）只是既有数据库中的历史数据。面向用户的设置实际存放在 `config/settings.json`（语言、主题、日志总容量 `logCapacityBytes`），与此表无关。
+应用级键值表（migration 0001）。**当前没有任何生产代码读写此表**（其 store 访问器已在 PR #9 清理中移除），因此不计入当前实际使用的数据表。表中可能存在的历史键（如已取消 Stage 7 的 `proxy.port_range`）只是既有数据库中的历史数据。面向用户的设置实际存放在 `config/settings.json`（语言、主题、日志总容量 `logCapacityBytes`），与此表无关。
 
 ## 历史兼容结构
 
