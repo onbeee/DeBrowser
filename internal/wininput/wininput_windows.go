@@ -116,15 +116,21 @@ var (
 // injected input can never be re-captured.
 func StartCapture(handler func(Event)) error {
 	captureMu.Lock()
-	defer captureMu.Unlock()
 	if captureHandler != nil {
+		captureMu.Unlock()
 		return nil
 	}
 	captureHandler = handler
 	hookReady = make(chan error, 1)
+	captureMu.Unlock()
+	// The lock must NOT be held across this wait: the hook thread
+	// takes captureMu to record its thread id before it can
+	// report readiness (holding it here deadlocks the start).
 	go hookThread()
 	if err := <-hookReady; err != nil {
+		captureMu.Lock()
 		captureHandler = nil
+		captureMu.Unlock()
 		return err
 	}
 	return nil
