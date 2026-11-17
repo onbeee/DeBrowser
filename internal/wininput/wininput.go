@@ -141,3 +141,14 @@ type Hit struct {
 	// WindowRect is the top-level window's screen rectangle.
 	WindowRect Rect
 }
+
+// WindowInfo describes one top-level window of a process, for
+// matching a window on the master instance to its counterpart
+// on a follower instance.
+type WindowInfo struct {
+	HWND    uintptr
+	Class   string
+	Owner   uintptr
+	Rect    Rect
+	Visible bool
+}

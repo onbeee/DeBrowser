@@ -174,3 +174,122 @@ func TestFetchVersionRejectsNonCDP(t *testing.T) {
 		t.Fatal("dial to a non-CDP service must fail")
 	}
 }
+
+// TestEventHandlerCanCallSameClient reproduces the Stage 10
+// review deadlock: the server pushes a target-destroyed event,
+// and the handler reacts by issuing commands on the SAME client
+// (exactly what re-attaching to a remaining page does). If event
+// delivery ran inside the read loop, those commands could never
+// be answered and would die on their context timeout.
+func TestEventHandlerCanCallSameClient(t *testing.T) {
+	f := newFakeCDPServer(t)
+	// Extend the fake server: it already answers commands; here
+	// we need it to push an event. The base fake has no push
+	// hook, so this test uses its own server below.
+	_ = f
+	srv := newEventPushServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, srv.port(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	done := make(chan error, 1)
+	client.SetEventHandler(func(ev Event) {
+		if ev.Method != "Target.targetDestroyed" {
+			return
+		}
+		callCtx, callCancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer callCancel()
+		targets, err := client.Targets(callCtx)
+		if err != nil {
+			done <- err
+			return
+		}
+		if len(targets) == 0 {
+			done <- fmt.Errorf("no targets left to re-attach")
+			return
+		}
+		_, err = client.Attach(callCtx, targets[0].ID)
+		done <- err
+	})
+	// Ask the server (via a real command round-trip) to push the
+	// event, then wait for the handler's re-attach to complete.
+	if _, err := client.Call(ctx, "", "Test.pushDestroyed", nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handler re-attach failed (deadlock?): %v", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("handler never completed: event delivery is blocked")
+	}
+}
+
+// eventPushServer is a fake CDP server that pushes a
+// Target.targetDestroyed event when it receives the
+// "Test.pushDestroyed" command (event first, then the response).
+type eventPushServer struct {
+	*fakeCDPServer
+}
+
+func newEventPushServer(t *testing.T) *eventPushServer {
+	t.Helper()
+	f := &fakeCDPServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/json/version", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"product":              "Chrome/130.0.0.0",
+			"webSocketDebuggerUrl": f.wsURL,
+		})
+	})
+	mux.HandleFunc("/devtools/browser/fake", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		for {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var msg map[string]any
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			if msg["method"] == "Test.pushDestroyed" {
+				ev, _ := json.Marshal(map[string]any{
+					"method": "Target.targetDestroyed",
+					"params": map[string]any{"targetId": "T9"},
+				})
+				if err := conn.Write(r.Context(), websocket.MessageText, ev); err != nil {
+					return
+				}
+			}
+			var result any
+			switch msg["method"] {
+			case "Target.getTargets":
+				result = map[string]any{"targetInfos": []map[string]any{
+					{"targetId": "T1", "type": "page", "url": "https://a.example/"},
+				}}
+			case "Target.attachToTarget":
+				result = map[string]any{"sessionId": "S-T1"}
+			default:
+				result = map[string]any{}
+			}
+			out, _ := json.Marshal(map[string]any{"id": msg["id"], "result": result})
+			if err := conn.Write(r.Context(), websocket.MessageText, out); err != nil {
+				return
+			}
+		}
+	})
+	f.srv = httptest.NewServer(mux)
+	f.wsURL = "ws" + strings.TrimPrefix(f.srv.URL, "http") + "/devtools/browser/fake"
+	t.Cleanup(f.srv.Close)
+	return &eventPushServer{f}
+}

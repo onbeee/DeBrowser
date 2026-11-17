@@ -366,6 +366,34 @@ func TopWindowForPID(pid uint32) (uintptr, bool) {
 // WindowPID returns the process owning a window.
 func WindowPID(hwnd uintptr) uint32 { return windowPID(hwnd) }
 
+// WindowClass returns a window's class name.
+func WindowClass(hwnd uintptr) string { return className(hwnd) }
+
+// ListWindowsForPID enumerates the process's top-level windows
+// (visible and hidden) with class, owner and rectangle.
+func ListWindowsForPID(pid uint32) []WindowInfo {
+	var out []WindowInfo
+	cb := syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
+		if windowPID(hwnd) != pid {
+			return 1
+		}
+		visible, _, _ := procIsWindowVisible.Call(hwnd)
+		info := WindowInfo{
+			HWND:    hwnd,
+			Class:   className(hwnd),
+			Owner:   OwnerWindow(hwnd),
+			Visible: visible != 0,
+		}
+		if r, ok := rectOf(hwnd); ok {
+			info.Rect = r
+		}
+		out = append(out, info)
+		return 1
+	})
+	_, _, _ = procEnumWindows.Call(cb, 0)
+	return out
+}
+
 // OwnerWindow returns the window that owns hwnd (GW_OWNER), or 0.
 func OwnerWindow(hwnd uintptr) uintptr {
 	owner, _, _ := procGetWindow.Call(hwnd, gwOwner)

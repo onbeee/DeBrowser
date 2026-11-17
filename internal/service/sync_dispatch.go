@@ -48,7 +48,9 @@ func (e errorString) Error() string { return string(e) }
 
 // attachEventHandlers wires CDP target-lifecycle events: tabs
 // opened or closed on the master are mirrored to followers, and
-// each peer keeps its own current-target bookkeeping.
+// each peer keeps its own current-target bookkeeping. Handlers
+// run on the CDP client's event goroutine, never inside its read
+// loop, so issuing commands on the same client here is safe.
 func (s *SyncService) attachEventHandlers() {
 	s.mu.Lock()
 	peers := s.peers
@@ -84,8 +86,6 @@ func (s *SyncService) onTargetEvent(peerID string, peer *syncPeer, ev cdp.Event,
 			return
 		}
 		if isMaster {
-			// A tab opened on the master: open the same URL on
-			// every follower and make it their current tab.
 			s.forEachFollower(func(f *syncPeer) {
 				newID, err := f.client.CreateTarget(ctx, info.URL)
 				if err != nil {
@@ -117,26 +117,14 @@ func (s *SyncService) onTargetEvent(peerID string, peer *syncPeer, ev cdp.Event,
 					_ = f.client.CloseTarget(ctx, mapped)
 				}
 			})
-			// The master's current tab may be gone; re-attach to
-			// whatever page remains.
-			peer.mu.Lock()
-			wasCurrent := peer.targetID == destroyed
-			peer.mu.Unlock()
-			if wasCurrent {
-				_ = peer.attachToCurrentPage(ctx)
-			}
-		} else {
-			peer.mu.Lock()
-			wasCurrent := peer.targetID == destroyed
-			peer.mu.Unlock()
-			if wasCurrent {
-				_ = peer.attachToCurrentPage(ctx)
-			}
+		}
+		peer.mu.Lock()
+		wasCurrent := peer.targetID == destroyed
+		peer.mu.Unlock()
+		if wasCurrent {
+			_ = peer.attachToCurrentPage(ctx)
 		}
 	case "Target.targetInfoChanged":
-		// Address-bar navigations (and history traversals) on the
-		// master surface here as URL changes of its current tab:
-		// navigate the followers' corresponding tabs.
 		if !isMaster {
 			return
 		}
@@ -201,14 +189,96 @@ func (s *SyncService) forEachFollower(fn func(*syncPeer)) {
 	}
 }
 
-// ---------- input capture dispatch ----------
+// ---------- input event queue (hook-safe) ----------
 
-// pressedState tracks what the session has pushed down on the
-// followers, so pause/stop can release every key and button.
+// inputEventQueue is the bounded hand-off between the Windows
+// low-level hook callback and the dispatch loop. The hook
+// callback must return immediately — Windows unhooks slow
+// low-level hooks and a blocked callback stalls the user's real
+// input — so push NEVER blocks: when the queue is full it evicts
+// the oldest disposable event. Mouse moves go first, then press
+// events (a lost press leaves nothing stuck; its later release
+// is a harmless no-op). Release events (key up, button up) are
+// evicted only when the queue holds nothing else, because losing
+// one would leave a key or button stuck on every follower.
+type inputEventQueue struct {
+	mu       sync.Mutex
+	items    []wininput.Event
+	capacity int
+	notify   chan struct{}
+	dropped  int
+}
+
+func newInputEventQueue(capacity int) *inputEventQueue {
+	return &inputEventQueue{capacity: capacity, notify: make(chan struct{}, 1)}
+}
+
+// push enqueues one event without ever blocking.
+func (q *inputEventQueue) push(ev wininput.Event) {
+	q.mu.Lock()
+	if len(q.items) >= q.capacity {
+		idx := -1
+		for i, it := range q.items {
+			if it.Kind == wininput.EventMouseMove {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			for i, it := range q.items {
+				if it.Kind == wininput.EventMouseDown || it.Kind == wininput.EventKeyDown {
+					idx = i
+					break
+				}
+			}
+		}
+		if idx < 0 {
+			idx = 0
+		}
+		q.items = append(q.items[:idx], q.items[idx+1:]...)
+		q.dropped++
+	}
+	q.items = append(q.items, ev)
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+// drain removes and returns all currently queued events, in
+// order.
+func (q *inputEventQueue) drain() []wininput.Event {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil
+	}
+	out := q.items
+	q.items = nil
+	return out
+}
+
+func (q *inputEventQueue) droppedCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.dropped
+}
+
+// ---------- pressed-input state (service-owned) ----------
+
+// pressedState records every key and mouse button the session
+// has pushed down on followers and not yet released, per channel
+// (CDP page input vs native UI input). It is owned by the
+// SyncService for the whole session — the dispatcher updates it,
+// pause/stop release from it — so there is exactly one place
+// that knows what needs letting go.
 type pressedState struct {
-	mu      sync.Mutex
-	keys    map[int]bool
-	buttons map[string]bool
+	mu            sync.Mutex
+	cdpKeys       map[int]bool
+	cdpButtons    map[string]bool
+	nativeKeys    map[int]bool
+	nativeButtons map[string]bool
 	// focusContent records whether the master's input focus was
 	// most recently in page content (vs browser chrome), from
 	// the last classified mouse event. Keyboard events carry no
@@ -217,36 +287,46 @@ type pressedState struct {
 	focusContent bool
 }
 
+func newPressedState() *pressedState {
+	return &pressedState{
+		cdpKeys: map[int]bool{}, cdpButtons: map[string]bool{},
+		nativeKeys: map[int]bool{}, nativeButtons: map[string]bool{},
+		focusContent: true,
+	}
+}
+
+// snapshotAndClear returns the pressed sets and resets them.
+func (p *pressedState) snapshotAndClear() (cdpKeys map[int]bool, cdpButtons map[string]bool, nativeKeys map[int]bool, nativeButtons map[string]bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cdpKeys, cdpButtons, nativeKeys, nativeButtons = p.cdpKeys, p.cdpButtons, p.nativeKeys, p.nativeButtons
+	p.cdpKeys = map[int]bool{}
+	p.cdpButtons = map[string]bool{}
+	p.nativeKeys = map[int]bool{}
+	p.nativeButtons = map[string]bool{}
+	return
+}
+
 func (s *SyncService) startDispatch() error {
-	events := make(chan wininput.Event, 256)
+	queue := newInputEventQueue(512)
 	s.mu.Lock()
-	s.events = events
 	ctx, cancel := context.WithCancel(context.Background())
 	s.stopDisp = cancel
+	pressed := s.pressed
 	s.mu.Unlock()
 	if err := wininput.StartCapture(func(ev wininput.Event) {
-		select {
-		case events <- ev:
-		default:
-			// A full queue drops the OLDEST kind of traffic that
-			// is safe to lose: moves. Everything else blocks
-			// briefly rather than breaking press/release pairs.
-			if ev.Kind == wininput.EventMouseMove {
-				return
-			}
-			events <- ev
-		}
+		// Hook callback: enqueue and return. Nothing here may
+		// wait — not on the queue, not on CDP, not on windows.
+		queue.push(ev)
 	}); err != nil {
 		cancel()
 		return err
 	}
-	go s.dispatchLoop(ctx, events, &pressedState{
-		keys: map[int]bool{}, buttons: map[string]bool{}, focusContent: true,
-	})
+	go s.dispatchLoop(ctx, queue, pressed)
 	return nil
 }
 
-func (s *SyncService) dispatchLoop(ctx context.Context, events chan wininput.Event, pressed *pressedState) {
+func (s *SyncService) dispatchLoop(ctx context.Context, queue *inputEventQueue, pressed *pressedState) {
 	var lastPress struct {
 		button string
 		x, y   int32
@@ -257,24 +337,12 @@ func (s *SyncService) dispatchLoop(ctx context.Context, events chan wininput.Eve
 		select {
 		case <-ctx.Done():
 			return
-		case ev := <-events:
-			// Coalesce queued mouse moves: only the newest
-			// position matters.
-			if ev.Kind == wininput.EventMouseMove {
-				drained := true
-				for drained {
-					select {
-					case newer := <-events:
-						if newer.Kind == wininput.EventMouseMove {
-							ev = newer
-						} else {
-							s.handleEvent(newer, pressed, &lastPress)
-						}
-					default:
-						drained = false
-					}
-				}
-			}
+		case <-queue.notify:
+		}
+		for _, ev := range queue.drain() {
+			// Consecutive moves are handled one by one here; the
+			// queue-level eviction already shed stale moves
+			// under load, so no extra coalescing is needed.
 			s.handleEvent(ev, pressed, &lastPress)
 		}
 	}
@@ -303,7 +371,6 @@ func (s *SyncService) handleEvent(ev wininput.Event, pressed *pressedState, last
 		return
 	}
 
-	// Resolve the event's source window and content-ness.
 	if ev.Kind == wininput.EventKeyDown || ev.Kind == wininput.EventKeyUp {
 		fg := wininput.ForegroundWindow()
 		if fg == 0 || wininput.WindowPID(fg) != uint32(masterPID) {
@@ -316,13 +383,6 @@ func (s *SyncService) handleEvent(ev wininput.Event, pressed *pressedState, last
 		inContent := pressed.focusContent
 		pressed.mu.Unlock()
 		if inContent {
-			// Page keys need the master's CURRENT content rect
-			// for wheel-free coordinate-free dispatch; keyboard
-			// events ignore coordinates, so an empty hit with
-			// the content flag is enough — but dispatchPageEvent
-			// maps mouse coordinates only, and for keys it uses
-			// the hit merely for classification. Fetch the real
-			// content rect from the master's window center.
 			if h, ok := contentHitOfMaster(uint32(masterPID)); ok {
 				s.dispatchPageEvent(ev, master, h, pressed, lastPress)
 				return
@@ -379,7 +439,6 @@ func (s *SyncService) dispatchPageEvent(ev wininput.Event, master *syncPeer, hit
 	if mCssW <= 0 || mCssH <= 0 {
 		return
 	}
-	// Master CSS-pixel coordinates of the event.
 	cssX := float64(ev.X-hit.ContentRect.X) * mCssW / float64(hit.ContentRect.Width)
 	cssY := float64(ev.Y-hit.ContentRect.Y) * mCssH / float64(hit.ContentRect.Height)
 
@@ -406,12 +465,12 @@ func (s *SyncService) dispatchPageEvent(ev wininput.Event, master *syncPeer, hit
 			}
 			lastPress.button, lastPress.x, lastPress.y, lastPress.at, lastPress.count = ev.Button, ev.X, ev.Y, time.Now(), count
 			pressed.mu.Lock()
-			pressed.buttons[ev.Button] = true
+			pressed.cdpButtons[ev.Button] = true
 			pressed.mu.Unlock()
 			err = f.client.MouseEvent(ctx, session, "mousePressed", x, y, ev.Button, ev.ButtonsMask, count, 0, 0)
 		case wininput.EventMouseUp:
 			pressed.mu.Lock()
-			delete(pressed.buttons, ev.Button)
+			delete(pressed.cdpButtons, ev.Button)
 			pressed.mu.Unlock()
 			err = f.client.MouseEvent(ctx, session, "mouseReleased", x, y, ev.Button, ev.ButtonsMask, 1, 0, 0)
 		case wininput.EventMouseWheel:
@@ -425,12 +484,12 @@ func (s *SyncService) dispatchPageEvent(ev wininput.Event, master *syncPeer, hit
 			mods := currentModifiers()
 			if ev.Kind == wininput.EventKeyDown {
 				pressed.mu.Lock()
-				pressed.keys[ev.VK] = true
+				pressed.cdpKeys[ev.VK] = true
 				pressed.mu.Unlock()
 				err = f.client.KeyEvent(ctx, session, typ, ev.VK, mods, text, key)
 			} else {
 				pressed.mu.Lock()
-				delete(pressed.keys, ev.VK)
+				delete(pressed.cdpKeys, ev.VK)
 				pressed.mu.Unlock()
 				err = f.client.KeyEvent(ctx, session, typ, ev.VK, mods, "", key)
 			}
@@ -441,25 +500,74 @@ func (s *SyncService) dispatchPageEvent(ev wininput.Event, master *syncPeer, hit
 	})
 }
 
+// matchFollowerWindow decides which of a follower's windows
+// receives a native event that hit masterHit on the master
+// instance, and which rectangle to map coordinates through.
+//
+//   - Master main window → follower main window.
+//   - A popup (any other top-level window of the master
+//     process): the follower must have EXACTLY ONE visible
+//     candidate with the same window class and the same
+//     ownership shape (owned by its main window, or unowned,
+//     matching the master's popup). Coordinates then map
+//     through the popup rectangles.
+//   - Anything else — no candidate, several candidates, class
+//     or ownership mismatch — is NOT delivered: guessing would
+//     send input to a window the user never touched.
+func matchFollowerWindow(masterHit, masterMain wininput.WindowInfo, followerWindows []wininput.WindowInfo, followerMain wininput.WindowInfo) (target wininput.WindowInfo, mapFrom wininput.Rect, ok bool) {
+	if masterHit.HWND == masterMain.HWND {
+		return followerMain, masterMain.Rect, true
+	}
+	// Popup case: structural correspondence only.
+	masterOwned := masterHit.Owner == masterMain.HWND
+	masterUnowned := masterHit.Owner == 0
+	if !masterOwned && !masterUnowned {
+		return wininput.WindowInfo{}, wininput.Rect{}, false
+	}
+	var candidates []wininput.WindowInfo
+	for _, w := range followerWindows {
+		if w.HWND == followerMain.HWND || !w.Visible {
+			continue
+		}
+		if w.Class != masterHit.Class {
+			continue
+		}
+		if masterOwned && w.Owner != followerMain.HWND {
+			continue
+		}
+		if masterUnowned && w.Owner != 0 {
+			continue
+		}
+		candidates = append(candidates, w)
+	}
+	if len(candidates) != 1 {
+		return wininput.WindowInfo{}, wininput.Rect{}, false
+	}
+	return candidates[0], masterHit.Rect, true
+}
+
 // dispatchNativeEvent mirrors one browser-chrome event to every
-// follower with native input: activate the follower's
-// corresponding window, inject at the relatively mapped point,
-// then return focus to the master's window.
+// follower with native input: resolve the follower window that
+// corresponds to the window actually hit on the master (main
+// window or a structurally matched popup), activate it, inject
+// at the relatively mapped point, then return focus to the
+// master's window. Followers without a confirmed counterpart
+// are skipped for this event — input is never guessed onto
+// their main window.
 func (s *SyncService) dispatchNativeEvent(ev wininput.Event, masterID string, masterPID uint32, hit wininput.Hit, pressed *pressedState) {
-	masterHWND, ok := wininput.TopWindowForPID(masterPID)
+	masterMainHWND, ok := wininput.TopWindowForPID(masterPID)
 	if !ok {
 		return
 	}
-	// The window the user actually touched may be a popup owned
-	// by the master's main window; followers use their own
-	// corresponding popup when one exists, else their main
-	// window.
-	masterRect := hit.WindowRect
-	if masterRect.Empty() {
-		if r, ok := wininput.GetWindowRect(hit.Window); ok {
-			masterRect = r
-		}
+	masterMainRect, _ := wininput.GetWindowRect(masterMainHWND)
+	masterHit := wininput.WindowInfo{
+		HWND: hit.Window, Class: wininput.WindowClass(hit.Window),
+		Owner: wininput.OwnerWindow(hit.Window), Rect: hit.WindowRect,
+		Visible: true,
 	}
+	masterMain := wininput.WindowInfo{HWND: masterMainHWND, Rect: masterMainRect}
+	isPopup := hit.Window != 0 && hit.Window != masterMainHWND
+
 	s.mu.Lock()
 	ids := make([]string, 0, len(s.peers))
 	for id := range s.peers {
@@ -473,66 +581,132 @@ func (s *SyncService) dispatchNativeEvent(ev wininput.Event, masterID string, ma
 		if !ok {
 			continue
 		}
-		hwnd, ok := wininput.TopWindowForPID(uint32(pid))
+		followerMainHWND, ok := wininput.TopWindowForPID(uint32(pid))
 		if !ok {
 			continue
 		}
-		rect, ok := wininput.GetWindowRect(hwnd)
-		if !ok {
-			continue
+		followerMainRect, _ := wininput.GetWindowRect(followerMainHWND)
+		followerMain := wininput.WindowInfo{HWND: followerMainHWND, Rect: followerMainRect}
+
+		target := followerMain
+		mapFrom := masterMainRect
+		if isPopup {
+			matched, from, ok := matchFollowerWindow(masterHit, masterMain,
+				wininput.ListWindowsForPID(uint32(pid)), followerMain)
+			if !ok {
+				continue // no confirmed counterpart: skip, never guess
+			}
+			target, mapFrom = matched, from
 		}
 		mapped := ev
-		mapped.X, mapped.Y = wininput.MapPoint(ev.X, ev.Y, masterRect, rect)
-		wininput.ActivateWindow(hwnd)
+		mapped.X, mapped.Y = wininput.MapPoint(ev.X, ev.Y, mapFrom, target.Rect)
+		wininput.ActivateWindow(target.HWND)
 		switch ev.Kind {
 		case wininput.EventKeyDown:
 			pressed.mu.Lock()
-			pressed.keys[ev.VK] = true
+			pressed.nativeKeys[ev.VK] = true
 			pressed.mu.Unlock()
 			wininput.InjectKey(ev.VK, true)
 		case wininput.EventKeyUp:
 			pressed.mu.Lock()
-			delete(pressed.keys, ev.VK)
+			delete(pressed.nativeKeys, ev.VK)
 			pressed.mu.Unlock()
 			wininput.InjectKey(ev.VK, false)
 		default:
 			if ev.Kind == wininput.EventMouseDown {
 				pressed.mu.Lock()
-				pressed.buttons[ev.Button] = true
+				pressed.nativeButtons[ev.Button] = true
 				pressed.mu.Unlock()
 			}
 			if ev.Kind == wininput.EventMouseUp {
 				pressed.mu.Lock()
-				delete(pressed.buttons, ev.Button)
+				delete(pressed.nativeButtons, ev.Button)
 				pressed.mu.Unlock()
 			}
 			wininput.InjectMouse(mapped)
 		}
 	}
-	wininput.ActivateWindow(masterHWND)
+	wininput.ActivateWindow(masterMainHWND)
 }
 
-// releaseFollowerInputs lets go of every key and mouse button the
-// session currently holds down on followers (pause/stop/failure
-// paths), so nothing can stay stuck.
+// releaseFollowerInputs lets go of EVERY key and mouse button
+// the session currently holds down on followers, on both
+// channels (pause/stop/failure paths), so nothing can stay
+// stuck. Only state this session injected is released — the
+// master's real keyboard is never touched: CDP releases go to
+// follower sessions only, and native releases are injected
+// while each follower window is briefly foreground, after which
+// the master's window is re-activated.
 func (s *SyncService) releaseFollowerInputs() {
-	// Native side: release the common modifier and button state
-	// by re-issuing ups for the tracked set kept by the
-	// dispatcher. The dispatcher owns the pressed set; this
-	// service-level sweep covers the CDP side per peer.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	s.forEachFollower(func(f *syncPeer) {
-		f.mu.Lock()
-		session := f.sessionID
-		f.mu.Unlock()
-		if session == "" {
-			return
+	s.mu.Lock()
+	pressed := s.pressed
+	masterID := s.masterID
+	s.mu.Unlock()
+	if pressed == nil {
+		return
+	}
+	cdpKeys, cdpButtons, nativeKeys, nativeButtons := pressed.snapshotAndClear()
+
+	if len(cdpKeys) > 0 || len(cdpButtons) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		s.forEachFollower(func(f *syncPeer) {
+			f.mu.Lock()
+			session := f.sessionID
+			f.mu.Unlock()
+			if session == "" {
+				return
+			}
+			for vk := range cdpKeys {
+				_, key := keyText(vk)
+				noteKeyUp(vk)
+				_ = f.client.KeyEvent(ctx, session, "keyUp", vk, 0, "", key)
+			}
+			for button := range cdpButtons {
+				_ = f.client.MouseEvent(ctx, session, "mouseReleased", 0, 0, button, 0, 1, 0, 0)
+			}
+		})
+		cancel()
+	}
+
+	if len(nativeKeys) > 0 || len(nativeButtons) > 0 {
+		s.mu.Lock()
+		ids := make([]string, 0, len(s.peers))
+		for id := range s.peers {
+			if id != masterID {
+				ids = append(ids, id)
+			}
 		}
-		_ = f.client.MouseEvent(ctx, session, "mouseReleased", 0, 0, "left", 0, 1, 0, 0)
-		_ = f.client.MouseEvent(ctx, session, "mouseReleased", 0, 0, "right", 0, 1, 0, 0)
-		_ = f.client.MouseEvent(ctx, session, "mouseReleased", 0, 0, "middle", 0, 1, 0, 0)
-	})
+		s.mu.Unlock()
+		var masterHWND uintptr
+		if pid, ok := s.instances.instanceProcessID(masterID); ok {
+			masterHWND, _ = wininput.TopWindowForPID(uint32(pid))
+		}
+		for _, id := range ids {
+			pid, ok := s.instances.instanceProcessID(id)
+			if !ok {
+				continue
+			}
+			hwnd, ok := wininput.TopWindowForPID(uint32(pid))
+			if !ok {
+				continue
+			}
+			rect, _ := wininput.GetWindowRect(hwnd)
+			wininput.ActivateWindow(hwnd)
+			for vk := range nativeKeys {
+				noteKeyUp(vk)
+				wininput.InjectKey(vk, false)
+			}
+			for button := range nativeButtons {
+				wininput.InjectMouse(wininput.Event{
+					Kind: wininput.EventMouseUp, Button: button,
+					X: rect.X + rect.Width/2, Y: rect.Y + rect.Height/2,
+				})
+			}
+		}
+		if masterHWND != 0 {
+			wininput.ActivateWindow(masterHWND)
+		}
+	}
 }
 
 func abs32(v int32) int32 {
@@ -543,9 +717,7 @@ func abs32(v int32) int32 {
 }
 
 // currentModifiers reads the dispatcher's tracked modifier state
-// from the last key events. Kept simple: the CDP modifiers
-// bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8) is derived from the
-// pressed-key set the hook stream maintains globally.
+// (Alt=1, Ctrl=2, Meta=4, Shift=8 for CDP).
 var modifierState struct {
 	sync.Mutex
 	shift, ctrl, alt, meta bool
@@ -626,8 +798,7 @@ func keyText(vk int) (text, key string) {
 	return "", ""
 }
 
-// noteKeyUp clears modifier state on key release; called from the
-// dispatch path for key-up events before keyText is consulted.
+// noteKeyUp clears modifier state on key release.
 func noteKeyUp(vk int) {
 	modifierState.Lock()
 	defer modifierState.Unlock()

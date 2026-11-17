@@ -42,6 +42,16 @@ type Client struct {
 
 	onEvent func(Event)
 
+	// Protocol events are queued by readLoop and delivered to
+	// the handler, in order, by a dedicated goroutine. Running
+	// the handler inside readLoop would deadlock any handler
+	// that issues a command on this same connection (the
+	// response could never be read while the handler waits).
+	evMu     sync.Mutex
+	evCond   *sync.Cond
+	evQueue  []Event
+	evClosed bool
+
 	closeOnce sync.Once
 	done      chan struct{}
 }
@@ -103,7 +113,9 @@ func Dial(ctx context.Context, port int) (*Client, error) {
 		pending: map[int]chan callResult{},
 		done:    make(chan struct{}),
 	}
+	c.evCond = sync.NewCond(&c.evMu)
 	go c.readLoop()
+	go c.eventLoop()
 	return c, nil
 }
 
@@ -154,17 +166,59 @@ func (c *Client) readLoop() {
 			continue
 		}
 		if msg.Method != "" {
-			c.mu.Lock()
-			handler := c.onEvent
-			c.mu.Unlock()
-			if handler != nil {
-				handler(Event{SessionID: msg.SessionID, Method: msg.Method, Params: msg.Params})
-			}
+			c.enqueueEvent(Event{SessionID: msg.SessionID, Method: msg.Method, Params: msg.Params})
 		}
 	}
 }
 
+// enqueueEvent appends an event for the delivery goroutine. It
+// only takes a short-lived lock, so readLoop is never blocked by
+// handler work.
+func (c *Client) enqueueEvent(ev Event) {
+	c.evMu.Lock()
+	if !c.evClosed {
+		c.evQueue = append(c.evQueue, ev)
+		c.evCond.Signal()
+	}
+	c.evMu.Unlock()
+}
+
+// eventLoop delivers queued events to the registered handler in
+// arrival order. It exits when the connection is gone; a handler
+// running at that moment finishes on its own — its calls fail
+// fast on the closed connection rather than hanging.
+func (c *Client) eventLoop() {
+	for {
+		c.evMu.Lock()
+		for len(c.evQueue) == 0 && !c.evClosed {
+			c.evCond.Wait()
+		}
+		if c.evClosed {
+			c.evMu.Unlock()
+			return
+		}
+		ev := c.evQueue[0]
+		c.evQueue = c.evQueue[1:]
+		c.evMu.Unlock()
+
+		c.mu.Lock()
+		handler := c.onEvent
+		c.mu.Unlock()
+		if handler != nil {
+			handler(ev)
+		}
+	}
+}
+
+func (c *Client) closeEvents() {
+	c.evMu.Lock()
+	c.evClosed = true
+	c.evCond.Broadcast()
+	c.evMu.Unlock()
+}
+
 func (c *Client) failAll(err error) {
+	c.closeEvents()
 	c.mu.Lock()
 	pending := c.pending
 	c.pending = map[int]chan callResult{}
@@ -220,6 +274,7 @@ func (c *Client) Call(ctx context.Context, sessionID, method string, params any)
 
 // Close tears the connection down.
 func (c *Client) Close() {
+	c.closeEvents()
 	_ = c.conn.Close(websocket.StatusNormalClosure, "")
 	c.closeOnce.Do(func() { close(c.done) })
 }

@@ -31,4 +31,8 @@ func MoveWindow(hwnd uintptr, r Rect) error {
 func WindowPlacement(hwnd uintptr) (Rect, bool) {
 	return Rect{}, false
 }
-func IsMinimized(hwnd uintptr) bool { return false }
+func IsMinimized(hwnd uintptr) bool   { return false }
+func WindowClass(hwnd uintptr) string { return "" }
+func ListWindowsForPID(pid uint32) []WindowInfo {
+	return nil
+}

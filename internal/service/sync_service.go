@@ -114,8 +114,10 @@ type SyncService struct {
 	peers     map[string]*syncPeer // includes the master
 	lastError string
 
-	events   chan wininput.Event
 	stopDisp context.CancelFunc
+	// pressed is the session's injected-input state, owned by
+	// the service (created at start, released at pause/stop).
+	pressed *pressedState
 
 	// Window arrangement session memory (never persisted).
 	savedRects map[string]wininput.Rect
@@ -291,6 +293,7 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 	s.masterID = masterID
 	s.state = SyncStateActive
 	s.lastError = ""
+	s.pressed = newPressedState()
 	s.mu.Unlock()
 
 	s.attachEventHandlers()
@@ -388,6 +391,7 @@ func (s *SyncService) stopSyncInternal() {
 	s.peers = map[string]*syncPeer{}
 	s.state = SyncStateIdle
 	s.masterID = ""
+	s.pressed = nil
 	s.mu.Unlock()
 	for _, p := range peers {
 		p.client.Close()
