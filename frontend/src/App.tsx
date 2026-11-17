@@ -9,6 +9,7 @@ import InstancesPage from "./pages/InstancesPage";
 import KernelsPage from "./pages/KernelsPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
+import BookmarksPage from "./pages/BookmarksPage";
 import ProxyConfigPage from "./pages/ProxyConfigPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
@@ -82,6 +83,8 @@ export default function App() {
             <ProxyConfigPage />
           ) : page === "datamanagement" ? (
             <DataManagementPage />
+          ) : page === "bookmarks" ? (
+            <BookmarksPage />
           ) : (
             <PlannedPage page={page} />
           )}

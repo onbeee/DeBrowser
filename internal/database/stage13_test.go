@@ -59,8 +59,8 @@ func TestMigration13UpgradesV12PreservingInstances(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
-		t.Fatalf("AppliedVersion = %d (err %v), want 13", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 14 {
+		t.Fatalf("AppliedVersion = %d (err %v), want 14", v, err)
 	}
 	// The instance survived verbatim.
 	var name, dir, status string
@@ -101,8 +101,8 @@ func TestMigration13FreshDatabase(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 13 {
-		t.Fatalf("AppliedVersion = %d (err %v), want 13", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 14 {
+		t.Fatalf("AppliedVersion = %d (err %v), want 14", v, err)
 	}
 	for _, table := range []string{"instance_runtime", "profile_counter"} {
 		var n int

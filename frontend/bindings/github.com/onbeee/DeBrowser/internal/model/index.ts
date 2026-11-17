@@ -6,6 +6,7 @@ export {
 } from "./models.js";
 
 export type {
+    BookmarkNode,
     Instance,
     ProfileDirInfo
 } from "./models.js";
