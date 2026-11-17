@@ -98,7 +98,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 		g.Targets = append(g.Targets, t)
 	}
 	for _, inst := range instances {
-		_, dir, gate, gerr := s.instances.InstanceBookmarkAccess(inst.ID)
+		_, dir, gate, release, gerr := s.instances.AcquireBookmarkAccess(inst.ID)
 		if gerr != nil || gate != BookmarkGateStopped {
 			result.UncheckedInstances++
 			continue
@@ -108,6 +108,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 		if lerr != nil {
 			result.UncheckedInstances++
 			unlock()
+			release()
 			continue
 		}
 		if kind == model.BookmarkKindBookmark {
@@ -133,6 +134,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 			})
 		}
 		unlock()
+		release()
 	}
 	session := &bookmarkSearchSession{Kind: kind, CreatedAt: time.Now()}
 	for _, key := range order {
@@ -281,18 +283,20 @@ func (s *BookmarkService) applySearch(token string, groupKeys []string, mutate f
 }
 
 func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkTarget, kind string, mutate func(node map[string]any, kind string) error, result *ApplySearchResult) {
-	_, dir, gate, err := s.instances.InstanceBookmarkAccess(instanceID)
+	_, dir, gate, release, err := s.instances.AcquireBookmarkAccess(instanceID)
 	if err != nil {
 		result.FailedInstances++
 		result.FailedNodes += len(targets)
 		return
 	}
 	if gate != BookmarkGateStopped {
-		// State changed since the search (or never was stopped):
-		// skip without touching the file.
+		// State changed since the search (or never was stopped),
+		// or the instance is busy with another operation: skip
+		// without touching the file.
 		result.SkippedInstances++
 		return
 	}
+	defer release()
 	unlock := chromebookmarks.LockProfile(dir)
 	defer unlock()
 	loaded, err := chromebookmarks.Load(dir)

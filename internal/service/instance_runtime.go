@@ -333,6 +333,12 @@ func (s *InstanceService) reconcileOne(c context.Context, rt model.InstanceRunti
 func (s *InstanceService) effectiveStatus(inst model.Instance) model.InstanceStatus {
 	s.rtMu.Lock()
 	defer s.rtMu.Unlock()
+	return s.effectiveStatusLocked(inst)
+}
+
+// effectiveStatusLocked is effectiveStatus for callers already
+// holding rtMu.
+func (s *InstanceService) effectiveStatusLocked(inst model.Instance) model.InstanceStatus {
 	if t, ok := s.transient[inst.ID]; ok {
 		return t
 	}
@@ -543,6 +549,12 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	if s.unverified[id] {
 		s.rtMu.Unlock()
 		return fmt.Errorf("实例运行状态无法确认，不能启动")
+	}
+	if s.bookmarkHolds[id] {
+		// A bookmark operation owns this instance's profile right
+		// now; starting the browser would race its file access.
+		s.rtMu.Unlock()
+		return fmt.Errorf("实例正在进行书签操作，请稍后重试")
 	}
 	s.transient[id] = model.StatusStarting
 	s.rtMu.Unlock()
@@ -786,6 +798,10 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	s.rtMu.Lock()
 	w, tracked := s.procs[id]
 	if tracked {
+		if s.bookmarkHolds[id] {
+			s.rtMu.Unlock()
+			return fmt.Errorf("实例正在进行书签操作，请稍后重试")
+		}
 		if s.transient[id] == model.StatusStarting {
 			s.rtMu.Unlock()
 			return fmt.Errorf("实例正在启动中")
