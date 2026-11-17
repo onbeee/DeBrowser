@@ -70,24 +70,42 @@ export default function BookmarksPage() {
 
   const [dragId, setDragId] = useState<string | null>(null);
 
-  // 点击「同步」：先检查全部实例的生效状态。全部确认停止才直接
-  // 打开同步弹窗；存在运行类实例时先弹确认窗口；只有状态无法
+  // 查询全部实例的后端书签访问门禁结果（InstanceBookmarkAccess）。
+  // 是否「确认停止」以后端门禁为唯一依据：error 等状态只有后端
+  // 结合运行时记录才能判定，前端不凭实例状态字符串自行判断。
+  // 单个查询失败按 unknown 处理，绝不默认放行。
+  const collectBookmarkGates = async (): Promise<string[]> => {
+    const list = (await InstanceService.ListInstances()) ?? [];
+    const gates = await Promise.all(
+      list.map(async (inst) => {
+        try {
+          const [, , gate] = await InstanceService.InstanceBookmarkAccess(inst.id);
+          return gate;
+        } catch {
+          return "unknown";
+        }
+      }),
+    );
+    return gates;
+  };
+
+  // 点击「同步」：先用后端门禁检查全部实例。全部确认停止才直接
+  // 打开同步弹窗；存在运行中实例时先弹确认窗口；只有状态无法
   // 确认的实例时关闭也无济于事，直接提示。
   const handleSyncClick = async () => {
     setError(null);
     setNotice(null);
     setBusy("sync-check");
     try {
-      const list = (await InstanceService.ListInstances()) ?? [];
-      const statuses = list.map((i) => i.status);
-      const decision = syncEntryDecision(statuses);
+      const gates = await collectBookmarkGates();
+      const decision = syncEntryDecision(gates);
       if (decision === "open") {
         setSyncOpen(true);
       } else if (decision === "confirm") {
         setSyncGate("confirm");
       } else {
         setError(
-          "有 " + notStoppedCount(statuses) + " 个浏览器实例的状态无法确认停止，无法打开书签同步。请先在浏览器实例页面处理后再试。",
+          "有 " + notStoppedCount(gates) + " 个浏览器实例的状态无法确认停止，无法打开书签同步。请先在浏览器实例页面处理后再试。",
         );
       }
     } catch (err) {
@@ -97,47 +115,32 @@ export default function BookmarksPage() {
     }
   };
 
-  // 确认窗口的「关闭实例」：用既有正常关闭服务逐个关闭运行中
-  // 实例，等待启动/关闭中的实例走完现有流程，反复复查，直到
-  // 全部确认停止才打开同步弹窗；超时或仍有实例未停止时明确
-  // 失败，不打开弹窗、不修改任何书签。
+  // 确认窗口的「关闭实例」：对运行中（含关闭中）的实例并行调用
+  // 既有正常关闭服务，互不取消；全部关闭调用返回后，再统一用
+  // 后端门禁复查全部实例。只有全部确认停止才打开同步弹窗；任何
+  // 实例关闭失败或仍无法确认停止都不打开弹窗、不修改任何书签，
+  // 用户可自行处理后重新点击同步重试。
   const closeInstancesThenSync = async () => {
     if (closingRef.current) return;
     closingRef.current = true;
     setSyncGate("closing");
     try {
       const opId = newOperationId();
-      const deadline = Date.now() + 30_000;
-      for (;;) {
-        const list = (await InstanceService.ListInstances()) ?? [];
-        for (const inst of list) {
-          if (inst.status === "running") {
-            try {
-              await InstanceService.StopInstance(opId, inst.id);
-            } catch {
-              // 单个关闭失败不中断其余实例，最终以复查结果为准。
-            }
-          }
-        }
-        const fresh = (await InstanceService.ListInstances()) ?? [];
-        const statuses = fresh.map((i) => i.status);
-        if (statuses.every((st) => st === "stopped")) {
-          setSyncGate("idle");
-          setSyncOpen(true);
-          void reload();
-          return;
-        }
-        const transitioning = statuses.some(
-          (st) => st === "running" || st === "starting" || st === "stopping",
+      const list = (await InstanceService.ListInstances()) ?? [];
+      const toStop = list.filter((i) => i.status === "running" || i.status === "stopping");
+      await Promise.allSettled(
+        toStop.map((inst) => InstanceService.StopInstance(opId, inst.id)),
+      );
+      const gates = await collectBookmarkGates();
+      if (gates.every((g) => g === "stopped")) {
+        setSyncGate("idle");
+        setSyncOpen(true);
+        void reload();
+      } else {
+        setSyncGate("idle");
+        setError(
+          "仍有 " + notStoppedCount(gates) + " 个浏览器实例未能关闭或无法确认停止，无法打开书签同步。",
         );
-        if (!transitioning || Date.now() > deadline) {
-          setSyncGate("idle");
-          setError(
-            "仍有 " + notStoppedCount(statuses) + " 个浏览器实例未能关闭或无法确认停止，无法打开书签同步。",
-          );
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 400));
       }
     } catch (err) {
       setSyncGate("idle");

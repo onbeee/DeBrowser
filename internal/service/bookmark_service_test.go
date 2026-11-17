@@ -483,3 +483,49 @@ func TestRuntimeQueryErrorIsNotConfirmedStopped(t *testing.T) {
 		t.Fatal("bookmarks file was modified despite the unconfirmable state")
 	}
 }
+
+// The remaining row of the gate table: an instance in the
+// persisted "error" state whose runtime record still EXISTS has
+// a process that was never confirmed gone — the gate must stay
+// unknown and sync must skip it without touching the file.
+func TestErrorStateWithRuntimeRecordIsUnknown(t *testing.T) {
+	bs, isvc, _ := bookmarkTestServices(t)
+	inst, err := isvc.CreateInstance("", CreateInstanceInput{Name: "gate-err-record", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := profileDirOf(t, bs, inst)
+	writeProfileBookmarks(t, dir, bookmarkFixture)
+	ctx := context.Background()
+	if err := isvc.store.SetInstanceStatus(ctx, inst.ID, model.StatusError); err != nil {
+		t.Fatal(err)
+	}
+	if err := isvc.store.UpsertInstanceRuntime(ctx, model.InstanceRuntime{
+		InstanceID: inst.ID, PID: 4242, ProcessCreatedAt: 1, Platform: "windows",
+		ExecutablePath: "fake-browser.exe", UserDataDir: inst.UserDataDir,
+		StartedAt: "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, gate, err := isvc.InstanceBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateUnknown {
+		t.Fatalf("gate = %q err %v, want unknown", gate, err)
+	}
+	node, err := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := bs.SyncBookmarks("", []string{node.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Instances) != 1 || res.Instances[0].Status != "skipped" {
+		t.Fatalf("sync = %+v, want one skipped instance", res.Instances)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "Bookmarks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != bookmarkFixture {
+		t.Fatal("bookmarks file was modified for an unconfirmable instance")
+	}
+}

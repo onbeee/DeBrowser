@@ -42,7 +42,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | --- | --- |
 | `main.go` | 程序入口与启动装配（顺序见下） |
 | `internal/app` | Wails 应用组装、窗口、原生对话框接线 |
-| `internal/service` | 面向前端的四个服务（业务逻辑与统一记录） |
+| `internal/service` | 面向前端的五个服务（业务逻辑与统一记录） |
 | `internal/store` | SQLite 仓储层（全部核心 SQL 在此） |
 | `internal/model` | 纯数据类型，无行为、无依赖 |
 | `internal/database` | 打开数据库、pragma、迁移、迁移前备份 |
@@ -64,7 +64,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 2. `logging` 打开日志系统（在数据库与服务之前打开，关闭时最后关闭）。
 3. `singleinstance` 取得按安装划分的操作系统级文件锁（`data/app.lock`）。锁由操作系统仲裁并在持有者以任何方式退出时自动释放，不存在陈旧锁；第二次启动只写入激活信号（`data/activate.request`）请已运行实例聚焦窗口，然后在不触碰数据库的情况下退出。
 4. `database` 打开 SQLite 并以事务方式应用待执行迁移（升级前先做经验证的备份，见 [DATABASE.md](DATABASE.md)）；`secrets` 打开凭据 Vault。
-5. `service` 构建四个服务并完成启动对账（见「浏览器运行机制」）；`app` 组装 Wails 应用并运行。后台循环（状态事件、激活监视）由 `lifecycle` 在应用 context 下治理，关闭时按固定顺序释放：循环 → 数据库 → 实例锁 → 日志。
+5. `service` 构建五个服务并完成启动对账（见「浏览器运行机制」）；`app` 组装 Wails 应用并运行。后台循环（状态事件、激活监视）由 `lifecycle` 在应用 context 下治理，关闭时按固定顺序释放：循环 → 数据库 → 实例锁 → 日志。
 
 ## 系统模块
 

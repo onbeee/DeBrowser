@@ -165,23 +165,24 @@ export function folderOptions(nodes: LibraryNodeLike[]): { id: string; name: str
 }
 
 /**
- * 点击「同步」后的入口决策（仅依据全部实例的生效状态）：
- * - 全部已确认停止 → 直接打开同步弹窗（open）。
- * - 存在运行中/启动中/关闭中的实例 → 先弹确认窗口（confirm）。
- * - 没有运行类实例，但存在状态无法确认的实例 → 不能打开（blocked），
+ * 点击「同步」后的入口决策，输入是后端书签访问门禁
+ * （InstanceBookmarkAccess）对全部实例的判定结果，而不是实例
+ * 列表里的状态字符串——error 等状态只有后端结合运行时记录
+ * 才能判定是否确认停止：
+ * - 全部 stopped → 直接打开同步弹窗（open）。
+ * - 存在 running → 先弹确认窗口（confirm）。
+ * - 没有 running、但存在 unknown → 不能打开（blocked），
  *   关闭操作解决不了这类实例，直接提示用户处理。
  */
 export type SyncEntryDecision = "open" | "confirm" | "blocked";
 
-export function syncEntryDecision(statuses: string[]): SyncEntryDecision {
-  if (statuses.every((s) => s === "stopped")) return "open";
-  if (statuses.some((s) => s === "running" || s === "starting" || s === "stopping")) {
-    return "confirm";
-  }
+export function syncEntryDecision(gates: string[]): SyncEntryDecision {
+  if (gates.every((g) => g === "stopped")) return "open";
+  if (gates.some((g) => g === "running")) return "confirm";
   return "blocked";
 }
 
 /** 未能确认停止的实例数量（用于失败提示）。 */
-export function notStoppedCount(statuses: string[]): number {
-  return statuses.filter((s) => s !== "stopped").length;
+export function notStoppedCount(gates: string[]): number {
+  return gates.filter((g) => g !== "stopped").length;
 }

@@ -86,17 +86,19 @@ test("siblingIds and folderOptions", () => {
   ]);
 });
 
-test("syncEntryDecision gates the sync dialog on instance states", () => {
+test("syncEntryDecision gates the sync dialog on backend gate results", () => {
+  // Inputs are InstanceBookmarkAccess gate values, not raw status
+  // strings: the backend has already folded error+runtime-record
+  // and transition states into stopped/running/unknown.
   // All confirmed stopped (or no instances at all): open directly.
   assert.equal(syncEntryDecision([]), "open");
   assert.equal(syncEntryDecision(["stopped", "stopped"]), "open");
-  // Any running/transitioning instance: confirmation first.
+  // Any running instance: confirmation first.
   assert.equal(syncEntryDecision(["stopped", "running"]), "confirm");
-  assert.equal(syncEntryDecision(["starting"]), "confirm");
-  assert.equal(syncEntryDecision(["stopping", "unknown"]), "confirm");
+  assert.equal(syncEntryDecision(["running", "unknown"]), "confirm");
   // Only unconfirmable states: closing cannot help, do not open.
   assert.equal(syncEntryDecision(["unknown"]), "blocked");
-  assert.equal(syncEntryDecision(["stopped", "error"]), "blocked");
+  assert.equal(syncEntryDecision(["stopped", "unknown"]), "blocked");
   assert.equal(notStoppedCount(["stopped", "running", "unknown"]), 2);
   assert.equal(notStoppedCount(["stopped"]), 0);
 });
