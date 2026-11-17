@@ -78,6 +78,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | 日志 | 统一自动记录、容量管理、分类导出 | 已交付 |
 | 设置 | 主题（浅色/暖色/深色）、日志容量等，存 `config/settings.json` | 已交付 |
 | 书签 | 数据层（表 + store CRUD）已就绪；无服务与前端 | Stage 9C 接入 |
+| 代理配置 | 仅占位页面，无后端功能 | 待开发（Stage 6C） |
 | CDP | 每实例 localhost CDP 端口 | 未实现（Stage 9C） |
 | 多开同步、程序内更新、备份与恢复 | — | 未实现（Stage 10–12） |
 
@@ -142,4 +143,4 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 当前功能边界
 
-已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置。未接入：书签前端与 CDP（Stage 9C）、多开同步（Stage 10）、程序内更新（Stage 11）、完整备份与恢复（Stage 12）。已取消且不属于当前架构：代理/订阅/Mihomo 功能（历史数据兼容见 [DATABASE.md](DATABASE.md)）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
+已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置。未接入：书签前端与 CDP（Stage 9C）、多开同步（Stage 10）、程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
