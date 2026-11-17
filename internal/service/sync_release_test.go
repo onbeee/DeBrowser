@@ -229,3 +229,74 @@ func TestStopReleasesPressedInputs(t *testing.T) {
 		t.Fatal("stop did not release the CDP pressed inputs")
 	}
 }
+
+// TestPauseReleasesFailedFollower: a follower that took a
+// keyDown and was later marked failed still holds the pressed
+// key — pause cleanup must reach it despite the failed mark,
+// without disturbing the healthy follower's release.
+func TestPauseReleasesFailedFollower(t *testing.T) {
+	fl := newFakeLauncher()
+	isvc, _, _ := testRuntimeService(t, fl)
+	ssvc := NewSyncService(isvc, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	mkPeer := func(id string, rec *recordingCDPServer) *syncPeer {
+		client, err := cdp.Dial(ctx, rec.start(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := &syncPeer{id: id, client: client, targetByMaster: map[string]string{}}
+		if err := p.attachToCurrentPage(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(client.Close)
+		return p
+	}
+	masterRec := &recordingCDPServer{}
+	healthyRec := &recordingCDPServer{}
+	failedRec := &recordingCDPServer{}
+	master := mkPeer("m", masterRec)
+	healthy := mkPeer("h", healthyRec)
+	failed := mkPeer("f", failedRec)
+
+	ssvc.mu.Lock()
+	ssvc.peers = map[string]*syncPeer{"m": master, "h": healthy, "f": failed}
+	ssvc.masterID = "m"
+	ssvc.state = SyncStateActive
+	ssvc.pressed = newPressedState()
+	ssvc.mu.Unlock()
+
+	// Both followers receive the key press through the real
+	// dispatch path (neither is failed yet).
+	hit := wininput.Hit{
+		IsContent:   true,
+		ContentRect: wininput.Rect{X: 0, Y: 0, Width: 1024, Height: 640},
+	}
+	var lastPress struct {
+		button string
+		x, y   int32
+		at     time.Time
+		count  int
+	}
+	ssvc.dispatchPageEvent(wininput.Event{Kind: wininput.EventKeyDown, VK: 65}, master, hit, ssvc.pressed, &lastPress)
+	if !healthyRec.sawInput("Input.dispatchKeyEvent", "keyDown") ||
+		!failedRec.sawInput("Input.dispatchKeyEvent", "keyDown") {
+		t.Fatal("setup: both followers should have received the keyDown")
+	}
+
+	// The follower fails AFTER taking the press.
+	failed.markFailed("模拟失败")
+	healthyRec.clear()
+	failedRec.clear()
+
+	if err := ssvc.PauseSync(""); err != nil {
+		t.Fatal(err)
+	}
+	if !failedRec.sawInput("Input.dispatchKeyEvent", "keyUp") {
+		t.Fatal("failed follower never received its key release on pause")
+	}
+	if !healthyRec.sawInput("Input.dispatchKeyEvent", "keyUp") {
+		t.Fatal("healthy follower never received its key release on pause")
+	}
+}

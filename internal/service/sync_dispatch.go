@@ -169,6 +169,28 @@ func (p *syncPeer) switchToTarget(ctx context.Context, targetID string) error {
 	return nil
 }
 
+// forEachFollowerForRelease visits EVERY follower, including
+// ones marked failed. It exists solely for input release: a
+// follower that received key/mouse presses before failing still
+// holds that pressed state, and pause/stop must let it go.
+// Ordinary dispatch keeps using forEachFollower, which skips
+// failed followers. Each release is attempted independently —
+// one follower's failure never stops the others.
+func (s *SyncService) forEachFollowerForRelease(fn func(*syncPeer)) {
+	s.mu.Lock()
+	master := s.masterID
+	peers := make([]*syncPeer, 0, len(s.peers))
+	for id, p := range s.peers {
+		if id != master {
+			peers = append(peers, p)
+		}
+	}
+	s.mu.Unlock()
+	for _, p := range peers {
+		fn(p)
+	}
+}
+
 func (s *SyncService) forEachFollower(fn func(*syncPeer)) {
 	s.mu.Lock()
 	master := s.masterID
@@ -649,7 +671,7 @@ func (s *SyncService) releaseFollowerInputs() {
 
 	if len(cdpKeys) > 0 || len(cdpButtons) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		s.forEachFollower(func(f *syncPeer) {
+		s.forEachFollowerForRelease(func(f *syncPeer) {
 			f.mu.Lock()
 			session := f.sessionID
 			f.mu.Unlock()
