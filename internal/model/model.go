@@ -205,6 +205,29 @@ type ExternalBrowser struct {
 	UpdatedAt      string `json:"updatedAt"`
 }
 
+// BookmarkNode is one node of the DeBrowser bookmark library
+// (Stage 9C): a folder or a bookmark in a tree with a stable
+// per-level order. A nil ParentID places the node at the library
+// root. The library is DeBrowser's own resource data; the actual
+// bookmarks inside browser profiles live in each profile's
+// Chromium Bookmarks file and are never mirrored here.
+type BookmarkNode struct {
+	ID        string  `json:"id"`
+	Kind      string  `json:"kind"` // "bookmark" or "folder"
+	Name      string  `json:"name"`
+	URL       string  `json:"url"`
+	ParentID  *string `json:"parentId,omitempty"`
+	SortOrder int     `json:"sortOrder"`
+	CreatedAt string  `json:"createdAt"`
+	UpdatedAt string  `json:"updatedAt"`
+}
+
+// Bookmark kind values for BookmarkNode.Kind.
+const (
+	BookmarkKindBookmark = "bookmark"
+	BookmarkKindFolder   = "folder"
+)
+
 // Bookmark is a single bookmark. A nil InstanceID means the bookmark
 // is global and applies to every instance.
 type Bookmark struct {

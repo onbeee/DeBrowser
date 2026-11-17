@@ -29,7 +29,7 @@
 
 ## 当前有效表
 
-当前产品实际使用的数据表共五张：`browser_instances`、`bookmarks`、`external_browsers`、`instance_runtime`、`profile_counter`。
+当前产品实际使用的数据表共五张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`。
 
 ### `browser_instances`
 
@@ -46,11 +46,11 @@
 
 索引：`proxy_id`、`status`。
 
-### `bookmarks`
+### `bookmark_nodes`
 
-书签。`instance_id` 外键 → `browser_instances(id)`，`ON DELETE CASCADE`（删除实例删除其书签）；`instance_id` 为 NULL 表示全局书签（适用于每个实例）。唯一性按作用域由 `(IFNULL(instance_id, ''), url)` 唯一索引强制；`(instance_id, sort_order)` 索引供有序列出。
+DeBrowser 书签资源库（migration 0014）：文件夹与书签组成的树。列：`id`、`kind`（CHECK：`bookmark` / `folder`）、`name`、`url`（文件夹为空串）、`parent_id`（外键 → `bookmark_nodes(id)`；NULL 表示根级）、`sort_order`、时间戳。`(parent_id, sort_order, created_at)` 索引供逐层有序读取。文件夹循环引用由服务层校验阻止（不得移入自身或其后代）；删除文件夹由服务层在事务内自底向上删除整个子树，外键保证不留孤儿。
 
-当前状态：只有数据层（本表与 store CRUD），没有服务、没有 bindings，前端是占位页面。书签前端接入是 Stage 9C 的工作。
+资源库与各实例 Profile 中的真实书签（Chromium `Bookmarks` 文件）完全独立：资源库的增删改不自动影响任何实例，实例书签的修改也不回写资源库；分发只通过同步操作显式进行。实例真实书签不进数据库，见 [ARCHITECTURE.md](ARCHITECTURE.md) 的书签机制说明。
 
 ### `external_browsers`
 
@@ -71,6 +71,10 @@ DeBrowser 重启后的重新识别逐项核验记录（PID 存在、创建时间
 默认实例文件编号的持久计数器（单行，`next_seq` 只增不减）。删除实例或实例文件都不会让编号被重新分配；分配时服务还会跳过已被绑定或已存在于磁盘的候选名。
 
 ## 遗留表（当前未使用）
+
+### `bookmarks`
+
+migration 0003 的历史扁平书签表：`instance_id` 外键 → `browser_instances(id)`，`ON DELETE CASCADE`；`instance_id` 为 NULL 表示全局书签；`(IFNULL(instance_id, ''), url)` 唯一索引与 `(instance_id, sort_order)` 索引保留原样。Stage 9C 的书签资源库改用 `bookmark_nodes` 树模型后，本表不再被当前产品写入；表与既有行按原样保留，不删除、不迁移数据。
 
 ### `app_settings`
 
@@ -112,6 +116,7 @@ DeBrowser 重启后的重新识别逐项核验记录（PID 存在、创建时间
 | 11 | `0011_external_browsers.sql` | `external_browsers`（当时的验证式登记设计，已被 0012 取代） |
 | 12 | `0012_external_browsers_path_only.sql` | 重建 `external_browsers` 为纯路径登记（去验证列，既有登记保留） |
 | 13 | `0013_instance_runtime.sql` | `instance_runtime` 与 `profile_counter` |
+| 14 | `0014_bookmark_library.sql` | `bookmark_nodes`（书签资源库树） |
 
 涉及表重建的迁移（0005、0007、0012 等）在迁移事务内先抢救进入的链接再恢复，并由填充夹具的升级测试验证数据保留、`PRAGMA foreign_key_check` 与 `PRAGMA integrity_check`。
 

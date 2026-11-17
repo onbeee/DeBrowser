@@ -152,6 +152,7 @@ func run() error {
 		return failStart("初始化实例服务失败", err)
 	}
 	browserService := service.NewBrowserService(db, cfg.Layout, logger)
+	bookmarkService := service.NewBookmarkService(db, instanceService, logger)
 
 	// The credential vault opens after the database: existing
 	// rows reference vault entries, and opening it at startup
@@ -180,6 +181,7 @@ func run() error {
 	appService.Auditor = logSystem
 	instanceService.Auditor = logSystem
 	browserService.Auditor = logSystem
+	bookmarkService.Auditor = logSystem
 	// The instance service reconciled runtime records against
 	// live processes in its constructor (before the Auditor could
 	// be wired); flush those outcomes into the unified record now.
@@ -187,7 +189,7 @@ func run() error {
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
 
-	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, logger, assets)
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, logger, assets)
 	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)
 	runErr := wailsApp.Run()
 	if runErr != nil {
