@@ -98,7 +98,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 		g.Targets = append(g.Targets, t)
 	}
 	for _, inst := range instances {
-		_, dir, gate, release, gerr := s.instances.AcquireBookmarkAccess(inst.ID)
+		_, dir, gate, release, gerr := s.instances.acquireBookmarkAccess(inst.ID)
 		if gerr != nil || gate != BookmarkGateStopped {
 			result.UncheckedInstances++
 			continue
@@ -283,7 +283,7 @@ func (s *BookmarkService) applySearch(token string, groupKeys []string, mutate f
 }
 
 func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkTarget, kind string, mutate func(node map[string]any, kind string) error, result *ApplySearchResult) {
-	_, dir, gate, release, err := s.instances.AcquireBookmarkAccess(instanceID)
+	_, dir, gate, release, err := s.instances.acquireBookmarkAccess(instanceID)
 	if err != nil {
 		result.FailedInstances++
 		result.FailedNodes += len(targets)

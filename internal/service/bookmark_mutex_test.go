@@ -21,12 +21,12 @@ func TestBookmarkHoldBlocksStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, gate, release, err := isvc.AcquireBookmarkAccess(inst.ID)
+	_, _, gate, release, err := isvc.acquireBookmarkAccess(inst.ID)
 	if err != nil || gate != BookmarkGateStopped || release == nil {
 		t.Fatalf("acquire = gate %q err %v", gate, err)
 	}
 	// A second bookmark operation on the same instance is busy.
-	if _, _, g2, r2, _ := isvc.AcquireBookmarkAccess(inst.ID); g2 != BookmarkGateBusy || r2 != nil {
+	if _, _, g2, r2, _ := isvc.acquireBookmarkAccess(inst.ID); g2 != BookmarkGateBusy || r2 != nil {
 		t.Fatalf("second acquire = gate %q, want busy", g2)
 	}
 	// Start is refused while the hold lasts.
@@ -87,14 +87,14 @@ func TestBookmarkAcquireRejectedDuringTransitions(t *testing.T) {
 		isvc.rtMu.Lock()
 		isvc.transient[inst.ID] = tr
 		isvc.rtMu.Unlock()
-		if _, _, gate, release, err := isvc.AcquireBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateBusy || release != nil {
+		if _, _, gate, release, err := isvc.acquireBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateBusy || release != nil {
 			t.Fatalf("acquire during %s = gate %q err %v, want busy", tr, gate, err)
 		}
 		isvc.rtMu.Lock()
 		delete(isvc.transient, inst.ID)
 		isvc.rtMu.Unlock()
 		// Transition over: the stopped instance acquires cleanly.
-		_, _, gate, release, err := isvc.AcquireBookmarkAccess(inst.ID)
+		_, _, gate, release, err := isvc.acquireBookmarkAccess(inst.ID)
 		if err != nil || gate != BookmarkGateStopped {
 			t.Fatalf("acquire after %s = gate %q err %v", tr, gate, err)
 		}
@@ -131,7 +131,7 @@ func TestBookmarkAcquireRejectedDuringRealStop(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, _, gate, release, err := svc.AcquireBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateBusy || release != nil {
+	if _, _, gate, release, err := svc.acquireBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateBusy || release != nil {
 		t.Fatalf("acquire during real stop = gate %q err %v, want busy", gate, err)
 	}
 	if err := <-stopDone; err != nil {
@@ -139,7 +139,7 @@ func TestBookmarkAcquireRejectedDuringRealStop(t *testing.T) {
 	}
 	// Fully stopped now: acquisition succeeds again (no stale
 	// hold, no stuck transition).
-	_, _, gate, release, err := svc.AcquireBookmarkAccess(inst.ID)
+	_, _, gate, release, err := svc.acquireBookmarkAccess(inst.ID)
 	if err != nil || gate != BookmarkGateStopped {
 		t.Fatalf("acquire after stop = gate %q err %v", gate, err)
 	}
@@ -162,7 +162,7 @@ func TestConcurrentBookmarkAcquireSingleWinner(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, _, g, r, err := isvc.AcquireBookmarkAccess(inst.ID)
+			_, _, g, r, err := isvc.acquireBookmarkAccess(inst.ID)
 			if err != nil {
 				g = "error:" + err.Error()
 			}
@@ -192,7 +192,7 @@ func TestConcurrentBookmarkAcquireSingleWinner(t *testing.T) {
 	}
 	winnerRelease()
 	// The hold was released: a fresh acquire succeeds.
-	_, _, gate, release, err := isvc.AcquireBookmarkAccess(inst.ID)
+	_, _, gate, release, err := isvc.acquireBookmarkAccess(inst.ID)
 	if err != nil || gate != BookmarkGateStopped {
 		t.Fatalf("acquire after winner release = gate %q err %v", gate, err)
 	}
@@ -209,13 +209,13 @@ func TestBookmarkHoldsArePerInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, ga, ra, err := isvc.AcquireBookmarkAccess(a.ID)
+	_, _, ga, ra, err := isvc.acquireBookmarkAccess(a.ID)
 	if err != nil || ga != BookmarkGateStopped {
 		t.Fatalf("acquire A = %q %v", ga, err)
 	}
 	// B is unaffected by A's hold: it can be acquired AND,
 	// after its own release, started while A stays held.
-	_, _, gb, rb, err := isvc.AcquireBookmarkAccess(b.ID)
+	_, _, gb, rb, err := isvc.acquireBookmarkAccess(b.ID)
 	if err != nil || gb != BookmarkGateStopped {
 		t.Fatalf("acquire B while A held = %q %v", gb, err)
 	}
@@ -242,7 +242,7 @@ func TestFailedAcquireLeavesNoHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Running: acquire reports running and holds nothing.
-	if _, _, gate, release, err := isvc.AcquireBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateRunning || release != nil {
+	if _, _, gate, release, err := isvc.acquireBookmarkAccess(inst.ID); err != nil || gate != BookmarkGateRunning || release != nil {
 		t.Fatalf("acquire while running = gate %q err %v", gate, err)
 	}
 	if err := isvc.StopInstance("", inst.ID); err != nil {
@@ -251,7 +251,7 @@ func TestFailedAcquireLeavesNoHold(t *testing.T) {
 	waitStatus(t, isvc, inst.ID, model.StatusStopped)
 	// No stale hold from the failed acquire: acquisition and a
 	// later start both work.
-	_, _, gate, release, err := isvc.AcquireBookmarkAccess(inst.ID)
+	_, _, gate, release, err := isvc.acquireBookmarkAccess(inst.ID)
 	if err != nil || gate != BookmarkGateStopped {
 		t.Fatalf("acquire after stop = gate %q err %v", gate, err)
 	}
@@ -284,7 +284,7 @@ func TestStartVersusBookmarkAcquireRace(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			_, _, g, r, aerr := isvc.AcquireBookmarkAccess(inst.ID)
+			_, _, g, r, aerr := isvc.acquireBookmarkAccess(inst.ID)
 			if aerr != nil {
 				g = "error"
 			}

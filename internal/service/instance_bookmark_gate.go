@@ -49,7 +49,7 @@ func (s *InstanceService) gateForLocked(inst model.Instance, hasRuntimeRecord bo
 // operations: the instance, its absolute profile directory and
 // the gate state. It is a status query only — it does NOT hold
 // the instance. Callers that actually read or write the file must
-// use AcquireBookmarkAccess so no start/stop can interleave.
+// use acquireBookmarkAccess so no start/stop can interleave.
 func (s *InstanceService) InstanceBookmarkAccess(id string) (model.Instance, string, string, error) {
 	c, cancel := ctx()
 	defer cancel()
@@ -68,7 +68,7 @@ func (s *InstanceService) InstanceBookmarkAccess(id string) (model.Instance, str
 	return inst, dir, gate, nil
 }
 
-// AcquireBookmarkAccess atomically checks an instance's state and,
+// acquireBookmarkAccess atomically checks an instance's state and,
 // when it is confirmed stopped, takes the instance's bookmark hold
 // so the caller can read and write its bookmarks file with no
 // possible interleaving: while the hold lasts, StartInstance and
@@ -81,7 +81,7 @@ func (s *InstanceService) InstanceBookmarkAccess(id string) (model.Instance, str
 // gate (running, unknown, busy) release is nil and nothing is
 // held. An in-flight start/stop transition reports busy, as does
 // an instance already held by another bookmark operation.
-func (s *InstanceService) AcquireBookmarkAccess(id string) (inst model.Instance, dir string, gate string, release func(), err error) {
+func (s *InstanceService) acquireBookmarkAccess(id string) (inst model.Instance, dir string, gate string, release func(), err error) {
 	c, cancel := ctx()
 	defer cancel()
 	inst, err = s.store.GetInstance(c, id)

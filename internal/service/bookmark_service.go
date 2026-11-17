@@ -352,7 +352,7 @@ func (s *BookmarkService) ListBookmarkInstances() ([]BookmarkInstanceInfo, error
 	out := make([]BookmarkInstanceInfo, 0, len(list))
 	for _, inst := range list {
 		info := BookmarkInstanceInfo{ID: inst.ID, Name: inst.Name, BookmarkCount: -1}
-		_, dir, gate, release, gerr := s.instances.AcquireBookmarkAccess(inst.ID)
+		_, dir, gate, release, gerr := s.instances.acquireBookmarkAccess(inst.ID)
 		if gerr == nil && gate == BookmarkGateStopped {
 			unlock := chromebookmarks.LockProfile(dir)
 			if file, lerr := chromebookmarks.Load(dir); lerr == nil {
@@ -468,7 +468,7 @@ func (s *BookmarkService) syncBookmarks(nodeIDs []string, instanceIDs []string) 
 }
 
 func (s *BookmarkService) syncToInstance(instanceID string, tops []model.BookmarkNode, children map[string][]model.BookmarkNode) SyncInstanceResult {
-	inst, dir, gate, release, err := s.instances.AcquireBookmarkAccess(instanceID)
+	inst, dir, gate, release, err := s.instances.acquireBookmarkAccess(instanceID)
 	res := SyncInstanceResult{InstanceID: instanceID, InstanceName: inst.Name}
 	if err != nil {
 		res.Status = "failed"
