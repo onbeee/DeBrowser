@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,16 +41,29 @@ type File struct {
 	roots map[string]any
 }
 
-// Parse decodes and structurally validates a bookmarks document:
-// a JSON object whose "roots" value is an object of folder nodes.
-// Anything else is rejected so a foreign or corrupt file is never
-// treated as editable Chromium data.
+// Parse decodes and fully validates a bookmarks document: the
+// input must be exactly one JSON value (no trailing content), an
+// object whose "roots" value is an object of folder nodes, and
+// every node in every tree must be a recognizable bookmark node —
+// a folder whose children form an array of valid nodes, or a url
+// node carrying a string url. Anything else is rejected so a
+// foreign or corrupt file is never treated as editable Chromium
+// data, and no node is ever silently dropped. Unknown fields at
+// any level are preserved untouched.
 func Parse(data []byte) (*File, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var doc map[string]any
 	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("chromebookmarks: parse: %w", err)
+	}
+	// The document must be the only JSON value in the input.
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("chromebookmarks: trailing content after the JSON document")
+		}
+		return nil, fmt.Errorf("chromebookmarks: parse trailing content: %w", err)
 	}
 	if doc == nil {
 		return nil, fmt.Errorf("chromebookmarks: document is not a JSON object")
@@ -66,36 +81,48 @@ func Parse(data []byte) (*File, error) {
 		if !ok {
 			return nil, fmt.Errorf("chromebookmarks: root %q is not an object", key)
 		}
-		if t, _ := node["type"].(string); t != "folder" {
+		if err := validateNode(node); err != nil {
+			return nil, fmt.Errorf("chromebookmarks: root %q: %w", key, err)
+		}
+		if nodeType(node) != "folder" {
 			return nil, fmt.Errorf("chromebookmarks: root %q is not a folder", key)
 		}
 	}
 	return &File{doc: doc, roots: roots}, nil
 }
 
-// NewFile returns a minimal valid empty bookmarks document with the
-// three standard roots, used when a stopped Chromium profile has no
-// Bookmarks file yet.
-func NewFile() *File {
-	doc := map[string]any{
-		"checksum": "",
-		"version":  json.Number("1"),
-		"roots": map[string]any{
-			"bookmark_bar": newFolderNode("Bookmarks bar", "1"),
-			"other":        newFolderNode("Other bookmarks", "2"),
-			"synced":       newFolderNode("Mobile bookmarks", "3"),
-		},
+// validateNode recursively checks one bookmark node's structure.
+// It never modifies the node; unknown fields are ignored here and
+// preserved by the document model.
+func validateNode(n map[string]any) error {
+	switch nodeType(n) {
+	case "folder":
+		raw, ok := n["children"]
+		if !ok {
+			return fmt.Errorf("folder node has no children")
+		}
+		children, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("folder node children is not an array")
+		}
+		for i, item := range children {
+			child, ok := item.(map[string]any)
+			if !ok {
+				return fmt.Errorf("child %d is not an object", i)
+			}
+			if err := validateNode(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "url":
+		if _, ok := n["url"].(string); !ok {
+			return fmt.Errorf("url node has no string url")
+		}
+		return nil
+	default:
+		return fmt.Errorf("node has unrecognized type %q", nodeType(n))
 	}
-	f, _ := Parse(mustJSON(doc))
-	return f
-}
-
-func mustJSON(v any) []byte {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return data
 }
 
 // Serialize renders the document back to JSON.
@@ -469,31 +496,28 @@ func RemoveFromParent(parent, node map[string]any) bool {
 
 // ---- file IO --------------------------------------------------------
 
-// LoadResult describes a loaded profile bookmarks state.
-type LoadResult struct {
-	File    *File
-	Existed bool // false when the profile had no Bookmarks file
-}
+// ErrNotChromium marks a profile whose bookmarks cannot be
+// confirmed to use the Chromium native format — most importantly
+// when the Bookmarks file does not exist at all. A missing file is
+// never treated as an empty Chromium document: DeBrowser must not
+// invent a bookmarks file for a profile whose browser it cannot
+// identify.
+var ErrNotChromium = errors.New("chromebookmarks: cannot confirm Chromium bookmarks format")
 
-// Load reads and parses the profile's Bookmarks file. A missing
-// file yields a fresh empty document (Existed=false), never an
-// error: a Chromium profile that has never saved a bookmark simply
-// has none yet. A present but unparsable file is an error and must
-// never be overwritten blindly.
-func Load(profileDir string) (*LoadResult, error) {
+// Load reads and fully validates the profile's Bookmarks file.
+// A missing file is an error (ErrNotChromium), and a present but
+// invalid file is an error too; neither is ever overwritten
+// blindly.
+func Load(profileDir string) (*File, error) {
 	path := filepath.Join(profileDir, FileName)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return &LoadResult{File: NewFile(), Existed: false}, nil
+		return nil, fmt.Errorf("%w: %s does not exist", ErrNotChromium, FileName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("chromebookmarks: read %s: %w", FileName, err)
 	}
-	parsed, err := Parse(data)
-	if err != nil {
-		return nil, err
-	}
-	return &LoadResult{File: parsed, Existed: true}, nil
+	return Parse(data)
 }
 
 var profileLocks sync.Map // abs profile dir -> *sync.Mutex
@@ -512,14 +536,65 @@ func LockProfile(profileDir string) func() {
 	return m.Unlock
 }
 
-// Save atomically replaces the profile's Bookmarks file with the
-// document: the new content is written to a temporary file in the
-// same directory, re-parsed for validation, then renamed over the
-// original, and finally re-read and re-parsed to prove the write
-// landed. Before replacement, the previous file (when one existed)
-// is copied to the single rolling recovery copy Bookmarks.debwbak.
-// Any failure leaves the original file in place.
-func Save(profileDir string, f *File, hadOriginal bool) error {
+// postReplaceHook, when non-nil, runs immediately after the
+// atomic replacement inside Save, before final verification. It
+// exists so tests can simulate a write that lands corrupted.
+var postReplaceHook func(profileDir string)
+
+// writeStagingFile writes data to a fresh temporary file in dir,
+// fsyncs and closes it, and returns its path. The caller removes
+// the file when it is not renamed into place.
+func writeStagingFile(dir, pattern string, data []byte) (string, error) {
+	tmp, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("chromebookmarks: create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("chromebookmarks: write temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("chromebookmarks: sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("chromebookmarks: close temp file: %w", err)
+	}
+	return tmpName, nil
+}
+
+// replaceFile atomically replaces target with data via a staging
+// file in the same directory, so a failure never leaves a partial
+// file behind at target.
+func replaceFile(dir, target string, data []byte) error {
+	staged, err := writeStagingFile(dir, "Bookmarks.stage-*", data)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(staged) }()
+	if err := os.Rename(staged, target); err != nil {
+		return fmt.Errorf("chromebookmarks: replace %s: %w", filepath.Base(target), err)
+	}
+	return nil
+}
+
+// Save replaces the profile's Bookmarks file with the document:
+//
+//  1. The new content is staged in a same-directory temp file and
+//     its exact bytes are validated.
+//  2. The current file is copied to the single rolling recovery
+//     copy Bookmarks.debwbak, itself written via staging+rename so
+//     it can never be left half-written.
+//  3. The staged content is atomically renamed over the original.
+//  4. The final file is re-read and fully validated. If that
+//     fails, Save restores the original from the recovery copy
+//     (again via staging+rename) and reports whether the restore
+//     succeeded — a failed write is never reported as success.
+func Save(profileDir string, f *File) error {
 	data, err := f.Serialize()
 	if err != nil {
 		return err
@@ -528,26 +603,14 @@ func Save(profileDir string, f *File, hadOriginal bool) error {
 		return fmt.Errorf("chromebookmarks: refusing to write invalid document: %w", err)
 	}
 	target := filepath.Join(profileDir, FileName)
+	backupPath := filepath.Join(profileDir, backupName)
 
-	tmp, err := os.CreateTemp(profileDir, "Bookmarks.tmp-*")
+	staged, err := writeStagingFile(profileDir, "Bookmarks.tmp-*", data)
 	if err != nil {
-		return fmt.Errorf("chromebookmarks: create temp file: %w", err)
+		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chromebookmarks: write temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chromebookmarks: sync temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("chromebookmarks: close temp file: %w", err)
-	}
-	// Validate the exact bytes on disk before they become the file.
-	onDisk, err := os.ReadFile(tmpName)
+	defer func() { _ = os.Remove(staged) }()
+	onDisk, err := os.ReadFile(staged)
 	if err != nil {
 		return fmt.Errorf("chromebookmarks: re-read temp file: %w", err)
 	}
@@ -555,25 +618,53 @@ func Save(profileDir string, f *File, hadOriginal bool) error {
 		return fmt.Errorf("chromebookmarks: temp file failed validation: %w", err)
 	}
 
-	if hadOriginal {
-		original, err := os.ReadFile(target)
-		if err != nil {
-			return fmt.Errorf("chromebookmarks: read original for backup: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(profileDir, backupName), original, 0o600); err != nil {
-			return fmt.Errorf("chromebookmarks: write recovery copy: %w", err)
-		}
+	original, err := os.ReadFile(target)
+	if err != nil {
+		return fmt.Errorf("chromebookmarks: read original for recovery copy: %w", err)
 	}
-	if err := os.Rename(tmpName, target); err != nil {
+	if err := replaceFile(profileDir, backupPath, original); err != nil {
+		return fmt.Errorf("chromebookmarks: write recovery copy: %w", err)
+	}
+
+	if err := os.Rename(staged, target); err != nil {
 		return fmt.Errorf("chromebookmarks: replace bookmarks file: %w", err)
 	}
-	// Prove the final file parses.
-	finalData, err := os.ReadFile(target)
-	if err != nil {
-		return fmt.Errorf("chromebookmarks: verify final file: %w", err)
+	if postReplaceHook != nil {
+		postReplaceHook(profileDir)
 	}
-	if _, err := Parse(finalData); err != nil {
-		return fmt.Errorf("chromebookmarks: final file failed validation: %w", err)
+	// Prove the final file reads back as a valid document.
+	finalData, rerr := os.ReadFile(target)
+	if rerr != nil {
+		return restoreAfterFailedVerify(profileDir, target, fmt.Errorf("re-read final file: %w", rerr))
+	}
+	if _, perr := Parse(finalData); perr != nil {
+		return restoreAfterFailedVerify(profileDir, target, fmt.Errorf("final file failed validation: %w", perr))
 	}
 	return nil
+}
+
+// restoreAfterFailedVerify puts the original bookmarks file back
+// from the recovery copy after a replacement landed but failed
+// verification, and reports the outcome precisely: the returned
+// error always states the write failed, and whether the original
+// was restored or the restore itself failed.
+func restoreAfterFailedVerify(profileDir, target string, verifyErr error) error {
+	backup, err := os.ReadFile(filepath.Join(profileDir, backupName))
+	if err != nil {
+		return fmt.Errorf("chromebookmarks: write failed (%v) and restore failed: read recovery copy: %w", verifyErr, err)
+	}
+	if _, err := Parse(backup); err != nil {
+		return fmt.Errorf("chromebookmarks: write failed (%v) and restore failed: recovery copy is invalid: %w", verifyErr, err)
+	}
+	if err := replaceFile(profileDir, target, backup); err != nil {
+		return fmt.Errorf("chromebookmarks: write failed (%v) and restore failed: %w", verifyErr, err)
+	}
+	restored, err := os.ReadFile(target)
+	if err != nil {
+		return fmt.Errorf("chromebookmarks: write failed (%v) and restore failed: re-read restored file: %w", verifyErr, err)
+	}
+	if _, err := Parse(restored); err != nil {
+		return fmt.Errorf("chromebookmarks: write failed (%v) and restore failed: restored file is invalid: %w", verifyErr, err)
+	}
+	return fmt.Errorf("chromebookmarks: write failed (%v); the original file was restored from the recovery copy", verifyErr)
 }

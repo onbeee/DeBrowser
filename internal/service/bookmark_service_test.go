@@ -69,11 +69,11 @@ func writeProfileBookmarks(t *testing.T, dir, content string) {
 
 func readProfileBookmarks(t *testing.T, dir string) *chromebookmarks.File {
 	t.Helper()
-	res, err := chromebookmarks.Load(dir)
+	file, err := chromebookmarks.Load(dir)
 	if err != nil {
 		t.Fatalf("load profile bookmarks: %v", err)
 	}
-	return res.File
+	return file
 }
 
 func TestLibraryCRUDAndValidation(t *testing.T) {
@@ -300,6 +300,111 @@ func TestSearchExcludesRunningInstances(t *testing.T) {
 	}
 	if len(search.Groups) != 1 || search.Groups[0].InstanceCount != 1 {
 		t.Fatalf("groups = %+v, want one group counting only the stopped instance", search.Groups)
+	}
+}
+
+// nestedFolderFixture holds Outer > Inner > Deep in the bookmark
+// bar, for parent+child batch operation tests.
+const nestedFolderFixture = `{
+  "checksum": "abc",
+  "roots": {
+    "bookmark_bar": {
+      "children": [
+        {"children": [
+          {"children": [
+            {"date_added": "13350000000000003", "date_last_used": "0", "guid": "g-8", "id": "8", "name": "Deep", "type": "url", "url": "https://deep.example/"}
+          ], "date_added": "13349000000000000", "date_modified": "13350000000000003", "guid": "g-7", "id": "7", "name": "Inner", "type": "folder"}
+        ], "date_added": "13349000000000000", "date_modified": "13350000000000003", "guid": "g-6", "id": "6", "name": "Outer", "type": "folder"}
+      ],
+      "date_added": "13300000000000000", "date_modified": "13350000000000003", "guid": "g-1", "id": "1", "name": "Bookmarks bar", "type": "folder"
+    },
+    "other": {"children": [], "date_added": "13300000000000000", "date_modified": "13300000000000000", "guid": "g-2", "id": "2", "name": "Other bookmarks", "type": "folder"},
+    "synced": {"children": [], "date_added": "13300000000000000", "date_modified": "13300000000000000", "guid": "g-3", "id": "3", "name": "Mobile bookmarks", "type": "folder"}
+  },
+  "version": 1
+}`
+
+func TestMissingBookmarksFileIsNotOperable(t *testing.T) {
+	bs, instSvc, _ := bookmarkTestServices(t)
+	inst := makeInstance(t, instSvc, "no-bookmarks-file")
+	dir := profileDirOf(t, bs, inst)
+	// The profile directory exists but holds no Bookmarks file:
+	// nothing about it may be treated as a confirmed Chromium
+	// profile.
+	infos, err := bs.ListBookmarkInstances()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos[0].BookmarkCount != -1 {
+		t.Errorf("count = %d, want -1 (unknown)", infos[0].BookmarkCount)
+	}
+	bm, _ := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example/"})
+	res, err := bs.SyncBookmarks("", []string{bm.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Instances[0].Status != "failed" {
+		t.Errorf("sync to file-less profile = %+v, want failed", res.Instances[0])
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Bookmarks")); !os.IsNotExist(err) {
+		t.Error("a Bookmarks file was created for an unconfirmed profile")
+	}
+	search, err := bs.SearchInstanceBookmarks("", "x", "bookmark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if search.UncheckedInstances != 1 || len(search.Groups) != 0 {
+		t.Errorf("search = %+v, want the instance unchecked and no groups", search)
+	}
+}
+
+func TestFolderParentChildBatchEditAndDelete(t *testing.T) {
+	bs, instSvc, _ := bookmarkTestServices(t)
+	inst := makeInstance(t, instSvc, "nested")
+	dir := profileDirOf(t, bs, inst)
+	writeProfileBookmarks(t, dir, nestedFolderFixture)
+
+	search, err := bs.SearchInstanceBookmarks("", "", "folder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(search.Groups) != 2 {
+		t.Fatalf("folder groups = %+v, want Outer and Inner as separate groups", search.Groups)
+	}
+	keys := []string{search.Groups[0].Key, search.Groups[1].Key}
+
+	// Edit: renaming the parent must not lose the child target.
+	edited, err := bs.ApplySearchEdit("", search.Token, keys, "Renamed", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.AffectedNodes != 2 || edited.FailedNodes != 0 || edited.UpdatedInstances != 1 {
+		t.Fatalf("parent+child edit = %+v", edited)
+	}
+	file := readProfileBookmarks(t, dir)
+	var folderNames []string
+	file.WalkFolders(func(f chromebookmarks.FlatFolder) { folderNames = append(folderNames, f.Name) })
+	if len(folderNames) != 2 || folderNames[0] != "Renamed" || folderNames[1] != "Renamed" {
+		t.Fatalf("folders after edit = %v", folderNames)
+	}
+
+	// Delete: the parent's subtree covers the child; the child
+	// must not be reported failed.
+	writeProfileBookmarks(t, dir, nestedFolderFixture)
+	search, err = bs.SearchInstanceBookmarks("", "", "folder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys = []string{search.Groups[0].Key, search.Groups[1].Key}
+	deleted, err := bs.ApplySearchDelete("", search.Token, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.AffectedNodes != 3 || deleted.FailedNodes != 0 || deleted.UpdatedInstances != 1 {
+		t.Fatalf("parent+child delete = %+v, want 3 affected (Outer+Inner+Deep), 0 failed", deleted)
+	}
+	if got := readProfileBookmarks(t, dir).CountBookmarks(); got != 0 {
+		t.Errorf("bookmarks left after folder delete: %d", got)
 	}
 }
 

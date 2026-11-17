@@ -1,6 +1,7 @@
 package chromebookmarks
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,36 +149,35 @@ func TestParseRejectsForeignDocuments(t *testing.T) {
 		`{"roots": {"bookmark_bar": {"type": "url"}}}`,
 		`not json at all`,
 		`[1,2,3]`,
+		// Trailing content after the document.
+		fixture + `{}`,
+		fixture + `garbage`,
+		// A child that is not an object must not be silently dropped.
+		`{"roots": {"bookmark_bar": {"type": "folder", "children": [42]}}}`,
+		// Folder without a children array.
+		`{"roots": {"bookmark_bar": {"type": "folder"}}}`,
+		// Folder whose children is not an array.
+		`{"roots": {"bookmark_bar": {"type": "folder", "children": {}}}}`,
+		// Url node without a string url.
+		`{"roots": {"bookmark_bar": {"type": "folder", "children": [{"type": "url", "name": "x"}]}}}`,
+		// Unrecognized node type.
+		`{"roots": {"bookmark_bar": {"type": "folder", "children": [{"type": "separator", "name": "x"}]}}}`,
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
-			t.Errorf("Parse(%s) succeeded, want error", bad)
+			t.Errorf("Parse(%.60s...) succeeded, want error", bad)
 		}
 	}
 }
 
-func TestLoadMissingFileAndSaveCreatesValidFile(t *testing.T) {
+func TestLoadMissingFileFailsAndCreatesNothing(t *testing.T) {
 	dir := t.TempDir()
-	res, err := Load(dir)
-	if err != nil {
-		t.Fatal(err)
+	// A profile without a Bookmarks file cannot be confirmed as
+	// Chromium: Load must refuse, and must not invent a file.
+	if _, err := Load(dir); !errors.Is(err, ErrNotChromium) {
+		t.Fatalf("Load error = %v, want ErrNotChromium", err)
 	}
-	if res.Existed {
-		t.Fatal("Existed = true for a fresh profile")
-	}
-	bar := res.File.EnsureBookmarkBar()
-	AppendChild(bar, res.File.NewBookmark("New", "https://new.example/"))
-	if err := Save(dir, res.File, res.Existed); err != nil {
-		t.Fatal(err)
-	}
-	back, err := Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !back.Existed || back.File.CountBookmarks() != 1 {
-		t.Fatalf("after save: existed %v count %d", back.Existed, back.File.CountBookmarks())
-	}
-	if _, err := os.Stat(filepath.Join(dir, backupName)); !os.IsNotExist(err) {
-		t.Error("no recovery copy should exist when there was no original file")
+	if _, err := os.Stat(filepath.Join(dir, FileName)); !os.IsNotExist(err) {
+		t.Error("a Bookmarks file was created for an unconfirmed profile")
 	}
 }
 
@@ -186,16 +186,16 @@ func TestSaveKeepsRollingBackupOfOriginal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(fixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Load(dir)
+	file, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bar := res.File.Root("bookmark_bar")
+	bar := file.Root("bookmark_bar")
 	if ChildHasURL(bar, "https://example.com/") != true {
 		t.Fatal("fixture bookmark not found at bar level")
 	}
-	AppendChild(bar, res.File.NewBookmark("Added", "https://added.example/"))
-	if err := Save(dir, res.File, res.Existed); err != nil {
+	AppendChild(bar, file.NewBookmark("Added", "https://added.example/"))
+	if err := Save(dir, file); err != nil {
 		t.Fatal(err)
 	}
 	backup, err := os.ReadFile(filepath.Join(dir, backupName))
@@ -209,12 +209,12 @@ func TestSaveKeepsRollingBackupOfOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.File.CountBookmarks() != 3 {
-		t.Fatalf("count after add = %d, want 3", back.File.CountBookmarks())
+	if back.CountBookmarks() != 3 {
+		t.Fatalf("count after add = %d, want 3", back.CountBookmarks())
 	}
 	// Node ids stayed stable and unique.
 	seen := map[string]bool{}
-	back.File.WalkBookmarks(func(b FlatBookmark) {
+	back.WalkBookmarks(func(b FlatBookmark) {
 		if seen[b.NodeID] {
 			t.Errorf("duplicate node id %q", b.NodeID)
 		}
@@ -237,6 +237,91 @@ func TestCorruptFileLoadFailsAndIsLeftUntouched(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(dir, FileName))
 	if string(after) != string(broken) {
 		t.Error("corrupt file was modified")
+	}
+}
+
+func writeFixtureProfile(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestSaveFailsWhenRecoveryCopyCannotBeWritten(t *testing.T) {
+	dir := writeFixtureProfile(t)
+	// A directory squatting on the recovery copy's name makes its
+	// safe write (staging + rename) fail.
+	if err := os.Mkdir(filepath.Join(dir, backupName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	AppendChild(file.Root("bookmark_bar"), file.NewBookmark("X", "https://x.example/"))
+	if err := Save(dir, file); err == nil {
+		t.Fatal("Save succeeded despite an unwritable recovery copy")
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, FileName))
+	if string(after) != fixture {
+		t.Error("original file changed after failed Save")
+	}
+}
+
+func TestSaveFailsWhenReplacementCannotLand(t *testing.T) {
+	dir := t.TempDir()
+	// The target path is a directory: the atomic rename must fail
+	// and the error must surface.
+	if err := os.Mkdir(filepath.Join(dir, FileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := mustParse(t, fixture)
+	if err := Save(dir, file); err == nil {
+		t.Fatal("Save succeeded despite an unreplaceable target")
+	}
+	if info, err := os.Stat(filepath.Join(dir, FileName)); err != nil || !info.IsDir() {
+		t.Error("target directory was disturbed")
+	}
+}
+
+func TestSaveRestoresOriginalWhenFinalVerificationFails(t *testing.T) {
+	dir := writeFixtureProfile(t)
+	file, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	AppendChild(file.Root("bookmark_bar"), file.NewBookmark("X", "https://x.example/"))
+	postReplaceHook = func(d string) {
+		_ = os.WriteFile(filepath.Join(d, FileName), []byte("{corrupted"), 0o600)
+	}
+	defer func() { postReplaceHook = nil }()
+	err = Save(dir, file)
+	if err == nil || !strings.Contains(err.Error(), "restored") {
+		t.Fatalf("Save error = %v, want a failure reporting the restore", err)
+	}
+	after, rerr := os.ReadFile(filepath.Join(dir, FileName))
+	if rerr != nil || string(after) != fixture {
+		t.Error("original file was not restored byte-for-byte")
+	}
+}
+
+func TestSaveReportsRestoreFailure(t *testing.T) {
+	dir := writeFixtureProfile(t)
+	file, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postReplaceHook = func(d string) {
+		// Corrupt both the landed file and the recovery copy.
+		_ = os.WriteFile(filepath.Join(d, FileName), []byte("{corrupted"), 0o600)
+		_ = os.WriteFile(filepath.Join(d, backupName), []byte("{also corrupted"), 0o600)
+	}
+	defer func() { postReplaceHook = nil }()
+	err = Save(dir, file)
+	if err == nil || !strings.Contains(err.Error(), "restore failed") {
+		t.Fatalf("Save error = %v, want a failure reporting the failed restore", err)
 	}
 }
 

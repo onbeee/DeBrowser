@@ -355,8 +355,8 @@ func (s *BookmarkService) ListBookmarkInstances() ([]BookmarkInstanceInfo, error
 		_, dir, gate, gerr := s.instances.InstanceBookmarkAccess(inst.ID)
 		if gerr == nil && gate == BookmarkGateStopped {
 			unlock := chromebookmarks.LockProfile(dir)
-			if res, lerr := chromebookmarks.Load(dir); lerr == nil {
-				info.BookmarkCount = res.File.CountBookmarks()
+			if file, lerr := chromebookmarks.Load(dir); lerr == nil {
+				info.BookmarkCount = file.CountBookmarks()
 			}
 			unlock()
 		}
@@ -490,22 +490,22 @@ func (s *BookmarkService) syncToInstance(instanceID string, tops []model.Bookmar
 	loaded, err := chromebookmarks.Load(dir)
 	if err != nil {
 		res.Status = "failed"
-		res.Reason = "无法读取该实例的书签文件（格式不支持或文件损坏）"
+		res.Reason = "无法确认该实例的书签格式或书签文件不可读（文件不存在、格式不支持或已损坏）"
 		return res
 	}
-	initialCount := loaded.File.CountBookmarks()
-	bar := loaded.File.EnsureBookmarkBar()
+	initialCount := loaded.CountBookmarks()
+	bar := loaded.EnsureBookmarkBar()
 	for _, top := range tops {
-		s.addLibraryNode(loaded.File, bar, top, children, &res)
+		s.addLibraryNode(loaded, bar, top, children, &res)
 	}
-	if err := chromebookmarks.Save(dir, loaded.File, loaded.Existed); err != nil {
+	if err := chromebookmarks.Save(dir, loaded); err != nil {
 		res.Status = "failed"
 		res.Reason = "写入书签文件失败：" + err.Error()
 		return res
 	}
 	// Re-read and verify the additions actually landed.
 	verify, err := chromebookmarks.Load(dir)
-	if err != nil || verify.File.CountBookmarks() != initialCount+res.Added {
+	if err != nil || verify.CountBookmarks() != initialCount+res.Added {
 		res.Status = "failed"
 		res.Reason = "写入后验证失败，书签可能未完整保存"
 		return res

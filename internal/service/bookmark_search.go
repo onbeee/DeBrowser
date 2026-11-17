@@ -111,7 +111,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 			continue
 		}
 		if kind == model.BookmarkKindBookmark {
-			loaded.File.WalkBookmarks(func(b chromebookmarks.FlatBookmark) {
+			loaded.WalkBookmarks(func(b chromebookmarks.FlatBookmark) {
 				if q != "" && !strings.Contains(strings.ToLower(b.Name), q) && !strings.Contains(strings.ToLower(b.URL), q) {
 					return
 				}
@@ -121,7 +121,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 				})
 			})
 		} else {
-			loaded.File.WalkFolders(func(fl chromebookmarks.FlatFolder) {
+			loaded.WalkFolders(func(fl chromebookmarks.FlatFolder) {
 				if q != "" && !strings.Contains(strings.ToLower(fl.Name), q) {
 					return
 				}
@@ -301,46 +301,64 @@ func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkT
 		result.FailedNodes += len(targets)
 		return
 	}
-	changed := false
+
+	// Phase 1: locate and verify EVERY selected target against the
+	// freshly read file before modifying anything. Verified nodes
+	// are held by direct reference, so a later rename of a selected
+	// parent folder cannot invalidate a selected child's target.
+	type verifiedTarget struct {
+		node   map[string]any
+		parent map[string]any
+		depth  int
+	}
+	wantType := "url"
+	if kind == model.BookmarkKindFolder {
+		wantType = "folder"
+	}
+	verified := make([]verifiedTarget, 0, len(targets))
 	failedHere := 0
 	for _, t := range targets {
-		node, parent, rootKey, path, ok := loaded.File.Locate(t.NodeID)
-		if !ok || rootKey != t.RootKey || !samePath(path, t.Path) || chromebookmarks.NameOf(node) != t.Name {
+		node, parent, rootKey, path, ok := loaded.Locate(t.NodeID)
+		if !ok || rootKey != t.RootKey || !samePath(path, t.Path) ||
+			chromebookmarks.NameOf(node) != t.Name ||
+			chromebookmarks.TypeOf(node) != wantType ||
+			(kind == model.BookmarkKindBookmark && chromebookmarks.URLOf(node) != t.URL) {
 			failedHere++
 			continue
 		}
-		wantType := "url"
-		if kind == model.BookmarkKindFolder {
-			wantType = "folder"
-		}
-		if chromebookmarks.TypeOf(node) != wantType {
-			failedHere++
-			continue
-		}
-		if kind == model.BookmarkKindBookmark && chromebookmarks.URLOf(node) != t.URL {
-			failedHere++
-			continue
-		}
-		if mutate != nil {
-			if err := mutate(node, kind); err != nil {
+		verified = append(verified, verifiedTarget{node: node, parent: parent, depth: len(t.Path)})
+	}
+
+	// Phase 2: apply. Edits mutate the held node references in
+	// place. Deletes run deepest-first, so when a folder and its
+	// own subfolder are both selected, the subfolder is removed
+	// (and counted) before the parent takes the rest of its
+	// subtree with it — never reported as a failure.
+	changed := false
+	applied := 0
+	if mutate != nil {
+		for _, v := range verified {
+			if err := mutate(v.node, kind); err != nil {
 				failedHere++
 				continue
 			}
-			result.AffectedNodes++
+			applied++
 			changed = true
-			continue
 		}
-		// Delete: count the node plus everything inside it.
-		result.AffectedNodes += subtreeNodeCount(node)
-		if parent == nil || !chromebookmarks.RemoveFromParent(parent, node) {
-			failedHere++
-			result.AffectedNodes -= subtreeNodeCount(node)
-			continue
+	} else {
+		sort.SliceStable(verified, func(i, j int) bool { return verified[i].depth > verified[j].depth })
+		for _, v := range verified {
+			count := subtreeNodeCount(v.node)
+			if v.parent == nil || !chromebookmarks.RemoveFromParent(v.parent, v.node) {
+				failedHere++
+				continue
+			}
+			applied += count
+			changed = true
 		}
-		changed = true
 	}
-	result.FailedNodes += failedHere
 	if !changed {
+		result.FailedNodes += failedHere
 		if failedHere > 0 {
 			result.FailedInstances++
 		} else {
@@ -348,11 +366,15 @@ func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkT
 		}
 		return
 	}
-	if err := chromebookmarks.Save(dir, loaded.File, loaded.Existed); err != nil {
+	if err := chromebookmarks.Save(dir, loaded); err != nil {
+		// Nothing was persisted: the in-memory changes count as
+		// failed, not affected.
 		result.FailedInstances++
-		result.FailedNodes += len(targets) - failedHere
+		result.FailedNodes += failedHere + applied
 		return
 	}
+	result.AffectedNodes += applied
+	result.FailedNodes += failedHere
 	if failedHere > 0 {
 		result.FailedInstances++
 	} else {
