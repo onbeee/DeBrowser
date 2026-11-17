@@ -13,6 +13,23 @@ export interface ApplySearchResult {
     "failedNodes": number;
 }
 
+/**
+ * ArrangeFailure reports one instance whose window could not be
+ * placed.
+ */
+export interface ArrangeFailure {
+    "instanceId": string;
+    "reason": string;
+}
+
+/**
+ * ArrangeResult is the outcome of an arrange operation.
+ */
+export interface ArrangeResult {
+    "placed": string[] | null;
+    "failures": ArrangeFailure[] | null;
+}
+
 export interface BookmarkInstanceInfo {
     "id": string;
     "name": string;
@@ -243,6 +260,25 @@ export interface SyncBookmarksResult {
     "failedBookmarks": number;
 }
 
+/**
+ * SyncInstanceInfo is one row of the sync page's instance list.
+ */
+export interface SyncInstanceInfo {
+    "id": string;
+    "name": string;
+    "kernelName": string;
+    "status": string;
+    "cdpAvailable": boolean;
+    "cdpReason": string;
+
+    /**
+     * "", "master", "follower"
+     */
+    "role": string;
+    "failed": boolean;
+    "failureReason": string;
+}
+
 export interface SyncInstanceResult {
     "instanceId": string;
     "instanceName": string;
@@ -255,6 +291,27 @@ export interface SyncInstanceResult {
     "skipped": number;
     "failed": number;
     "reason": string;
+}
+
+/**
+ * SyncMonitor is one display offered for window arrangement.
+ */
+export interface SyncMonitor {
+    "index": number;
+    "primary": boolean;
+    "scalePercent": number;
+    "workWidth": number;
+    "workHeight": number;
+}
+
+/**
+ * SyncSessionState is the sync page's control/status snapshot.
+ */
+export interface SyncSessionState {
+    "state": string;
+    "masterId": string;
+    "followers": SyncInstanceInfo[] | null;
+    "lastError": string;
 }
 
 /**

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -104,6 +105,14 @@ var watchSettleHook func(instanceID string)
 type procWatch struct {
 	proc runner.Process
 	done chan struct{}
+	// cdpPort is the loopback Chrome DevTools port this process
+	// was launched with (Stage 10). Zero for processes that were
+	// not launched by this build with a debugging port — notably
+	// instances re-attached after a DeBrowser restart, whose
+	// browsers were started by an older version: they cannot be
+	// controlled over CDP and are reported as sync-unsupported
+	// until relaunched.
+	cdpPort int
 	// exited is set under rtMu by the watcher the moment it
 	// observes the exit, before any cleanup: a start operation
 	// that sees it knows the process is gone and must not
@@ -610,7 +619,21 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	}
 	s.rtMu.Unlock()
 
-	args := []string{"--user-data-dir=" + launchDir}
+	// Stage 10: every launch gets its own loopback-only CDP port
+	// so a running instance can be controlled for multi-instance
+	// sync. The port is allocated by briefly listening on
+	// 127.0.0.1:0; the browser binds it immediately after. The
+	// identity verification only compares --user-data-dir, so the
+	// extra switches do not affect it.
+	cdpPort, perr := allocateLoopbackPort()
+	if perr != nil {
+		return fail(fmt.Errorf("分配浏览器调试端口失败：%w", perr))
+	}
+	args := []string{
+		"--user-data-dir=" + launchDir,
+		"--remote-debugging-address=127.0.0.1",
+		"--remote-debugging-port=" + strconv.Itoa(cdpPort),
+	}
 	if strings.TrimSpace(inst.StartURL) != "" {
 		args = append(args, strings.TrimSpace(inst.StartURL))
 	}
@@ -640,7 +663,7 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	// so an exit at any point of the remaining start sequence is
 	// observed exactly once and can never be overwritten by the
 	// start flow persisting a running state for a dead process.
-	w := &procWatch{proc: proc, done: make(chan struct{})}
+	w := &procWatch{proc: proc, done: make(chan struct{}), cdpPort: cdpPort}
 	s.rtMu.Lock()
 	s.procs[id] = w
 	s.rtMu.Unlock()
@@ -858,4 +881,43 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	// running — never a premature "stopped".
 	op.Step("关闭浏览器", logging.StatusFailed, nil)
 	return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
+}
+
+// allocateLoopbackPort reserves an ephemeral TCP port on
+// 127.0.0.1 and releases it for the browser to bind. Two calls
+// never return the same live port; the small race between the
+// release and the browser's bind is inherent to Chromium's
+// command-line port hand-off and is verified by the CDP connect
+// step before any sync starts.
+func allocateLoopbackPort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = l.Close() }()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// instanceCDPPort returns the loopback CDP port of the instance's
+// currently tracked process, or 0 when the instance is not
+// running under this build's launch (stopped, unknown, or
+// re-attached from an older launch without a debugging port).
+func (s *InstanceService) instanceCDPPort(id string) int {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	if w, ok := s.procs[id]; ok {
+		return w.cdpPort
+	}
+	return 0
+}
+
+// instanceProcessID returns the OS process id of the instance's
+// tracked browser process, for mapping OS windows to instances.
+func (s *InstanceService) instanceProcessID(id string) (int, bool) {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	if w, ok := s.procs[id]; ok {
+		return w.proc.PID(), true
+	}
+	return 0, false
 }

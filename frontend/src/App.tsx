@@ -9,6 +9,7 @@ import InstancesPage from "./pages/InstancesPage";
 import KernelsPage from "./pages/KernelsPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
+import SyncPage from "./pages/SyncPage";
 import BookmarksPage from "./pages/BookmarksPage";
 import ProxyConfigPage from "./pages/ProxyConfigPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -85,6 +86,8 @@ export default function App() {
             <DataManagementPage />
           ) : page === "bookmarks" ? (
             <BookmarksPage />
+          ) : page === "sync" ? (
+            <SyncPage />
           ) : (
             <PlannedPage page={page} />
           )}
