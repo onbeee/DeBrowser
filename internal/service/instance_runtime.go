@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -120,6 +121,13 @@ type procWatch struct {
 	// DeBrowser is a normal exit for status purposes, whatever
 	// its code (a browser answering SIGTERM reports -1, not 0).
 	stopAsked bool
+	// cdpPort is the loopback Chrome DevTools Protocol port this
+	// process was launched with (Stage 10 v2), or 0 when the
+	// process was not launched with one — a process re-attached
+	// after a DeBrowser restart, or one started by an older
+	// version. It lives only in this in-memory record: never
+	// persisted, never shown to the frontend.
+	cdpPort int
 }
 
 // reconcileEvent is one startup-reconciliation outcome, buffered
@@ -610,7 +618,19 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	}
 	s.rtMu.Unlock()
 
+	// Stage 10 v2: every launch gets its own loopback-only CDP
+	// port so multi-instance sync can attach per instance. The
+	// port is chosen by binding :0 and releasing; the small race
+	// is acceptable because a lost race only means this launch's
+	// sync is unavailable (the browser itself starts normally),
+	// and the port is verified again when a sync session starts.
+	cdpPort := allocateLoopbackPort()
 	args := []string{"--user-data-dir=" + launchDir}
+	if cdpPort > 0 {
+		args = append(args,
+			"--remote-debugging-address=127.0.0.1",
+			"--remote-debugging-port="+strconv.Itoa(cdpPort))
+	}
 	if strings.TrimSpace(inst.StartURL) != "" {
 		args = append(args, strings.TrimSpace(inst.StartURL))
 	}
@@ -640,7 +660,7 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	// so an exit at any point of the remaining start sequence is
 	// observed exactly once and can never be overwritten by the
 	// start flow persisting a running state for a dead process.
-	w := &procWatch{proc: proc, done: make(chan struct{})}
+	w := &procWatch{proc: proc, done: make(chan struct{}), cdpPort: cdpPort}
 	s.rtMu.Lock()
 	s.procs[id] = w
 	s.rtMu.Unlock()
@@ -858,4 +878,47 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	// running — never a premature "stopped".
 	op.Step("关闭浏览器", logging.StatusFailed, nil)
 	return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
+}
+
+// allocateLoopbackPort reserves an ephemeral TCP port on the
+// loopback interface and releases it for the browser to bind.
+// It returns 0 when no port could be reserved; the launch then
+// proceeds without CDP and sync reports the instance as
+// unsupported until it is restarted.
+func allocateLoopbackPort() int {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = ln.Close() }()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0
+	}
+	return addr.Port
+}
+
+// instanceCDPPort reports the CDP port of the instance's current
+// process, or 0 when the instance is not running under DeBrowser
+// with a CDP-enabled launch. Sync support code only.
+func (s *InstanceService) instanceCDPPort(id string) int {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	if w, ok := s.procs[id]; ok && !w.exited {
+		return w.cdpPort
+	}
+	return 0
+}
+
+// instanceProcessID reports the OS pid of the instance's current
+// process, or 0 when it is not running under DeBrowser. The pid
+// is only ever used together with the runtime identity record —
+// never as an identity on its own.
+func (s *InstanceService) instanceProcessID(id string) int {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	if w, ok := s.procs[id]; ok && !w.exited {
+		return w.proc.PID()
+	}
+	return 0
 }

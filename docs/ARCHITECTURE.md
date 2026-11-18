@@ -42,7 +42,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | --- | --- |
 | `main.go` | 程序入口与启动装配（顺序见下） |
 | `internal/app` | Wails 应用组装、窗口、原生对话框接线 |
-| `internal/service` | 面向前端的五个服务（业务逻辑与统一记录） |
+| `internal/service` | 面向前端的六个服务（业务逻辑与统一记录） |
 | `internal/store` | SQLite 仓储层（全部核心 SQL 在此） |
 | `internal/model` | 纯数据类型，无行为、无依赖 |
 | `internal/database` | 打开数据库、pragma、迁移、迁移前备份 |
@@ -53,6 +53,10 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | `internal/config`、`internal/settings` | 配置解析与用户设置（`config/settings.json`） |
 | `internal/singleinstance`、`internal/lifecycle` | 单实例锁与后台循环治理 |
 | `internal/pfiles`、`internal/safedelete` | Profile 文件夹的对象锚定安全删除 |
+| `internal/cdp` | 最小 CDP 客户端（事件投递与读循环解耦，处理函数可回调同一连接） |
+| `internal/capture` | 主实例输入观察（Windows 低级钩子，仅观察、无任何注入能力） |
+| `internal/winmgr` | 原生窗口管理（几何、显示状态、显示器枚举、命中分类；全部调用带不激活标志） |
+| `internal/uia` | Windows UI Automation（控件发现、能力探测与语义调用；不读网页内容子树） |
 | `frontend/src` | 页面（`pages/`）、布局（`components/layout/`）、状态（`stores/`）、操作号工具（`lib/`） |
 | `frontend/bindings` | Wails 生成的 TypeScript bindings，永不手工编辑 |
 
@@ -64,7 +68,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 2. `logging` 打开日志系统（在数据库与服务之前打开，关闭时最后关闭）。
 3. `singleinstance` 取得按安装划分的操作系统级文件锁（`data/app.lock`）。锁由操作系统仲裁并在持有者以任何方式退出时自动释放，不存在陈旧锁；第二次启动只写入激活信号（`data/activate.request`）请已运行实例聚焦窗口，然后在不触碰数据库的情况下退出。
 4. `database` 打开 SQLite 并以事务方式应用待执行迁移（升级前先做经验证的备份，见 [DATABASE.md](DATABASE.md)）；`secrets` 打开凭据 Vault。
-5. `service` 构建五个服务并完成启动对账（见「浏览器运行机制」）；`app` 组装 Wails 应用并运行。后台循环（状态事件、激活监视）由 `lifecycle` 在应用 context 下治理，关闭时按固定顺序释放：循环 → 数据库 → 实例锁 → 日志。
+5. `service` 构建六个服务并完成启动对账（见「浏览器运行机制」）；`app` 组装 Wails 应用并运行。后台循环（状态事件、激活监视）由 `lifecycle` 在应用 context 下治理，关闭时按固定顺序释放：循环 → 数据库 → 实例锁 → 日志。
 
 ## 系统模块
 
@@ -79,12 +83,13 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | 设置 | 主题（浅色/暖色/深色）、日志容量等，存 `config/settings.json` | 已交付 |
 | 书签 | 资源库（文件夹树）管理 + 向实例分发、跨实例聚合搜索/编辑/删除 | 已交付（Stage 9C 书签部分） |
 | 代理配置 | 仅占位页面，无后端功能 | 待开发（Stage 6C） |
-| CDP | 每实例 localhost CDP 端口 | 未实现（Stage 9C 后续部分） |
-| 多开同步、程序内更新、备份与恢复 | — | 未实现（Stage 10–12） |
+| CDP | 每实例独立的 localhost CDP 端口（仅 127.0.0.1，端口只存运行时内存） | 已交付（Stage 10 v2） |
+| 多开同步 | CDP 网页操作 + UI Automation 界面语义操作 + 原生窗口管理 | 已交付（Stage 10 v2，待实机验收） |
+| 程序内更新、备份与恢复 | — | 未实现（Stage 11–12） |
 
 ## 前后端通信
 
-- **Bindings**：五个 Go 服务的导出方法经静态生成的 TypeScript bindings 暴露给前端（`wails3 generate bindings` 重新生成；CI 校验已提交的 bindings 与生成结果一致）。当前共 5 个服务、36 个方法。前端只能调用明确注册的服务方法，不能执行任意命令。
+- **Bindings**：六个 Go 服务的导出方法经静态生成的 TypeScript bindings 暴露给前端（`wails3 generate bindings` 重新生成；CI 校验已提交的 bindings 与生成结果一致）。当前共 6 个服务、45 个方法。前端只能调用明确注册的服务方法，不能执行任意命令。
 - **事件**：目前只有一个类型化事件 `app:status`（应用状态，每 10 秒发出，也可经 `AppService.GetStatus()` 按需获取）。
 - **前端状态**：单个 Zustand store 保存当前页面、后端状态与主题；页面级状态留在各页面内。每次用户操作由前端生成唯一的 `operation_id` 并作为绑定的第一个参数传入，贯穿该操作的全部日志记录（见「日志」）。
 
@@ -104,11 +109,22 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ### 启动、关闭与进程身份
 
-- **启动**：服务按实例关联的登记 ID 实时解析可执行路径（路径不落库，登记改路径即时生效），校验实例文件是 `data/profiles/` 下的受管文件夹（缺失时补建空目录；无法证明位于受管根内时拒绝启动），以 `--user-data-dir=<实例文件绝对路径>` 启动进程。进程存活过稳定窗口且身份核验全部通过后，才写入身份记录（`instance_runtime` 表）、置为运行中并开始监控。
+- **启动**：服务按实例关联的登记 ID 实时解析可执行路径（路径不落库，登记改路径即时生效），校验实例文件是 `data/profiles/` 下的受管文件夹（缺失时补建空目录；无法证明位于受管根内时拒绝启动），以 `--user-data-dir=<实例文件绝对路径>` 启动进程，并附带 `--remote-debugging-address=127.0.0.1` 与每实例独立的 `--remote-debugging-port`（端口由系统分配、只保存在运行时内存、不落库；接管的旧进程没有该端口，明确标记为不支持同步，关闭重启动后恢复）。进程存活过稳定窗口且身份核验全部通过后，才写入身份记录（`instance_runtime` 表）、置为运行中并开始监控。
 - **身份核验**：PID + 进程创建时间 + 可执行路径 + 命令行，四项共同核验；命令行经严格参数解析，`--user-data-dir` 的值必须与实例文件完整路径精确相等（子串或前缀相同不算一致）。任一信号缺失或不可读一律视为核验失败，绝不猜测。
 - **关闭**：只对已核验的被跟踪进程投递优雅关闭（Windows 的 `WM_CLOSE`，等同用户点击关闭按钮）；从不按进程名全局结束进程，从不强制结束进程树。限定时间内未退出则如实报告「关闭未完成」，实例保持运行中。
 - **退出感知**：每个被跟踪进程都有监控协程；用户直接关闭浏览器窗口或浏览器崩溃都会被感知，身份记录随之删除，状态按退出码更新为已关闭或错误。
 - **重启恢复**：DeBrowser 退出不关闭浏览器。下次启动时按身份记录逐项重新核验：通过的重新接管监控；证明已失效的清除并置为已关闭；进程仍在但身份无法确认的，实例进入「无法确认」状态并冻结一切可能危及数据的操作（启动、关闭、删除、重命名/更换实例文件），只保留无风险的查看与名称、内核关联修改，留待后续对账重新判定。核验失败且无法确认本次启动的进程已退出时，同样写入身份记录进入「无法确认」，绝不冒充普通失败。
+
+
+## 多开同步机制（Stage 10 v2）
+
+同步会话与临时状态只存内存，不新增数据库表。机制分三条彼此独立的通道，全程不使用 SendInput/PostMessage 等系统输入模拟，不激活跟随窗口、不切换前台、不移动真实鼠标（第一版 PR #17 的 SendInput 镜像方案已因实机鼠标漂移与焦点闪烁被否决并整体移除）：
+
+- **网页内容（CDP）**：主实例内容区的鼠标、键盘、滚轮事件由低级钩子仅观察，经坐标映射（按内容区矩形与各实例 CSS 视口比例）后，通过每个跟随实例自己的 CDP 连接以 `Input` 域命令执行。每个跟随实例有独立的有界事件队列与独立分发循环：鼠标移动合并为最新位置，按下/释放与键盘事件保序且释放永不丢弃；一个跟随实例缓慢或失败不阻塞其他实例；暂停、停止与失败时都会向全部跟随实例（含已失败者）尝试释放已注入的按键与鼠标状态。地址栏等浏览器界面获得焦点时的按键不会转发到跟随实例的网页。
+- **浏览器界面（语义操作）**：标签新建/关闭用 CDP `Target` 命令；页面导航（含地址栏提交后的导航）由主实例的已提交导航事件驱动跟随实例 `Page.navigate`，不读取地址栏未提交文本；前进/后退按各跟随实例自己的导航历史执行；标签切换经 UI Automation 读取主实例标签栏选中项后以 `Target.activateTarget` 执行。UI Automation（`internal/uia`）还负责逐实例能力探测（地址栏、标签栏、菜单按钮是否可识别）并在同步页如实展示；探测不进入网页内容（Document）子树。没有语义通道的操作（如部分菜单、扩展弹窗、右键菜单）不做任何模拟，逐实例反馈无法执行及原因。
+- **窗口行为（原生窗口管理）**：轮询主实例窗口的位置、尺寸与显示状态，用带 `SWP_NOACTIVATE` 的窗口调用同步到跟随实例；自动排列按目标显示器工作区计算网格（考虑任务栏、多显示器与 DPI），排列前保存原始位置与状态，可一键恢复，排列不依赖同步会话。
+
+隐私：同步不读取 Cookie、密码、Token、本地存储、历史记录、网页正文、DOM 与用户输入文本；导航信息只在会话内传递，不写日志。统一日志只记录同步开始/暂停/恢复/停止、主实例断开、跟随实例失败等业务事件。主实例连接断开时整场结束；单个跟随实例失败只标记该实例。支持等级（可靠/条件/当前无法可靠支持）在同步页与 [ROADMAP.md](ROADMAP.md) 中如实区分；中文输入法组合输入当前无法可靠同步。整体尚未完成 Windows 11 实机验收。
 
 ## 书签机制
 
@@ -153,4 +169,4 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 当前功能边界
 
-已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。未接入：CDP（Stage 9C 后续部分）、多开同步（Stage 10）、程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
+已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。多开同步与每实例 CDP 已随 Stage 10 v2 交付（待 Windows 11 实机验收）。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。

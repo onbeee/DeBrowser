@@ -3,6 +3,7 @@ module github.com/onbeee/DeBrowser
 go 1.26.0
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/wailsapp/wails/v3 v3.0.0
 	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.62.0
@@ -10,7 +11,6 @@ require (
 
 require (
 	github.com/adrg/xdg v0.5.3 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect

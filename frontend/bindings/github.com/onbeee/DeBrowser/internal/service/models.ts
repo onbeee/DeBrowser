@@ -243,6 +243,33 @@ export interface SyncBookmarksResult {
     "failedBookmarks": number;
 }
 
+export interface SyncCapabilitiesInfo {
+    "available": boolean;
+    "addressBar": boolean;
+    "tabStrip": boolean;
+    "menuButton": boolean;
+}
+
+export interface SyncFollowerState {
+    "id": string;
+    "name": string;
+
+    /**
+     * active | failed
+     */
+    "status": string;
+    "reason"?: string;
+    "caps": SyncCapabilitiesInfo;
+}
+
+export interface SyncInstanceOption {
+    "id": string;
+    "name": string;
+    "running": boolean;
+    "cdpSupported": boolean;
+    "unsupportedNote"?: string;
+}
+
 export interface SyncInstanceResult {
     "instanceId": string;
     "instanceName": string;
@@ -255,6 +282,34 @@ export interface SyncInstanceResult {
     "skipped": number;
     "failed": number;
     "reason": string;
+}
+
+export interface SyncMonitorInfo {
+    "index": number;
+    "primary": boolean;
+    "width": number;
+    "height": number;
+    "scale": number;
+}
+
+export interface SyncState {
+    /**
+     * idle | running | paused
+     */
+    "phase": string;
+    "masterId"?: string;
+    "masterName"?: string;
+    "masterCaps": SyncCapabilitiesInfo;
+    "followers": SyncFollowerState[] | null;
+    "uiSkipped": number;
+    "hasArranged": boolean;
+}
+
+export interface SyncWindowResult {
+    "instanceId": string;
+    "name": string;
+    "ok": boolean;
+    "reason"?: string;
 }
 
 /**
