@@ -237,6 +237,11 @@ export default function SyncPage() {
             </div>
           </div>
           <p className="mt-1 text-xs text-(--text-faint)">主实例界面能力：{state ? capsSummary(state.masterCaps) : ""}</p>
+          {state && !state.tabMapOk && (
+            <p className="mt-1 text-xs text-(--text-dim)">
+              标签切换同步当前不可用：无法可靠确认主实例的标签顺序与对应关系（例如存在同名标签），已停止切换跟随，不会激活可能错误的标签；新建、关闭标签仍会同步。
+            </p>
+          )}
           <ul className="mt-3 space-y-2">
             {(state?.followers ?? []).map((f) => (
               <li key={f.id} className="flex items-start justify-between gap-3 rounded-md bg-(--hover-bg) px-3 py-2">
@@ -245,6 +250,9 @@ export default function SyncPage() {
                   <p className="text-xs text-(--text-faint)">{capsSummary(f.caps)}</p>
                   {f.status === "failed" && f.reason && (
                     <p className="mt-0.5 text-xs text-(--text-dim)">失败原因：{f.reason}</p>
+                  )}
+                  {f.opError && (
+                    <p className="mt-0.5 text-xs text-(--text-dim)">最近一次界面操作未执行：{f.opError}</p>
                   )}
                 </div>
                 <span className="shrink-0 text-xs text-(--text-dim)">{f.status === "failed" ? "失败" : "正常"}</span>

@@ -11,24 +11,27 @@ import (
 	"github.com/onbeee/DeBrowser/internal/winmgr"
 )
 
-// Master-side observation for Stage 10 v2 sync. Three semantic
-// channels, no input injection anywhere:
+// Master-side observation for Stage 10 v2 sync. Semantic
+// channels only, no input injection anywhere:
 //
-//   - CDP target/page events: tab create/close, committed
-//     navigations (this is also how address-bar navigation
-//     syncs — by its committed effect, never by reading typed
-//     text), reload detection.
+//   - CDP target/page events: tab create/close (identified by
+//     target id, never by list position), committed navigations
+//     (this is also how address-bar navigation syncs — by its
+//     committed effect, never by reading typed text), reload
+//     detection.
 //   - Navigation-history polling: back/forward, applied to each
 //     follower's OWN history stack.
-//   - UI Automation polling: which tab is selected in the
-//     master's tab strip (CDP does not report tab activation).
+//   - UI Automation polling: the master's tab strip (titles +
+//     selection) and the menu button's expanded state. Tab
+//     ACTIVATION is only followed when the strip order can be
+//     bound to CDP target ids reliably (see bindTabOrder);
+//     otherwise the operation is reported as not syncable
+//     instead of activating a guessed tab.
 //   - Window polling: master window geometry/show state,
 //     applied to followers with no-activation window calls.
 //   - Low-level hooks OBSERVE page-content input only and hand
 //     it to the per-follower queues as CDP input. Input over
-//     browser chrome is never mirrored; the semantic channels
-//     above cover what they reliably can, and the rest is
-//     counted and reported as not semantically syncable.
+//     browser chrome is never mirrored.
 
 func (s *syncSession) broadcast(ev syncEvent) {
 	for _, id := range s.order {
@@ -80,6 +83,7 @@ type targetEventParams struct {
 		TargetID string `json:"targetId"`
 		Type     string `json:"type"`
 		URL      string `json:"url"`
+		Title    string `json:"title"`
 	} `json:"targetInfo"`
 	TargetID string `json:"targetId"`
 }
@@ -104,48 +108,44 @@ func (s *syncSession) onMasterEvent(ev cdp.Event) {
 			return
 		}
 		s.mMu.Lock()
-		s.targets = append(s.targets, p.TargetInfo.TargetID)
 		s.targetURLs[p.TargetInfo.TargetID] = p.TargetInfo.URL
-		index := len(s.targets) - 1
+		s.targetTitles[p.TargetInfo.TargetID] = p.TargetInfo.Title
 		s.mMu.Unlock()
-		// Followers open a blank tab at the same position; the
-		// committed URL follows through the navigation channel.
-		s.broadcast(syncEvent{kind: evCreateTab, index: index, url: "about:blank"})
+		// Followers create their counterpart tab and bind it to
+		// this target id; the committed URL follows through the
+		// navigation channel, and activation through the
+		// verified tab channel. The new tab's POSITION in the
+		// strip is never assumed.
+		s.broadcast(syncEvent{kind: evCreateTab, masterTarget: p.TargetInfo.TargetID})
 	case "Target.targetDestroyed":
 		var p targetEventParams
 		if json.Unmarshal(ev.Params, &p) != nil {
 			return
 		}
 		s.mMu.Lock()
-		index := -1
-		for i, t := range s.targets {
-			if t == p.TargetID {
-				index = i
-				break
-			}
-		}
-		if index < 0 {
-			s.mMu.Unlock()
-			return
-		}
-		s.targets = append(s.targets[:index], s.targets[index+1:]...)
+		_, known := s.targetURLs[p.TargetID]
 		delete(s.sessions, p.TargetID)
 		delete(s.targetURLs, p.TargetID)
+		delete(s.targetTitles, p.TargetID)
 		wasCurrent := s.currentTarget == p.TargetID
-		s.mMu.Unlock()
-		s.broadcast(syncEvent{kind: evCloseTab, index: index})
 		if wasCurrent {
 			// The browser activates a neighbor; the tab poller
-			// picks the new selection up within one interval.
-			s.mMu.Lock()
+			// picks the new selection up once the mapping
+			// verifies again.
 			s.currentTarget = ""
-			s.mMu.Unlock()
+		}
+		s.mMu.Unlock()
+		if known {
+			s.broadcast(syncEvent{kind: evCloseTab, masterTarget: p.TargetID})
 		}
 	case "Target.targetInfoChanged":
 		var p targetEventParams
 		if json.Unmarshal(ev.Params, &p) != nil || p.TargetInfo.Type != "page" {
 			return
 		}
+		s.mMu.Lock()
+		s.targetTitles[p.TargetInfo.TargetID] = p.TargetInfo.Title
+		s.mMu.Unlock()
 		s.noteTargetURL(p.TargetInfo.TargetID, p.TargetInfo.URL)
 	case "Page.frameNavigated":
 		if ev.SessionID == "" {
@@ -202,6 +202,79 @@ func (s *syncSession) noteTargetURL(targetID, url string) {
 	}
 }
 
+// bindTabOrder binds a UIA tab strip (titles in strip order) to
+// CDP page targets. The strip exposes titles as the only tab
+// identity, so the binding is accepted ONLY when the counts
+// match and every title is unique on both sides — a duplicated
+// title makes the correspondence ambiguous, and an ambiguous
+// mapping must never drive an activation. Returns the target
+// ids in strip order.
+func bindTabOrder(titles []string, infos []cdp.TargetInfo) ([]string, bool) {
+	pages := make([]cdp.TargetInfo, 0, len(infos))
+	for _, ti := range infos {
+		if ti.Type == "page" {
+			pages = append(pages, ti)
+		}
+	}
+	if len(titles) == 0 || len(pages) != len(titles) {
+		return nil, false
+	}
+	byTitle := make(map[string]string, len(pages))
+	for _, p := range pages {
+		if _, dup := byTitle[p.Title]; dup {
+			return nil, false
+		}
+		byTitle[p.Title] = p.TargetID
+	}
+	order := make([]string, len(titles))
+	used := make(map[string]bool, len(titles))
+	for i, title := range titles {
+		id, ok := byTitle[title]
+		if !ok || used[id] {
+			return nil, false
+		}
+		used[id] = true
+		order[i] = id
+	}
+	return order, true
+}
+
+// initialBindings computes the verified master -> follower
+// target bindings at session start. When both strips bind
+// reliably AND show the same title sequence, tabs correspond
+// position-by-position (title-verified). Otherwise only the two
+// currently selected tabs are bound, and only when both sides
+// determine theirs reliably. Anything else stays unbound —
+// activations for unbound tabs are reported, never guessed.
+func initialBindings(masterTitles []string, masterInfos []cdp.TargetInfo, masterSel int,
+	fTitles []string, fInfos []cdp.TargetInfo, fSel int) map[string]string {
+	out := make(map[string]string)
+	mOrder, mOK := bindTabOrder(masterTitles, masterInfos)
+	fOrder, fOK := bindTabOrder(fTitles, fInfos)
+	if !mOK || !fOK {
+		return out
+	}
+	sameSeq := len(masterTitles) == len(fTitles)
+	if sameSeq {
+		for i := range masterTitles {
+			if masterTitles[i] != fTitles[i] {
+				sameSeq = false
+				break
+			}
+		}
+	}
+	if sameSeq {
+		for i := range mOrder {
+			out[mOrder[i]] = fOrder[i]
+		}
+		return out
+	}
+	if masterSel >= 0 && masterSel < len(mOrder) && fSel >= 0 && fSel < len(fOrder) {
+		out[mOrder[masterSel]] = fOrder[fSel]
+	}
+	return out
+}
+
 // historyPoller detects back/forward on the master by watching
 // its current page's navigation-history index. Entry changes
 // (new navigations) are handled by the navigation channel; only
@@ -249,11 +322,13 @@ func (s *syncSession) historyPoller(ctx context.Context) {
 	}
 }
 
-// tabPoller follows the master's selected tab through UI
-// Automation — CDP does not report which tab is active — and
-// broadcasts activations. When UIA cannot read the tab strip,
-// tab switching by clicking is the one tab operation that
-// cannot be followed; creation and closure still are (CDP).
+// tabPoller follows the master's selected tab. CDP does not
+// report tab activation, and Target.getTargets order is NOT
+// tab-strip order, so every cycle re-binds the UIA strip to
+// target ids with bindTabOrder and only acts when the binding
+// verifies. When it does not, tabMapOK is cleared (the page
+// tells the user) and no activation is broadcast — a wrong tab
+// is never activated on a guess.
 func (s *syncSession) tabPoller(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(400 * time.Millisecond)
@@ -266,26 +341,90 @@ func (s *syncSession) tabPoller(ctx context.Context) {
 		}
 		hwnd := topHWND(s.masterPID)
 		if hwnd == 0 {
+			s.tabMapOK.Store(false)
 			continue
 		}
-		idx, ok := uia.SelectedTabIndex(hwnd)
-		if !ok || idx < 0 {
+		titles, sel, ok := uia.TabStrip(hwnd)
+		if !ok || sel < 0 {
+			s.tabMapOK.Store(false)
 			continue
 		}
-		s.mMu.Lock()
-		if idx == s.lastMasterTab || idx >= len(s.targets) {
-			s.mMu.Unlock()
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		infos, err := s.masterClient.Targets(cctx)
+		cancel()
+		if err != nil {
+			s.tabMapOK.Store(false)
 			continue
 		}
-		s.lastMasterTab = idx
-		target := s.targets[idx]
-		s.mMu.Unlock()
+		order, bound := bindTabOrder(titles, infos)
+		if !bound || sel >= len(order) {
+			s.tabMapOK.Store(false)
+			continue
+		}
+		s.tabMapOK.Store(true)
+		target := order[sel]
+		if target == s.currentTargetSnapshot() {
+			continue
+		}
 		if err := s.attachMasterTarget(target); err != nil {
 			continue
 		}
 		s.refreshMasterViewport()
 		if !s.paused.Load() {
-			s.broadcast(syncEvent{kind: evActivateTab, index: idx})
+			s.broadcast(syncEvent{kind: evActivateTab, masterTarget: target})
+		}
+	}
+}
+
+// uiaPoller is the master-side UI Automation capture entry for
+// browser-chrome state that polling can observe reliably. Its
+// first detector follows the main menu button's expanded
+// state: opening or closing the master's menu produces a
+// semantic command that each follower executes on its own menu
+// button (or reports as unexecutable). Menu ITEM selection is
+// not observable this way and is not claimed — the effects of
+// menu commands (tabs, navigations, windows) sync through
+// their own channels.
+func (s *syncSession) uiaPoller(ctx context.Context) {
+	defer s.wg.Done()
+	ticker := time.NewTicker(400 * time.Millisecond)
+	defer ticker.Stop()
+	menuInit := false
+	var menuWas bool
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		hwnd := topHWND(s.masterPID)
+		if hwnd == 0 {
+			continue
+		}
+		expanded, known := uia.MenuButtonState(hwnd)
+		if !known {
+			menuInit = false
+			continue
+		}
+		if !menuInit {
+			menuInit, menuWas = true, expanded
+			continue
+		}
+		if expanded == menuWas {
+			continue
+		}
+		menuWas = expanded
+		if s.paused.Load() {
+			continue
+		}
+		if expanded {
+			s.broadcast(syncEvent{kind: evUIOp, uiOp: &uiOpCommand{
+				Action: "expand", Spec: uia.MenuButtonSpec(), Label: "打开浏览器菜单",
+			}})
+		} else {
+			s.broadcast(syncEvent{kind: evUIOp, uiOp: &uiOpCommand{
+				Action: "collapse", Spec: uia.MenuButtonSpec(), Label: "关闭浏览器菜单",
+			}})
 		}
 	}
 }
@@ -348,10 +487,10 @@ func (s *syncSession) windowPoller(ctx context.Context) {
 // ---- input capture ingress ------------------------------------------
 
 func (s *syncSession) startCapture() error {
-	return capture.StartCapture(func(ev capture.Event) { s.onCaptured(ev) })
+	return s.svc.captureStart(func(ev capture.Event) { s.onCaptured(ev) })
 }
 
-func (s *syncSession) stopCapture() { capture.StopCapture() }
+func (s *syncSession) stopCapture() { s.svc.captureStop() }
 
 // onCaptured runs on the hook thread: it must never block. It
 // classifies the event and offers copies to the follower queues.
@@ -374,8 +513,8 @@ func (s *syncSession) onCaptured(ev capture.Event) {
 	}
 	if !hit.IsContent {
 		// Browser chrome: not mirrored. Semantic channels cover
-		// tabs/navigation/windows; anything else is counted so
-		// the page can report it honestly.
+		// tabs/navigation/windows/menu state; anything else is
+		// counted so the page can report it honestly.
 		if ev.Kind == capture.EventMouseDown {
 			s.focusCtx.Store(1)
 			s.uiSkipped.Add(1)

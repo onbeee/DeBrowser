@@ -58,6 +58,10 @@ type ElementInfo struct {
 	// Selected is only meaningful for elements supporting the
 	// SelectionItem pattern (tabs).
 	Selected bool
+	// ExpandState is the ExpandCollapse state (0 collapsed,
+	// 1 expanded, 2 partially expanded, 3 leaf), or -1 when the
+	// element does not expose it.
+	ExpandState int32
 	// Depth is the element's depth below the window root in the
 	// probed tree (root = 0).
 	Depth int
@@ -84,7 +88,16 @@ type Capabilities struct {
 	TabCount   int
 	// SelectedTab is the index of the selected tab, or -1.
 	SelectedTab int
-	Reason      string // why Available is false, when it is
+	// TabTitles holds the tab items' titles in strip order,
+	// aligned with SelectedTab's indexing. Titles are the only
+	// identity the tab strip exposes; callers must treat the
+	// mapping as reliable only when titles are unique.
+	TabTitles []string
+	// MenuStateKnown reports whether the menu button exposes
+	// its ExpandCollapse state; MenuExpanded is that state.
+	MenuStateKnown bool
+	MenuExpanded   bool
+	Reason         string // why Available is false, when it is
 }
 
 // MatchSpec identifies a control by stable properties. Empty
@@ -93,6 +106,18 @@ type MatchSpec struct {
 	ControlType  int32
 	AutomationID string
 	NameContains string
+	// NameContainsAny matches when the name contains ANY of
+	// the fragments (localized label variants).
+	NameContainsAny []string
+}
+
+// MenuButtonSpec identifies a browser's main menu button across
+// the label variants known Chromium builds use.
+func MenuButtonSpec() MatchSpec {
+	return MatchSpec{
+		ControlType:     ControlButton,
+		NameContainsAny: []string{"自定义及控制", "Customise and control", "Customize and control", "设置及其他"},
+	}
 }
 
 // FindMatch returns the index of the UNIQUE element matching the
@@ -109,6 +134,18 @@ func FindMatch(elements []ElementInfo, spec MatchSpec) int {
 		}
 		if spec.NameContains != "" && !containsFold(e.Name, spec.NameContains) {
 			continue
+		}
+		if len(spec.NameContainsAny) > 0 {
+			any := false
+			for _, frag := range spec.NameContainsAny {
+				if containsFold(e.Name, frag) {
+					any = true
+					break
+				}
+			}
+			if !any {
+				continue
+			}
 		}
 		if found >= 0 {
 			return -1 // ambiguous
@@ -181,6 +218,7 @@ func AnalyzeCapabilities(elements []ElementInfo) Capabilities {
 			if e.Selected {
 				caps.SelectedTab = tabIdx
 			}
+			caps.TabTitles = append(caps.TabTitles, e.Name)
 			tabIdx++
 		}
 	}
@@ -190,15 +228,32 @@ func AnalyzeCapabilities(elements []ElementInfo) Capabilities {
 	// Menu button: a Button whose name is the browser's main
 	// menu label. Must be unique.
 	menu := 0
-	for _, e := range elements {
+	var menuEl *ElementInfo
+	for i := range elements {
+		e := &elements[i]
 		if e.ControlType != ControlButton {
 			continue
 		}
 		if containsFold(e.Name, "自定义及控制") || containsFold(e.Name, "Customise and control") ||
 			containsFold(e.Name, "Customize and control") || containsFold(e.Name, "设置及其他") {
 			menu++
+			menuEl = e
 		}
 	}
 	caps.MenuButton = menu == 1
+	if caps.MenuButton && menuEl.HasPattern(PatternExpandCollapse) && menuEl.ExpandState >= 0 {
+		caps.MenuStateKnown = true
+		caps.MenuExpanded = menuEl.ExpandState == 1
+	}
 	return caps
+}
+
+// UIOp is one semantic UI operation: an action applied to the
+// unique control matching Spec. Actions: "invoke", "expand",
+// "collapse", "toggle", "select". There is deliberately no
+// text-setting action: sync never transfers typed text through
+// UI Automation.
+type UIOp struct {
+	Action string
+	Spec   MatchSpec
 }

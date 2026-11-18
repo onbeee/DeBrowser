@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/onbeee/DeBrowser/internal/cdp"
+	"github.com/onbeee/DeBrowser/internal/uia"
 )
 
 // recordingCDP is a fake per-instance CDP endpoint that records
@@ -24,6 +25,21 @@ type recordingCDP struct {
 	calls  []recordedCall
 	delay  time.Duration
 	failOn string // method substring that returns an error
+	conns  map[*websocket.Conn]bool
+}
+
+// dropAll severs every live WebSocket connection, simulating
+// the browser going away mid-session.
+func (f *recordingCDP) dropAll() {
+	f.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(f.conns))
+	for c := range f.conns {
+		conns = append(conns, c)
+	}
+	f.mu.Unlock()
+	for _, c := range conns {
+		_ = c.CloseNow()
+	}
 }
 
 type recordedCall struct {
@@ -37,7 +53,7 @@ func newRecordingCDP(t *testing.T) *recordingCDP {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &recordingCDP{ln: ln, port: ln.Addr().(*net.TCPAddr).Port}
+	f := &recordingCDP{ln: ln, port: ln.Addr().(*net.TCPAddr).Port, conns: make(map[*websocket.Conn]bool)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/json/version", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"webSocketDebuggerUrl":"ws://127.0.0.1:%d/ws","Product":"Fake/1.0"}`, f.port)
@@ -47,6 +63,14 @@ func newRecordingCDP(t *testing.T) *recordingCDP {
 		if err != nil {
 			return
 		}
+		f.mu.Lock()
+		f.conns[c] = true
+		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			delete(f.conns, c)
+			f.mu.Unlock()
+		}()
 		for {
 			_, data, err := c.Read(r.Context())
 			if err != nil {
@@ -74,6 +98,8 @@ func newRecordingCDP(t *testing.T) *recordingCDP {
 			}
 			result := "{}"
 			switch msg.Method {
+			case "Target.getTargets":
+				result = `{"targetInfos":[{"targetId":"t1","type":"page","title":"Example","url":"https://example.com/"}]}`
 			case "Target.attachToTarget":
 				result = `{"sessionId":"s1"}`
 			case "Page.getLayoutMetrics":
@@ -123,7 +149,7 @@ func dialWorker(t *testing.T, id string, f *recordingCDP) *followerWorker {
 		t.Fatal(err)
 	}
 	w := newFollowerWorker(id, client, nil)
-	w.queue.push(syncEvent{kind: evInit, targets: []string{"t1"}, index: 0, masterW: 1000, masterH: 800})
+	w.queue.push(syncEvent{kind: evInit, bindings: map[string]string{"m1": "t1"}, currentTarget: "m1", masterW: 1000, masterH: 800})
 	go w.Run()
 	t.Cleanup(func() {
 		w.Stop()
@@ -156,21 +182,26 @@ func TestFollowerQueueCoalescesMoves(t *testing.T) {
 	}
 }
 
-func TestFollowerQueueNeverDropsRelease(t *testing.T) {
-	q := newFollowerQueue(4)
-	for i := 0; i < 4; i++ {
-		q.push(syncEvent{kind: evKey, vk: 65, down: true})
-	}
-	q.push(syncEvent{kind: evKey, vk: 65, down: false}) // release must fit
-	found := false
-	for q.len() > 0 {
-		ev, _ := q.pop()
-		if ev.kind == evKey && !ev.down {
-			found = true
+// A queue full of critical events admits no more critical
+// events — and must SAY so (pushOverload) rather than silently
+// dropping a press or release and corrupting input state. The
+// worker turns the overload into a reported follower failure
+// plus a release of injected state.
+func TestFollowerQueueCriticalOverloadIsSignalled(t *testing.T) {
+	q := newFollowerQueue(3)
+	for i := 0; i < 3; i++ {
+		if r := q.push(syncEvent{kind: evKey, vk: 65, down: true}); r != pushOK {
+			t.Fatalf("push %d = %v, want pushOK", i, r)
 		}
 	}
-	if !found {
-		t.Fatal("release event was dropped from a full queue")
+	if r := q.push(syncEvent{kind: evKey, vk: 66, down: true}); r != pushOverload {
+		t.Fatalf("critical push into full queue = %v, want pushOverload", r)
+	}
+	if r := q.push(syncEvent{kind: evKey, vk: 65, down: false}); r != pushOverload {
+		t.Fatalf("release push into full queue = %v, want pushOverload (signalled, not dropped)", r)
+	}
+	if q.len() != 3 {
+		t.Fatalf("queue len = %d, want 3 (contents untouched)", q.len())
 	}
 }
 
@@ -323,5 +354,242 @@ func TestStartSyncValidatesParticipants(t *testing.T) {
 	opts, err := svc.ListSyncInstances("")
 	if err != nil || len(opts) != 1 || opts[0].Running {
 		t.Fatalf("options = %+v, %v", opts, err)
+	}
+}
+
+// ---- queue ordering (review fix: no cross-boundary coalescing) ------
+
+func TestFollowerQueueMoveCoalesceStopsAtButtonBoundary(t *testing.T) {
+	q := newFollowerQueue(8)
+	q.push(syncEvent{kind: evMouseMove, x: 1})
+	q.push(syncEvent{kind: evMouseButton, down: true, button: "left"})
+	q.push(syncEvent{kind: evMouseMove, x: 2})
+	q.push(syncEvent{kind: evMouseMove, x: 3}) // coalesces with x=2 only
+	if q.len() != 3 {
+		t.Fatalf("queue len = %d, want 3 (move before the press must survive)", q.len())
+	}
+	ev1, _ := q.pop()
+	ev2, _ := q.pop()
+	ev3, _ := q.pop()
+	if ev1.kind != evMouseMove || ev1.x != 1 {
+		t.Fatalf("first = %+v, want the pre-press move x=1", ev1)
+	}
+	if ev2.kind != evMouseButton || !ev2.down {
+		t.Fatalf("second = %+v, want the press", ev2)
+	}
+	if ev3.kind != evMouseMove || ev3.x != 3 {
+		t.Fatalf("third = %+v, want latest trailing move x=3", ev3)
+	}
+}
+
+func TestFollowerQueueMoveCoalesceStopsAtReleaseBoundary(t *testing.T) {
+	q := newFollowerQueue(8)
+	q.push(syncEvent{kind: evMouseMove, x: 1})
+	q.push(syncEvent{kind: evMouseButton, down: false, button: "left"})
+	q.push(syncEvent{kind: evMouseMove, x: 2})
+	q.push(syncEvent{kind: evMouseMove, x: 3})
+	if q.len() != 3 {
+		t.Fatalf("queue len = %d, want 3", q.len())
+	}
+	var kinds []syncEventKind
+	var lastX float64
+	for q.len() > 0 {
+		ev, _ := q.pop()
+		kinds = append(kinds, ev.kind)
+		if ev.kind == evMouseMove {
+			lastX = ev.x
+		}
+	}
+	if kinds[0] != evMouseMove || kinds[1] != evMouseButton || kinds[2] != evMouseMove || lastX != 3 {
+		t.Fatalf("order = %v lastX=%v, want [move button move] with x=3", kinds, lastX)
+	}
+}
+
+func TestFollowerQueuePreservesMixedOrder(t *testing.T) {
+	q := newFollowerQueue(16)
+	want := []syncEvent{
+		{kind: evKey, vk: 65, down: true},
+		{kind: evKey, vk: 65, down: false},
+		{kind: evKey, vk: 66, down: true},
+		{kind: evMouseButton, down: true, button: "left"},
+		{kind: evMouseWheel, deltaY: -120},
+		{kind: evMouseButton, down: false, button: "left"},
+		{kind: evKey, vk: 66, down: false},
+	}
+	for _, ev := range want {
+		q.push(ev)
+	}
+	for i, w := range want {
+		got, ok := q.pop()
+		if !ok || got.kind != w.kind || got.vk != w.vk || got.down != w.down {
+			t.Fatalf("position %d: got %+v, want %+v", i, got, w)
+		}
+	}
+}
+
+func TestFollowerQueueFullEvictsMovesOnly(t *testing.T) {
+	q := newFollowerQueue(4)
+	q.push(syncEvent{kind: evMouseMove, x: 1})
+	q.push(syncEvent{kind: evMouseButton, down: true, button: "left"})
+	q.push(syncEvent{kind: evMouseMove, x: 2})
+	q.push(syncEvent{kind: evKey, vk: 65, down: true})
+	// Full. A critical event evicts the OLDEST MOVE — never the
+	// press or the key.
+	if r := q.push(syncEvent{kind: evMouseButton, down: false, button: "left"}); r != pushOK {
+		t.Fatalf("critical push = %v, want pushOK via move eviction", r)
+	}
+	var seq []string
+	for q.len() > 0 {
+		ev, _ := q.pop()
+		switch ev.kind {
+		case evMouseMove:
+			seq = append(seq, "move")
+		case evMouseButton:
+			if ev.down {
+				seq = append(seq, "down")
+			} else {
+				seq = append(seq, "up")
+			}
+		case evKey:
+			seq = append(seq, "key")
+		}
+	}
+	got := strings.Join(seq, ",")
+	if got != "down,move,key,up" {
+		t.Fatalf("sequence = %q, want down,move,key,up (oldest move evicted, pair intact)", got)
+	}
+}
+
+func TestWorkerOverloadFailsFollowerAndReleases(t *testing.T) {
+	slow := newRecordingCDP(t)
+	slow.delay = 250 * time.Millisecond
+	w := dialWorker(t, "overloaded", slow)
+	other := newRecordingCDP(t)
+	wOther := dialWorker(t, "healthy", other)
+
+	w.Enqueue(syncEvent{kind: evKey, key: "a", code: "KeyA", vk: 65, down: true, text: "a"})
+	slow.waitFor(t, "keyDown", 1) // worker is inside the slow call now
+	// Fill the queue with critical events while the worker is
+	// busy, then one more: overload must fail THIS follower.
+	for i := 0; i < 300; i++ {
+		w.Enqueue(syncEvent{kind: evKey, key: "b", code: "KeyB", vk: 66, down: true, text: "b"})
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if failed, reason := w.isFailed(); failed && strings.Contains(reason, "事件过多") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if failed, reason := w.isFailed(); !failed || !strings.Contains(reason, "事件过多") {
+		t.Fatalf("overloaded follower state = %v %q, want failed with overload reason", failed, reason)
+	}
+	// The pressed key is released even though the follower
+	// failed (Release jumps the queue).
+	slow.waitFor(t, "keyUp", 1)
+	// The other follower is unaffected.
+	wOther.Enqueue(syncEvent{kind: evKey, key: "a", code: "KeyA", vk: 65, down: true, text: "a"})
+	other.waitFor(t, "keyDown", 1)
+	if failed, _ := wOther.isFailed(); failed {
+		t.Fatal("healthy follower was affected by the overloaded one")
+	}
+}
+
+// ---- tab operations by target id (review fix: no positions) --------
+
+func TestWorkerTabOpsUseBindingsNotPositions(t *testing.T) {
+	f := newRecordingCDP(t)
+	w := dialWorker(t, "f1", f)
+	var opFails []string
+	w.onOpFail = func(id, op, reason string) { opFails = append(opFails, op+":"+reason) }
+
+	// Create: counterpart tab is created and bound, NOT attached.
+	w.Enqueue(syncEvent{kind: evCreateTab, masterTarget: "m2"})
+	f.waitFor(t, "createTarget", 1)
+	if f.count("attachToTarget") != 1 {
+		t.Fatalf("attach calls = %d, want 1 (creation must not attach)", f.count("attachToTarget"))
+	}
+	// Activate the bound tab: ActivateTarget + attach.
+	w.Enqueue(syncEvent{kind: evActivateTab, masterTarget: "m2"})
+	f.waitFor(t, "activateTarget", 1)
+	f.waitFor(t, "attachToTarget", 2)
+	// Activate an UNBOUND tab: reported, never guessed, and the
+	// follower is NOT failed.
+	w.Enqueue(syncEvent{kind: evActivateTab, masterTarget: "mX"})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(opFails) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(opFails) != 1 || !strings.Contains(opFails[0], "切换标签") {
+		t.Fatalf("opFails = %v, want one tab-switch report", opFails)
+	}
+	if failed, _ := w.isFailed(); failed {
+		t.Fatal("unbound activation must not fail the follower")
+	}
+	if f.count("activateTarget") != 1 {
+		t.Fatal("an unbound activation reached the browser")
+	}
+	// Close the bound tab, then activating it reports unbound.
+	w.Enqueue(syncEvent{kind: evCloseTab, masterTarget: "m2"})
+	f.waitFor(t, "closeTarget", 1)
+	w.Enqueue(syncEvent{kind: evActivateTab, masterTarget: "m2"})
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(opFails) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(opFails) != 2 {
+		t.Fatalf("opFails = %v, want a second report after close", opFails)
+	}
+}
+
+// ---- UIA semantic ops through the worker (review fix 4) -------------
+
+func TestWorkerUIOpExecutesAndReportsPerFollower(t *testing.T) {
+	f := newRecordingCDP(t)
+	w := dialWorker(t, "f1", f)
+	w.hwnd = 4242
+	var executed []string
+	w.uiExec = func(hwnd uintptr, op uia.UIOp) error {
+		if hwnd != 4242 {
+			t.Errorf("uiExec hwnd = %d, want 4242", hwnd)
+		}
+		executed = append(executed, op.Action)
+		if op.Action == "collapse" {
+			return fmt.Errorf("uia: no unique control matches the request")
+		}
+		return nil
+	}
+	var opFails []string
+	w.onOpFail = func(id, op, reason string) { opFails = append(opFails, op+":"+reason) }
+
+	cmd := func(action string) syncEvent {
+		return syncEvent{kind: evUIOp, uiOp: &uiOpCommand{
+			Action: action, Spec: uia.MenuButtonSpec(), Label: "打开浏览器菜单",
+		}}
+	}
+	w.Enqueue(cmd("expand"))
+	w.Enqueue(cmd("collapse"))
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(opFails) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(executed) != 2 {
+		t.Fatalf("executed = %v, want both ops attempted", executed)
+	}
+	if len(opFails) != 1 || !strings.Contains(opFails[0], "打开浏览器菜单") {
+		t.Fatalf("opFails = %v, want the failed op reported by label", opFails)
+	}
+	if failed, _ := w.isFailed(); failed {
+		t.Fatal("a failed UIA op must not fail the follower")
+	}
+	// No window: reported, executor never called.
+	w.hwnd = 0
+	w.Enqueue(cmd("expand"))
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(opFails) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(opFails) != 2 || len(executed) != 2 {
+		t.Fatalf("opFails = %v executed = %v, want window-missing report without execution", opFails, executed)
 	}
 }

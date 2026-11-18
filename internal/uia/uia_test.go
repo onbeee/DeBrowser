@@ -46,3 +46,41 @@ func TestAnalyzeCapabilities(t *testing.T) {
 		t.Fatal("ambiguous address bar must not count as found")
 	}
 }
+
+func TestAnalyzeCapabilitiesTabTitlesAndMenuState(t *testing.T) {
+	els := []ElementInfo{
+		{ControlType: ControlTabItem, Name: "文档一", Patterns: []int32{PatternSelectionItem}, Selected: false, ExpandState: -1},
+		{ControlType: ControlTabItem, Name: "文档二", Patterns: []int32{PatternSelectionItem}, Selected: true, ExpandState: -1},
+		{ControlType: ControlButton, Name: "自定义及控制 Chrome", Patterns: []int32{PatternInvoke, PatternExpandCollapse}, ExpandState: 1},
+	}
+	caps := AnalyzeCapabilities(els)
+	if len(caps.TabTitles) != 2 || caps.TabTitles[0] != "文档一" || caps.TabTitles[1] != "文档二" {
+		t.Fatalf("TabTitles = %v, want both titles in strip order", caps.TabTitles)
+	}
+	if caps.SelectedTab != 1 {
+		t.Fatalf("SelectedTab = %d, want 1 (aligned with TabTitles)", caps.SelectedTab)
+	}
+	if !caps.MenuStateKnown || !caps.MenuExpanded {
+		t.Fatalf("menu state = known %v expanded %v, want known+expanded", caps.MenuStateKnown, caps.MenuExpanded)
+	}
+	// Ambiguous menu buttons: state must be unknown, never guessed.
+	els = append(els, ElementInfo{ControlType: ControlButton, Name: "自定义及控制", Patterns: []int32{PatternExpandCollapse}, ExpandState: 0})
+	caps = AnalyzeCapabilities(els)
+	if caps.MenuButton || caps.MenuStateKnown {
+		t.Fatalf("ambiguous menu: MenuButton=%v MenuStateKnown=%v, want both false", caps.MenuButton, caps.MenuStateKnown)
+	}
+}
+
+func TestFindMatchNameContainsAny(t *testing.T) {
+	els := []ElementInfo{
+		{ControlType: ControlButton, Name: "Customize and control Google Chrome"},
+		{ControlType: ControlButton, Name: "返回"},
+	}
+	if idx := FindMatch(els, MenuButtonSpec()); idx != 0 {
+		t.Fatalf("FindMatch(MenuButtonSpec) = %d, want 0", idx)
+	}
+	els = append(els, ElementInfo{ControlType: ControlButton, Name: "自定义及控制"})
+	if idx := FindMatch(els, MenuButtonSpec()); idx != -1 {
+		t.Fatalf("FindMatch with two menu buttons = %d, want -1 (ambiguous)", idx)
+	}
+}

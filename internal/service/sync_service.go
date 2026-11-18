@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/onbeee/DeBrowser/internal/capture"
 	"github.com/onbeee/DeBrowser/internal/cdp"
 	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/model"
@@ -54,21 +54,30 @@ type SyncCapabilitiesInfo struct {
 }
 
 type SyncFollowerState struct {
-	ID     string               `json:"id"`
-	Name   string               `json:"name"`
-	Status string               `json:"status"` // active | failed
-	Reason string               `json:"reason,omitempty"`
-	Caps   SyncCapabilitiesInfo `json:"caps"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"` // active | failed
+	Reason string `json:"reason,omitempty"`
+	// OpError is the latest semantic operation (tab switch, UI
+	// Automation op) that could not be performed for this
+	// follower. It is reported, never hidden; the follower
+	// keeps syncing everything else.
+	OpError string               `json:"opError,omitempty"`
+	Caps    SyncCapabilitiesInfo `json:"caps"`
 }
 
 type SyncState struct {
-	Phase       string               `json:"phase"` // idle | running | paused
-	MasterID    string               `json:"masterId,omitempty"`
-	MasterName  string               `json:"masterName,omitempty"`
-	MasterCaps  SyncCapabilitiesInfo `json:"masterCaps"`
-	Followers   []SyncFollowerState  `json:"followers"`
-	UISkipped   int64                `json:"uiSkipped"`
-	HasArranged bool                 `json:"hasArranged"`
+	Phase      string               `json:"phase"` // idle | running | paused
+	MasterID   string               `json:"masterId,omitempty"`
+	MasterName string               `json:"masterName,omitempty"`
+	MasterCaps SyncCapabilitiesInfo `json:"masterCaps"`
+	// TabMapOK reports whether the master's tab strip is
+	// currently bound reliably to CDP target ids. When false,
+	// tab-switch following is paused rather than guessed.
+	TabMapOK    bool                `json:"tabMapOk"`
+	Followers   []SyncFollowerState `json:"followers"`
+	UISkipped   int64               `json:"uiSkipped"`
+	HasArranged bool                `json:"hasArranged"`
 }
 
 type SyncMonitorInfo struct {
@@ -92,9 +101,9 @@ type syncSession struct {
 	masterPID    uint32
 
 	mMu            sync.Mutex
-	targets        []string          // master page targets, tab order
 	sessions       map[string]string // targetId -> sessionId
 	targetURLs     map[string]string
+	targetTitles   map[string]string
 	currentTarget  string
 	currentURL     string
 	lastLoaderID   string
@@ -103,7 +112,6 @@ type syncSession struct {
 	histEntryURL   string
 	histInit       bool
 	masterViewport struct{ w, h float64 }
-	lastMasterTab  int
 	winInit        bool
 	lastRect       winmgr.Rect
 	lastState      winmgr.WindowState
@@ -115,9 +123,16 @@ type syncSession struct {
 	paused    atomic.Bool
 	uiSkipped atomic.Int64
 	focusCtx  atomic.Int32 // 0 = page content, 1 = browser chrome
+	// tabMapOK: the master's tab strip is currently bound to
+	// target ids reliably enough to follow tab switches.
+	tabMapOK atomic.Bool
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	opMu     sync.Mutex
+	opErrors map[string]string // follower id -> latest op failure
+
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	teardownOnce sync.Once
 
 	// onFollowerFail / master-gone audit hooks are set by the
 	// service before goroutines start.
@@ -128,9 +143,20 @@ type SyncService struct {
 	instances *InstanceService
 	Auditor   *logging.System
 
-	mu       sync.Mutex
-	session  *syncSession
+	mu      sync.Mutex
+	session *syncSession
+	// starting serializes session startup: exactly one start
+	// may be in flight, and it holds across the whole
+	// initialization (not just the final session assignment),
+	// so two concurrent StartSync calls can never both build a
+	// session and overwrite each other.
+	starting bool
 	savedWin map[string]savedWindow
+
+	// Capture seams (the real low-level hook by default) so
+	// session lifecycle tests can observe start/stop pairing.
+	captureStart func(h capture.Handler) error
+	captureStop  func()
 }
 
 type savedWindow struct {
@@ -140,7 +166,12 @@ type savedWindow struct {
 }
 
 func NewSyncService(instances *InstanceService) *SyncService {
-	return &SyncService{instances: instances, savedWin: make(map[string]savedWindow)}
+	return &SyncService{
+		instances:    instances,
+		savedWin:     make(map[string]savedWindow),
+		captureStart: capture.StartCapture,
+		captureStop:  capture.StopCapture,
+	}
 }
 
 func capsInfo(c uia.Capabilities) SyncCapabilitiesInfo {
@@ -200,11 +231,17 @@ func (s *SyncService) StartSync(operationID, masterID string, followerIDs []stri
 
 func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 	s.mu.Lock()
-	if s.session != nil {
+	if s.session != nil || s.starting {
 		s.mu.Unlock()
-		return fmt.Errorf("已有同步会话在进行中，请先停止")
+		return fmt.Errorf("已有同步会话正在启动或进行中，请先停止或等待启动完成")
 	}
+	s.starting = true
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.starting = false
+		s.mu.Unlock()
+	}()
 
 	if len(followerIDs) == 0 {
 		return fmt.Errorf("请至少选择一个跟随实例")
@@ -237,13 +274,14 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 
 	sess := &syncSession{
 		masterID: masterID, masterClient: masterClient,
-		masterPID:     uint32(s.instances.instanceProcessID(masterID)),
-		sessions:      make(map[string]string),
-		targetURLs:    make(map[string]string),
-		workers:       make(map[string]*followerWorker),
-		caps:          make(map[string]uia.Capabilities),
-		lastMasterTab: -1,
-		svc:           s,
+		masterPID:    uint32(s.instances.instanceProcessID(masterID)),
+		sessions:     make(map[string]string),
+		targetURLs:   make(map[string]string),
+		targetTitles: make(map[string]string),
+		workers:      make(map[string]*followerWorker),
+		caps:         make(map[string]uia.Capabilities),
+		opErrors:     make(map[string]string),
+		svc:          s,
 	}
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	sess.cancel = sessCancel
@@ -260,28 +298,36 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 	if err := masterClient.EnableTargetEvents(ctx); err != nil {
 		return failStart(fmt.Errorf("主实例调试接口初始化失败：%v", err))
 	}
-	masterTargets, err := sess.discoverTargets(masterClient)
+	masterInfos, err := sess.discoverTargets(masterClient)
 	if err != nil {
 		return failStart(fmt.Errorf("读取主实例标签失败：%v", err))
 	}
-	if len(masterTargets) == 0 {
+	if len(masterInfos) == 0 {
 		return failStart(fmt.Errorf("主实例没有可同步的标签页"))
 	}
+	for _, ti := range masterInfos {
+		sess.targetURLs[ti.TargetID] = ti.URL
+		sess.targetTitles[ti.TargetID] = ti.Title
+	}
 
-	// UIA capability probing (also yields the master's selected
-	// tab index, which target lists alone cannot tell us).
+	// UIA capability probing also yields the master's tab strip
+	// (titles + selection). The active target is chosen through
+	// the VERIFIED title binding when it holds; target list
+	// order is never treated as tab order.
 	masterHWND := topHWND(sess.masterPID)
 	if caps, err := uia.ProbeWindow(masterHWND); err == nil {
 		sess.caps[masterID] = caps
 	} else {
 		sess.caps[masterID] = uia.Capabilities{SelectedTab: -1, Reason: "无法读取浏览器界面控件信息"}
 	}
-	activeIdx := 0
-	if c := sess.caps[masterID]; c.SelectedTab >= 0 && c.SelectedTab < len(masterTargets) {
-		activeIdx = c.SelectedTab
+	masterCaps := sess.caps[masterID]
+	activeTarget := masterInfos[0].TargetID
+	if order, bound := bindTabOrder(masterCaps.TabTitles, masterInfos); bound &&
+		masterCaps.SelectedTab >= 0 && masterCaps.SelectedTab < len(order) {
+		activeTarget = order[masterCaps.SelectedTab]
+		sess.tabMapOK.Store(true)
 	}
-	sess.lastMasterTab = activeIdx
-	if err := sess.attachMasterTarget(masterTargets[activeIdx]); err != nil {
+	if err := sess.attachMasterTarget(activeTarget); err != nil {
 		return failStart(fmt.Errorf("连接主实例标签失败：%v", err))
 	}
 	sess.refreshMasterViewport()
@@ -299,27 +345,31 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 			client.Close()
 			return failStart(fmt.Errorf("跟随实例「%s」调试接口初始化失败：%v", finst.Name, err))
 		}
-		ftargets, err := sess.discoverTargets(client)
-		if err != nil || len(ftargets) == 0 {
+		finfos, err := sess.discoverTargets(client)
+		if err != nil || len(finfos) == 0 {
 			client.Close()
 			return failStart(fmt.Errorf("读取跟随实例「%s」的标签失败", finst.Name))
 		}
+		fpid := uint32(s.instances.instanceProcessID(fid))
 		w := newFollowerWorker(fid, client, func(id, reason string) {
 			s.noteFollowerFailed(sess, id, reason)
 		})
+		w.hwnd = topHWND(fpid)
+		w.onOpFail = func(id, op, reason string) {
+			s.noteOpFailed(sess, id, op, reason)
+		}
 		sess.workers[fid] = w
 		sess.order = append(sess.order, fid)
-		if caps, err := uia.ProbeWindow(topHWND(uint32(s.instances.instanceProcessID(fid)))); err == nil {
+		if caps, err := uia.ProbeWindow(topHWND(fpid)); err == nil {
 			sess.caps[fid] = caps
 		} else {
 			sess.caps[fid] = uia.Capabilities{SelectedTab: -1, Reason: "无法读取浏览器界面控件信息"}
 		}
-		cur := activeIdx
-		if cur >= len(ftargets) {
-			cur = len(ftargets) - 1
-		}
+		fcaps := sess.caps[fid]
+		bindings := initialBindings(masterCaps.TabTitles, masterInfos, masterCaps.SelectedTab,
+			fcaps.TabTitles, finfos, fcaps.SelectedTab)
 		w.queue.push(syncEvent{
-			kind: evInit, targets: ftargets, index: cur,
+			kind: evInit, bindings: bindings, currentTarget: activeTarget,
 			masterW: sess.masterViewport.w, masterH: sess.masterViewport.h,
 		})
 	}
@@ -328,35 +378,48 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 	}
 
 	masterClient.OnEvent(func(ev cdp.Event) { sess.onMasterEvent(ev) })
-	sess.wg.Add(3)
-	go sess.historyPoller(sessCtx)
-	go sess.windowPoller(sessCtx)
-	go sess.tabPoller(sessCtx)
-	if err := sess.startCapture(); err != nil {
-		sess.teardown()
-		return fmt.Errorf("无法开始捕获主实例输入：%v", err)
-	}
-	go sess.watchMaster()
 
+	// Publish the session BEFORE starting the monitor and
+	// capture: watchMaster compares identity against
+	// s.session, and a master that disconnects during
+	// initialization must tear down this published session —
+	// never be overwritten by it afterwards.
 	s.mu.Lock()
 	s.session = sess
 	s.mu.Unlock()
+
+	sess.wg.Add(4)
+	go sess.historyPoller(sessCtx)
+	go sess.windowPoller(sessCtx)
+	go sess.tabPoller(sessCtx)
+	go sess.uiaPoller(sessCtx)
+	go sess.watchMaster()
+	if err := sess.startCapture(); err != nil {
+		s.mu.Lock()
+		if s.session == sess {
+			s.session = nil
+		}
+		s.mu.Unlock()
+		sess.teardown()
+		return fmt.Errorf("无法开始捕获主实例输入：%v", err)
+	}
 	return nil
 }
 
-// discoverTargets returns the page targets of one browser in
-// creation order.
-func (s *syncSession) discoverTargets(client *cdp.Client) ([]string, error) {
+// discoverTargets returns one browser's page targets. The
+// order is whatever the browser reports — it is NOT tab-strip
+// order and is never used as such.
+func (s *syncSession) discoverTargets(client *cdp.Client) ([]cdp.TargetInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	infos, err := client.Targets(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	out := make([]cdp.TargetInfo, 0, len(infos))
 	for _, ti := range infos {
 		if ti.Type == "page" {
-			out = append(out, ti.TargetID)
+			out = append(out, ti)
 		}
 	}
 	return out, nil
@@ -428,8 +491,16 @@ func (s *SyncService) StopSync(operationID string) error {
 	return nil
 }
 
-// teardown releases and closes everything a session owns.
+// teardown releases and closes everything a session owns. It
+// runs at most once however many paths request it (user stop,
+// master disconnect, failed capture start).
 func (s *syncSession) teardown() {
+	s.teardownOnce.Do(func() {
+		s.teardownAll()
+	})
+}
+
+func (s *syncSession) teardownAll() {
 	s.stopCapture()
 	if s.cancel != nil {
 		s.cancel()
@@ -467,6 +538,23 @@ func (s *syncSession) watchMaster() {
 	s.svc.mu.Unlock()
 }
 
+// noteOpFailed records a semantic operation one follower
+// could not perform. The follower stays in the session; the
+// failure is surfaced on the sync page and in the unified log.
+func (s *SyncService) noteOpFailed(sess *syncSession, id, op, reason string) {
+	sess.opMu.Lock()
+	sess.opErrors[id] = reason
+	sess.opMu.Unlock()
+	if s.Auditor != nil {
+		s.Auditor.RecordEvent(logging.Event{
+			EventType: "runtime", Category: "runtime", Module: "sync",
+			Action: "ui_op_failed", TargetType: "instance", TargetID: id,
+			Trigger: "system", Status: logging.StatusFailed,
+			UserMessage: "跟随实例界面操作未执行：" + reason,
+		})
+	}
+}
+
 func (s *SyncService) noteFollowerFailed(sess *syncSession, id, reason string) {
 	if s.Auditor != nil {
 		s.Auditor.RecordEvent(logging.Event{
@@ -498,9 +586,16 @@ func (s *SyncService) GetSyncState(operationID string) (SyncState, error) {
 		st.MasterName = inst.Name
 	}
 	st.MasterCaps = capsInfo(sess.caps[sess.masterID])
+	st.TabMapOK = sess.tabMapOK.Load()
+	sess.opMu.Lock()
+	opErrors := make(map[string]string, len(sess.opErrors))
+	for k, v := range sess.opErrors {
+		opErrors[k] = v
+	}
+	sess.opMu.Unlock()
 	for _, fid := range sess.order {
 		w := sess.workers[fid]
-		fs := SyncFollowerState{ID: fid, Status: "active", Caps: capsInfo(sess.caps[fid])}
+		fs := SyncFollowerState{ID: fid, Status: "active", Caps: capsInfo(sess.caps[fid]), OpError: opErrors[fid]}
 		if inst, err := s.instances.store.GetInstance(context.Background(), fid); err == nil {
 			fs.Name = inst.Name
 		}
@@ -629,5 +724,3 @@ func (s *SyncService) RestoreSyncWindows(operationID string) ([]SyncWindowResult
 	finishOp(op, nil)
 	return results, nil
 }
-
-var _ = strings.TrimSpace

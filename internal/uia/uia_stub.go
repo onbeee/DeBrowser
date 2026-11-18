@@ -6,8 +6,8 @@ func ProbeWindow(hwnd uintptr) (Capabilities, error) {
 	return Capabilities{SelectedTab: -1, Reason: "当前平台不支持 UI Automation"}, ErrUnsupported
 }
 
-func SelectedTabIndex(hwnd uintptr) (int, bool) { return -1, false }
+func TabStrip(hwnd uintptr) (titles []string, selected int, ok bool) { return nil, -1, false }
 
-func SelectTab(hwnd uintptr, index int) error { return ErrUnsupported }
+func MenuButtonState(hwnd uintptr) (expanded bool, known bool) { return false, false }
 
-func InvokeButton(hwnd uintptr, spec MatchSpec) error { return ErrUnsupported }
+func ExecuteUIOp(hwnd uintptr, op UIOp) error { return ErrUnsupported }

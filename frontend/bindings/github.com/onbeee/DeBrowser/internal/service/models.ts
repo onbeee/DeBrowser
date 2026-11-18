@@ -259,6 +259,14 @@ export interface SyncFollowerState {
      */
     "status": string;
     "reason"?: string;
+
+    /**
+     * OpError is the latest semantic operation (tab switch, UI
+     * Automation op) that could not be performed for this
+     * follower. It is reported, never hidden; the follower
+     * keeps syncing everything else.
+     */
+    "opError"?: string;
     "caps": SyncCapabilitiesInfo;
 }
 
@@ -300,6 +308,13 @@ export interface SyncState {
     "masterId"?: string;
     "masterName"?: string;
     "masterCaps": SyncCapabilitiesInfo;
+
+    /**
+     * TabMapOK reports whether the master's tab strip is
+     * currently bound reliably to CDP target ids. When false,
+     * tab-switch following is paused rather than guessed.
+     */
+    "tabMapOk": boolean;
     "followers": SyncFollowerState[] | null;
     "uiSkipped": number;
     "hasArranged": boolean;

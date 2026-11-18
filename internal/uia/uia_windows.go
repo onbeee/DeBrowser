@@ -36,14 +36,16 @@ const (
 	slotElementCurrentName       = 23
 	slotElementCurrentAutoID     = 29
 
-	slotArrayLength   = 3
-	slotArrayGetElem  = 4
-	slotPatternInvoke = 3
-	slotPatternExpand = 3
-	slotPatternSetVal = 3
-	slotPatternSelect = 3
-	slotPatternIsSel  = 6
-	slotPatternToggle = 3
+	slotArrayLength        = 3
+	slotArrayGetElem       = 4
+	slotPatternInvoke      = 3
+	slotPatternExpand      = 3
+	slotPatternSetVal      = 3
+	slotPatternSelect      = 3
+	slotPatternIsSel       = 6
+	slotPatternToggle      = 3
+	slotPatternCollapse    = 4
+	slotPatternExpandState = 5
 
 	treeScopeChildren = 2
 )
@@ -224,7 +226,7 @@ func (a *automation) findChildren(el unsafe.Pointer) ([]unsafe.Pointer, error) {
 }
 
 func (a *automation) snapshot(el unsafe.Pointer, depth int) ElementInfo {
-	info := ElementInfo{Depth: depth}
+	info := ElementInfo{Depth: depth, ExpandState: -1}
 	var ct int32
 	call(el, slotElementCurrentType, uintptr(unsafe.Pointer(&ct)))
 	info.ControlType = ct
@@ -244,6 +246,12 @@ func (a *automation) snapshot(el unsafe.Pointer, depth int) ElementInfo {
 				var sel int32
 				if hr := call(pat, slotPatternIsSel, uintptr(unsafe.Pointer(&sel))); !failed(hr) && sel != 0 {
 					info.Selected = true
+				}
+			}
+			if pid == PatternExpandCollapse {
+				var st int32
+				if hr := call(pat, slotPatternExpandState, uintptr(unsafe.Pointer(&st))); !failed(hr) {
+					info.ExpandState = st
 				}
 			}
 			release(pat)
@@ -316,20 +324,67 @@ func ProbeWindow(hwnd uintptr) (Capabilities, error) {
 	})
 }
 
-// SelectedTabIndex reports the selected tab's index for a
-// window, or -1 when it cannot be determined.
-func SelectedTabIndex(hwnd uintptr) (int, bool) {
+// TabStrip returns the window's tab titles in strip order and
+// the selected index. ok is false when the strip cannot be
+// read; callers must not guess an order in that case.
+func TabStrip(hwnd uintptr) (titles []string, selected int, ok bool) {
 	caps, err := ProbeWindow(hwnd)
-	if err != nil || !caps.TabStrip {
-		return -1, false
+	if err != nil || !caps.TabStrip || len(caps.TabTitles) == 0 {
+		return nil, -1, false
 	}
-	return caps.SelectedTab, caps.SelectedTab >= 0
+	return caps.TabTitles, caps.SelectedTab, true
 }
 
-// SelectTab selects the index-th tab of a window through the
-// SelectionItem pattern — a semantic operation that neither
-// activates the window nor moves the cursor.
-func SelectTab(hwnd uintptr, index int) error {
+// MenuButtonState reports whether the window's main menu is
+// currently expanded, when the menu button uniquely exposes
+// its ExpandCollapse state.
+func MenuButtonState(hwnd uintptr) (expanded bool, known bool) {
+	caps, err := ProbeWindow(hwnd)
+	if err != nil || !caps.MenuStateKnown {
+		return false, false
+	}
+	return caps.MenuExpanded, true
+}
+
+// ExecuteUIOp applies one semantic operation to the UNIQUE
+// control in the window's chrome matching op.Spec. It fails —
+// never guesses — when the control is missing, ambiguous, or
+// lacks the pattern the action needs. "expand"/"collapse"
+// prefer the ExpandCollapse pattern and fall back to Invoke
+// (the app-menu button toggles), because that is the control's
+// own semantic behavior, not an input simulation.
+func ExecuteUIOp(hwnd uintptr, op UIOp) error {
+	patternFor := func(el ElementInfo) (int32, uintptr, error) {
+		switch op.Action {
+		case "invoke":
+			if el.HasPattern(PatternInvoke) {
+				return PatternInvoke, slotPatternInvoke, nil
+			}
+		case "expand":
+			if el.HasPattern(PatternExpandCollapse) {
+				return PatternExpandCollapse, slotPatternExpand, nil
+			}
+			if el.HasPattern(PatternInvoke) {
+				return PatternInvoke, slotPatternInvoke, nil
+			}
+		case "collapse":
+			if el.HasPattern(PatternExpandCollapse) {
+				return PatternExpandCollapse, slotPatternCollapse, nil
+			}
+			if el.HasPattern(PatternInvoke) {
+				return PatternInvoke, slotPatternInvoke, nil
+			}
+		case "toggle":
+			if el.HasPattern(PatternToggle) {
+				return PatternToggle, slotPatternToggle, nil
+			}
+		case "select":
+			if el.HasPattern(PatternSelectionItem) {
+				return PatternSelectionItem, slotPatternSelect, nil
+			}
+		}
+		return 0, 0, fmt.Errorf("uia: control does not support the %q action", op.Action)
+	}
 	_, err := runJob(func(a *automation) (struct{}, error) {
 		if a.condErr != nil {
 			return struct{}{}, ErrUnsupported
@@ -340,100 +395,26 @@ func SelectTab(hwnd uintptr, index int) error {
 		}
 		defer release(root)
 		elements := a.probeTree(root)
-		// Re-walk to find the live element for the index-th tab:
-		// probeTree released non-root elements, so locate it
-		// again by walking with the same order.
-		tab, err := a.nthTab(root, index)
-		if err != nil {
-			return struct{}{}, err
-		}
-		defer release(tab)
-		_ = elements
-		var pat unsafe.Pointer
-		if hr := call(tab, slotElementGetCurrentPattern, uintptr(PatternSelectionItem), uintptr(unsafe.Pointer(&pat))); failed(hr) || pat == nil {
-			return struct{}{}, fmt.Errorf("uia: tab does not support selection")
-		}
-		defer release(pat)
-		if hr := call(pat, slotPatternSelect); failed(hr) {
-			return struct{}{}, fmt.Errorf("uia: tab Select failed: %#x", hr)
-		}
-		return struct{}{}, nil
-	})
-	return err
-}
-
-// nthTab returns the live element of the index-th selectable tab
-// in tree order, walking the same pruned tree probeTree uses.
-func (a *automation) nthTab(root unsafe.Pointer, index int) (unsafe.Pointer, error) {
-	const maxDepth = 8
-	type item struct {
-		el    unsafe.Pointer
-		depth int
-	}
-	queue := []item{{root, 0}}
-	seen := -1
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		info := a.snapshot(cur.el, cur.depth)
-		if info.ControlType == ControlTabItem && info.HasPattern(PatternSelectionItem) {
-			seen++
-			if seen == index {
-				// Release everything else still queued.
-				for _, q := range queue {
-					if q.el != root {
-						release(q.el)
-					}
-				}
-				return cur.el, nil
-			}
-		}
-		if cur.depth < maxDepth && info.ControlType != ControlDocument {
-			children, err := a.findChildren(cur.el)
-			if err == nil {
-				for _, ch := range children {
-					queue = append(queue, item{ch, cur.depth + 1})
-				}
-			}
-		}
-		if cur.el != root {
-			release(cur.el)
-		}
-	}
-	return nil, fmt.Errorf("uia: tab index %d not found", index)
-}
-
-// InvokeButton finds the unique button matching spec in a
-// window's chrome and invokes it through the Invoke pattern.
-func InvokeButton(hwnd uintptr, spec MatchSpec) error {
-	_, err := runJob(func(a *automation) (struct{}, error) {
-		if a.condErr != nil {
-			return struct{}{}, ErrUnsupported
-		}
-		root, err := a.elementFromHandle(hwnd)
-		if err != nil {
-			return struct{}{}, err
-		}
-		defer release(root)
-		// Snapshot first for the pure, ambiguity-checked match.
-		elements := a.probeTree(root)
-		idx := FindMatch(elements, spec)
+		idx := FindMatch(elements, op.Spec)
 		if idx < 0 {
 			return struct{}{}, fmt.Errorf("uia: no unique control matches the request")
 		}
-		// Re-locate the live element at the same tree position.
+		patternID, slot, err := patternFor(elements[idx])
+		if err != nil {
+			return struct{}{}, err
+		}
 		live, err := a.nthBySnapshotIndex(root, idx)
 		if err != nil {
 			return struct{}{}, err
 		}
 		defer release(live)
 		var pat unsafe.Pointer
-		if hr := call(live, slotElementGetCurrentPattern, uintptr(PatternInvoke), uintptr(unsafe.Pointer(&pat))); failed(hr) || pat == nil {
-			return struct{}{}, fmt.Errorf("uia: control does not support Invoke")
+		if hr := call(live, slotElementGetCurrentPattern, uintptr(patternID), uintptr(unsafe.Pointer(&pat))); failed(hr) || pat == nil {
+			return struct{}{}, fmt.Errorf("uia: control does not support the requested pattern")
 		}
 		defer release(pat)
-		if hr := call(pat, slotPatternInvoke); failed(hr) {
-			return struct{}{}, fmt.Errorf("uia: Invoke failed: %#x", hr)
+		if hr := call(pat, slot); failed(hr) {
+			return struct{}{}, fmt.Errorf("uia: pattern call failed: %#x", hr)
 		}
 		return struct{}{}, nil
 	})
