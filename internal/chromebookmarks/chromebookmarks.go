@@ -496,12 +496,13 @@ func RemoveFromParent(parent, node map[string]any) bool {
 
 // ---- file IO --------------------------------------------------------
 
-// ErrNotChromium marks a profile whose bookmarks cannot be
-// confirmed to use the Chromium native format — most importantly
-// when the Bookmarks file does not exist at all. A missing file is
-// never treated as an empty Chromium document: DeBrowser must not
-// invent a bookmarks file for a profile whose browser it cannot
-// identify.
+// ErrNotChromium marks a bookmarks file that cannot be confirmed
+// to use the Chromium native format — for the strict Load, most
+// importantly a file that does not exist at all: Load never
+// invents a document. Callers working with a profile directory
+// that ResolveProfileDir has already established as the instance's
+// Chromium profile use LoadOrEmpty instead, where a missing file
+// is the legitimate "no bookmarks yet" state.
 var ErrNotChromium = errors.New("chromebookmarks: cannot confirm Chromium bookmarks format")
 
 // Load reads and fully validates the profile's Bookmarks file.
@@ -513,6 +514,43 @@ func Load(profileDir string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("%w: %s does not exist", ErrNotChromium, FileName)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("chromebookmarks: read %s: %w", FileName, err)
+	}
+	return Parse(data)
+}
+
+// EmptyFile returns a fresh, empty bookmarks document with the
+// standard Chromium structure — the three root folders
+// (bookmark_bar, other, synced) and version 1 — built with the
+// same node constructors as every other node this package creates,
+// so a document started from it serializes exactly like one a
+// browser would have written.
+func EmptyFile() *File {
+	roots := map[string]any{
+		"bookmark_bar": newFolderNode("Bookmarks bar", "1"),
+		"other":        newFolderNode("Other bookmarks", "2"),
+		"synced":       newFolderNode("Mobile bookmarks", "3"),
+	}
+	doc := map[string]any{
+		"roots":   roots,
+		"version": 1,
+	}
+	return &File{doc: doc, roots: roots}
+}
+
+// LoadOrEmpty loads the profile's Bookmarks file for a profile
+// directory already established as an instance's Chromium profile
+// (see ResolveProfileDir). A file that does not exist yet means
+// the browser has never created bookmarks in this profile — a
+// legitimate empty state, answered with EmptyFile. A file that
+// exists but cannot be read or parsed is still an error:
+// corruption is never disguised as emptiness.
+func LoadOrEmpty(profileDir string) (*File, error) {
+	data, err := os.ReadFile(filepath.Join(profileDir, FileName))
+	if os.IsNotExist(err) {
+		return EmptyFile(), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("chromebookmarks: read %s: %w", FileName, err)
@@ -586,14 +624,18 @@ func replaceFile(dir, target string, data []byte) error {
 //
 //  1. The new content is staged in a same-directory temp file and
 //     its exact bytes are validated.
-//  2. The current file is copied to the single rolling recovery
-//     copy Bookmarks.debwbak, itself written via staging+rename so
-//     it can never be left half-written.
+//  2. The current file, when one exists, is copied to the single
+//     rolling recovery copy Bookmarks.debwbak, itself written via
+//     staging+rename so it can never be left half-written. When
+//     no file exists yet there is nothing to preserve: the write
+//     creates the file, and no recovery copy is made.
 //  3. The staged content is atomically renamed over the original.
 //  4. The final file is re-read and fully validated. If that
 //     fails, Save restores the original from the recovery copy
-//     (again via staging+rename) and reports whether the restore
-//     succeeded — a failed write is never reported as success.
+//     (again via staging+rename) — or, when there was no original,
+//     removes the unverified new file — and reports the outcome:
+//     a failed write is never reported as success, and never
+//     leaves an unverified document behind.
 func Save(profileDir string, f *File) error {
 	data, err := f.Serialize()
 	if err != nil {
@@ -619,11 +661,31 @@ func Save(profileDir string, f *File) error {
 	}
 
 	original, err := os.ReadFile(target)
-	if err != nil {
+	hadOriginal := true
+	if os.IsNotExist(err) {
+		// No bookmarks file yet: nothing to preserve, the write
+		// creates it.
+		hadOriginal = false
+	} else if err != nil {
 		return fmt.Errorf("chromebookmarks: read original for recovery copy: %w", err)
 	}
-	if err := replaceFile(profileDir, backupPath, original); err != nil {
-		return fmt.Errorf("chromebookmarks: write recovery copy: %w", err)
+	if hadOriginal {
+		if err := replaceFile(profileDir, backupPath, original); err != nil {
+			return fmt.Errorf("chromebookmarks: write recovery copy: %w", err)
+		}
+	}
+	// failVerify reports a write whose replacement landed but did
+	// not verify, restoring the pre-write state: the original file
+	// from its recovery copy, or — when there was no original —
+	// no file at all.
+	failVerify := func(verifyErr error) error {
+		if hadOriginal {
+			return restoreAfterFailedVerify(profileDir, target, verifyErr)
+		}
+		if rerr := os.Remove(target); rerr != nil {
+			return fmt.Errorf("chromebookmarks: write failed (%v) and removing the unverified new file failed: %w", verifyErr, rerr)
+		}
+		return fmt.Errorf("chromebookmarks: write failed (%v); the unverified new file was removed", verifyErr)
 	}
 
 	if err := os.Rename(staged, target); err != nil {
@@ -635,10 +697,10 @@ func Save(profileDir string, f *File) error {
 	// Prove the final file reads back as a valid document.
 	finalData, rerr := os.ReadFile(target)
 	if rerr != nil {
-		return restoreAfterFailedVerify(profileDir, target, fmt.Errorf("re-read final file: %w", rerr))
+		return failVerify(fmt.Errorf("re-read final file: %w", rerr))
 	}
 	if _, perr := Parse(finalData); perr != nil {
-		return restoreAfterFailedVerify(profileDir, target, fmt.Errorf("final file failed validation: %w", perr))
+		return failVerify(fmt.Errorf("final file failed validation: %w", perr))
 	}
 	return nil
 }

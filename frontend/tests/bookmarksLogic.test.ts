@@ -7,6 +7,7 @@ import {
   visibleRows,
   descendantIds,
   selectionScope,
+  libraryCounts,
   searchVisibleIds,
   siblingIds,
   folderOptions,
@@ -101,4 +102,11 @@ test("syncEntryDecision gates the sync dialog on backend gate results", () => {
   assert.equal(syncEntryDecision(["stopped", "unknown"]), "blocked");
   assert.equal(notStoppedCount(["stopped", "running", "unknown"]), 2);
   assert.equal(notStoppedCount(["stopped"]), 0);
+});
+
+test("libraryCounts tallies bookmarks and folders separately", () => {
+  const counts = libraryCounts(nodes);
+  assert.equal(counts.bookmarks, 3);
+  assert.equal(counts.folders, 2);
+  assert.deepEqual(libraryCounts([]), { bookmarks: 0, folders: 0 });
 });

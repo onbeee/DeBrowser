@@ -447,7 +447,7 @@ function SearchTab(props: {
       {applied && (
         <p className="text-sm text-(--text-dim)">
           已处理 {applied.updatedInstances} 个实例 · 失败 {applied.failedInstances} · 跳过 {applied.skippedInstances}；
-          影响节点 {applied.affectedNodes} 个 · 失败节点 {applied.failedNodes} 个。
+          处理 {applied.affectedNodes} 项 · 失败 {applied.failedNodes} 项。
         </p>
       )}
     </div>

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 
+	"github.com/onbeee/DeBrowser/internal/chromebookmarks"
 	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/store"
 )
@@ -50,4 +51,17 @@ func (s *InstanceService) InstanceBookmarkAccess(id string) (model.Instance, str
 	default:
 		return inst, dir, BookmarkGateUnknown, nil
 	}
+}
+
+// bookmarkProfileDir resolves an instance's user data directory
+// (the second return of InstanceBookmarkAccess) to the actual
+// Chromium profile directory holding its Bookmarks file. The
+// Bookmarks file lives in a profile subdirectory of the user data
+// directory, never in the user data directory itself. EVERY
+// bookmark file entry point — counting, sync, search, edit,
+// delete — resolves through here so they all read and write the
+// same profile; see chromebookmarks.ResolveProfileDir for the
+// resolution rules.
+func bookmarkProfileDir(userDataDir string) (string, error) {
+	return chromebookmarks.ResolveProfileDir(userDataDir)
 }
