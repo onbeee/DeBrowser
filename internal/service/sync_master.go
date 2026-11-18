@@ -175,6 +175,16 @@ func (s *syncSession) onMasterEvent(ev cdp.Event) {
 			s.currentTarget = ""
 		}
 		s.mMu.Unlock()
+		if wasCurrent {
+			// The current target is gone: close the input
+			// dispatch gate NOW — not at the next poll cycle.
+			// Followers stop receiving input for the dead
+			// target, their queued input is dropped and held
+			// state released. The tab poller re-establishes
+			// bindings and attachments once the browser's new
+			// selection verifies.
+			s.setTabMapOK(false)
+		}
 		if known {
 			s.broadcast(syncEvent{kind: evCloseTab, masterTarget: p.TargetID})
 		}
@@ -405,31 +415,37 @@ func (s *syncSession) tabPoller(ctx context.Context) {
 			continue
 		}
 		target := order[sel]
-		wasOK := s.tabMapOK.Load()
-		changed := target != s.currentTargetSnapshot()
-		// Attach BEFORE the dispatch gate may open. Any
-		// failure keeps the gate closed, keeps the previous
-		// target out of service, and is reported on the
-		// session state; the next cycle retries.
-		if !s.verifyAndAttachMaster(target) {
-			continue
-		}
-		if !wasOK {
-			// Mapping recovery: followers re-verify their
-			// bindings from fresh data and re-attach before
-			// their own gates open. Pre-loss bindings are
-			// never reused as a recovery basis.
-			s.rebindFollowers(titles, infos, sel, target)
-		} else {
-			if changed && !s.paused.Load() {
-				s.broadcast(syncEvent{kind: evActivateTab, masterTarget: target})
-			}
-			if s.followersUnready() && s.rebindTick%5 == 0 {
-				s.rebindFollowers(titles, infos, sel, target)
-			}
-		}
-		s.rebindTick++
+		s.advanceToTarget(titles, infos, sel, target)
 	}
+}
+
+// advanceToTarget moves the session to a binding-verified
+// master target. Whenever the target CHANGES (tab switch, or
+// the previous current target was closed) or the mapping was
+// down, the dispatch gate closes FIRST — every follower
+// suspends (gate-first, queued input dropped, held state
+// released) so no input can keep flowing to the OLD target —
+// and only then is the master attached to the new target.
+// After a successful master attach, followers re-verify their
+// bindings from this cycle's fresh data and re-attach
+// individually; the session gate being open never makes a
+// follower ready on its own. On master attach failure the
+// gate stays closed and the next cycle retries.
+func (s *syncSession) advanceToTarget(titles []string, infos []cdp.TargetInfo, sel int, target string) {
+	wasOK := s.tabMapOK.Load()
+	changed := target != s.currentTargetSnapshot()
+	if changed || !wasOK {
+		s.setTabMapOK(false)
+	}
+	if !s.verifyAndAttachMaster(target) {
+		return
+	}
+	if changed || !wasOK {
+		s.rebindFollowers(titles, infos, sel, target)
+	} else if s.followersUnready() && s.rebindTick%5 == 0 {
+		s.rebindFollowers(titles, infos, sel, target)
+	}
+	s.rebindTick++
 }
 
 // verifyAndAttachMaster attaches the master session to the

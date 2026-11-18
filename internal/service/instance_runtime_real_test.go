@@ -275,20 +275,34 @@ func TestRealStartAbortGracefulCloseExitsChild(t *testing.T) {
 	if err := svc.StartInstance("", inst.ID); err == nil {
 		t.Fatal("start succeeded although the inspected executable cannot match the registration")
 	}
-	got, err := svc.GetInstance(inst.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != model.StatusStopped {
-		t.Fatalf("status = %q, want stopped after a confirmed-exit abort", got.Status)
-	}
 	db, err := database.Open(cfg.Layout.DatabaseFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if _, err := store.New(db).GetInstanceRuntime(t.Context(), inst.ID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("runtime record held after a confirmed exit: %v", err)
+	// The abort confirms the exit when the graceful close lands
+	// inside its confirmation window; when the close outruns
+	// that window on a loaded runner, the abort correctly holds
+	// the instance as unknown (fail-closed) and the watcher —
+	// which owns the held watch through its runtime record —
+	// settles it to stopped and deletes the record the moment
+	// the exit is observed. Either way the settled outcome must
+	// be: stopped, no runtime record. Wait for that settlement
+	// instead of racing it.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		got, err := svc.GetInstance(inst.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, rerr := store.New(db).GetInstanceRuntime(t.Context(), inst.ID)
+		if got.Status == model.StatusStopped && errors.Is(rerr, store.ErrNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status = %q, runtime record err = %v; want settled stopped with no record after the abort", got.Status, rerr)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if !heartbeatDead(hb) {
 		t.Fatal("the aborted child is still running (heartbeat continues) — the close did not really exit it")
