@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/onbeee/DeBrowser/internal/capture"
@@ -33,11 +34,49 @@ import (
 //     it to the per-follower queues as CDP input. Input over
 //     browser chrome is never mirrored.
 
+// tabBoundInput reports whether an event only makes sense
+// against the CURRENT tab: page mouse/keyboard/wheel input and
+// navigation of the current page. While the tab mapping is
+// unverified, these are withheld entirely — dispatching them
+// could drive a follower's wrong (stale) tab.
+func tabBoundInput(kind syncEventKind) bool {
+	switch kind {
+	case evMouseMove, evMouseButton, evMouseWheel, evKey,
+		evNavigate, evReload, evHistoryDelta:
+		return true
+	}
+	return false
+}
+
 func (s *syncSession) broadcast(ev syncEvent) {
+	if tabBoundInput(ev.kind) && !s.tabMapOK.Load() {
+		return
+	}
 	for _, id := range s.order {
 		if w := s.workers[id]; w != nil {
 			w.Enqueue(ev)
 		}
+	}
+}
+
+// setTabMapOK records a tab-mapping verification transition.
+// Losing the mapping immediately stops tab-bound dispatch
+// (broadcast gate), drops already-queued tab-bound input from
+// every follower, and releases any input state held down —
+// followers are never driven through a stale target while the
+// mapping is unknown. Regaining it resumes dispatch; the tab
+// poller re-attaches and re-activates right after. The session
+// itself is not torn down for a mapping loss.
+func (s *syncSession) setTabMapOK(ok bool) {
+	if s.tabMapOK.Swap(ok) == ok {
+		return // no transition
+	}
+	if ok {
+		return
+	}
+	for _, w := range s.workers {
+		w.queue.clearInput()
+		w.Release()
 	}
 }
 
@@ -341,27 +380,27 @@ func (s *syncSession) tabPoller(ctx context.Context) {
 		}
 		hwnd := topHWND(s.masterPID)
 		if hwnd == 0 {
-			s.tabMapOK.Store(false)
+			s.setTabMapOK(false)
 			continue
 		}
 		titles, sel, ok := uia.TabStrip(hwnd)
 		if !ok || sel < 0 {
-			s.tabMapOK.Store(false)
+			s.setTabMapOK(false)
 			continue
 		}
 		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		infos, err := s.masterClient.Targets(cctx)
 		cancel()
 		if err != nil {
-			s.tabMapOK.Store(false)
+			s.setTabMapOK(false)
 			continue
 		}
 		order, bound := bindTabOrder(titles, infos)
 		if !bound || sel >= len(order) {
-			s.tabMapOK.Store(false)
+			s.setTabMapOK(false)
 			continue
 		}
-		s.tabMapOK.Store(true)
+		s.setTabMapOK(true)
 		target := order[sel]
 		if target == s.currentTargetSnapshot() {
 			continue
@@ -486,11 +525,45 @@ func (s *syncSession) windowPoller(ctx context.Context) {
 
 // ---- input capture ingress ------------------------------------------
 
+// errCaptureEnded reports a capture start that arrived after
+// the session's teardown had already run.
+var errCaptureEnded = fmt.Errorf("同步会话已结束，无法开始捕获")
+
+// startCapture starts this session's input capture exactly
+// once. If teardown already ran (the master disconnected
+// during initialization), the start is refused — hooks are
+// never installed for a dead session.
 func (s *syncSession) startCapture() error {
-	return s.svc.captureStart(func(ev capture.Event) { s.onCaptured(ev) })
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	if s.capEnded {
+		return errCaptureEnded
+	}
+	if s.capOn {
+		return nil
+	}
+	if err := s.svc.captureStart(func(ev capture.Event) { s.onCaptured(ev) }); err != nil {
+		return err
+	}
+	s.capOn = true
+	return nil
 }
 
-func (s *syncSession) stopCapture() { s.svc.captureStop() }
+// stopCapture ends this session's capture exactly once; the
+// underlying stop waits for the hook thread to exit, so no
+// capture thread or handler outlives the session.
+func (s *syncSession) stopCapture() {
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	if s.capEnded {
+		return
+	}
+	s.capEnded = true
+	if s.capOn {
+		s.svc.captureStop()
+		s.capOn = false
+	}
+}
 
 // onCaptured runs on the hook thread: it must never block. It
 // classifies the event and offers copies to the follower queues.
@@ -512,12 +585,13 @@ func (s *syncSession) onCaptured(ev capture.Event) {
 		return
 	}
 	if !hit.IsContent {
-		// Browser chrome: not mirrored. Semantic channels cover
-		// tabs/navigation/windows/menu state; anything else is
-		// counted so the page can report it honestly.
+		// Browser chrome: not mirrored as input. Its effects
+		// sync through the semantic channels (tabs, navigation,
+		// windows, menu state). A click here is NOT counted as
+		// an unsynced operation — only operations that were
+		// actually attempted and failed are (see noteOpFailed).
 		if ev.Kind == capture.EventMouseDown {
 			s.focusCtx.Store(1)
-			s.uiSkipped.Add(1)
 		}
 		return
 	}

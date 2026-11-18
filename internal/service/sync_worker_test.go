@@ -142,6 +142,13 @@ func (f *recordingCDP) waitFor(t *testing.T, substr string, want int) {
 	t.Fatalf("timed out waiting for %d calls matching %q; got %d", want, substr, f.count(substr))
 }
 
+// dialRecording returns a CDP client connected to a fake
+// endpoint, for tests that drive a worker manually.
+func dialRecording(t *testing.T, f *recordingCDP) (*cdp.Client, error) {
+	t.Helper()
+	return cdp.Dial(context.Background(), f.port)
+}
+
 func dialWorker(t *testing.T, id string, f *recordingCDP) *followerWorker {
 	t.Helper()
 	client, err := cdp.Dial(context.Background(), f.port)

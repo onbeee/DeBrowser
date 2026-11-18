@@ -120,32 +120,40 @@ func MenuButtonSpec() MatchSpec {
 	}
 }
 
+// matchesSpec reports whether one element satisfies the spec.
+func matchesSpec(e ElementInfo, spec MatchSpec) bool {
+	if spec.ControlType != 0 && e.ControlType != spec.ControlType {
+		return false
+	}
+	if spec.AutomationID != "" && e.AutomationID != spec.AutomationID {
+		return false
+	}
+	if spec.NameContains != "" && !containsFold(e.Name, spec.NameContains) {
+		return false
+	}
+	if len(spec.NameContainsAny) > 0 {
+		any := false
+		for _, frag := range spec.NameContainsAny {
+			if containsFold(e.Name, frag) {
+				any = true
+				break
+			}
+		}
+		if !any {
+			return false
+		}
+	}
+	return true
+}
+
 // FindMatch returns the index of the UNIQUE element matching the
 // spec, or -1 when there is none or the match is ambiguous.
 // Ambiguity is a failure, never a guess.
 func FindMatch(elements []ElementInfo, spec MatchSpec) int {
 	found := -1
 	for i, e := range elements {
-		if spec.ControlType != 0 && e.ControlType != spec.ControlType {
+		if !matchesSpec(e, spec) {
 			continue
-		}
-		if spec.AutomationID != "" && e.AutomationID != spec.AutomationID {
-			continue
-		}
-		if spec.NameContains != "" && !containsFold(e.Name, spec.NameContains) {
-			continue
-		}
-		if len(spec.NameContainsAny) > 0 {
-			any := false
-			for _, frag := range spec.NameContainsAny {
-				if containsFold(e.Name, frag) {
-					any = true
-					break
-				}
-			}
-			if !any {
-				continue
-			}
 		}
 		if found >= 0 {
 			return -1 // ambiguous
@@ -153,6 +161,46 @@ func FindMatch(elements []ElementInfo, spec MatchSpec) int {
 		found = i
 	}
 	return found
+}
+
+// PatternForAction returns the pattern an action requires of a
+// control. State actions are strict: "expand" and "collapse"
+// require the ExpandCollapse pattern — Invoke is a toggle and
+// can never guarantee a target state, so it is NOT accepted as
+// a substitute.
+func PatternForAction(el ElementInfo, action string) (int32, error) {
+	var want int32
+	switch action {
+	case "invoke":
+		want = PatternInvoke
+	case "expand", "collapse":
+		want = PatternExpandCollapse
+	case "toggle":
+		want = PatternToggle
+	case "select":
+		want = PatternSelectionItem
+	default:
+		return 0, errors.New("uia: unknown action " + action)
+	}
+	if !el.HasPattern(want) {
+		return 0, errors.New("uia: control does not support the pattern required for " + action)
+	}
+	return want, nil
+}
+
+// SelectExecutable decides which element of a snapshot an
+// action may run on: the UNIQUE match that also supports the
+// required pattern. Anything else is an error — an operation is
+// never executed on an ambiguous or incapable control.
+func SelectExecutable(elements []ElementInfo, spec MatchSpec, action string) (int, error) {
+	idx := FindMatch(elements, spec)
+	if idx < 0 {
+		return -1, errors.New("uia: no unique control matches the request")
+	}
+	if _, err := PatternForAction(elements[idx], action); err != nil {
+		return -1, err
+	}
+	return idx, nil
 }
 
 func containsFold(s, sub string) bool {

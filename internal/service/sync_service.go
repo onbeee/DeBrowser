@@ -130,6 +130,14 @@ type syncSession struct {
 	opMu     sync.Mutex
 	opErrors map[string]string // follower id -> latest op failure
 
+	// Capture lifecycle for THIS session, serialized on capMu:
+	// teardown ends capture exactly once, and a capture start
+	// that loses the race with teardown is refused instead of
+	// installing hooks for a dead session.
+	capMu    sync.Mutex
+	capEnded bool
+	capOn    bool
+
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	teardownOnce sync.Once
@@ -545,6 +553,11 @@ func (s *SyncService) noteOpFailed(sess *syncSession, id, op, reason string) {
 	sess.opMu.Lock()
 	sess.opErrors[id] = reason
 	sess.opMu.Unlock()
+	// The unsynced-operation counter counts exactly this: an
+	// operation that was attempted for a follower and could
+	// not be performed — once per failed operation. Successful
+	// operations and mere browser-chrome clicks never count.
+	sess.uiSkipped.Add(1)
 	if s.Auditor != nil {
 		s.Auditor.RecordEvent(logging.Event{
 			EventType: "runtime", Category: "runtime", Module: "sync",

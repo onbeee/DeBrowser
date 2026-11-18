@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -61,15 +62,21 @@ type kbdllHookStruct struct {
 	DwExtraInfo uintptr
 }
 
+// Capture lifecycle state. Exactly one hook thread may exist
+// at a time: capDone is non-nil from the moment a thread is
+// spawned until it has FULLY exited (hooks uninstalled), and
+// StopCapture waits for that exit before returning — so a new
+// capture can never overlap or overwrite the previous one.
 var (
-	capMu       sync.Mutex
-	capHandler  Handler
-	mouseHook   uintptr
-	keyHook     uintptr
-	hookThread  uint32
-	hookReady   chan error
-	hookRunning bool
+	capMu      sync.Mutex
+	capHandler Handler
+	capDone    chan struct{}
+	capThread  uint32
 )
+
+// ErrBusy reports a StartCapture while a previous hook thread
+// is still running or still exiting.
+var ErrBusy = fmt.Errorf("capture: a previous capture is still active")
 
 func buttonsMask() int {
 	mask := 0
@@ -155,31 +162,41 @@ var (
 
 // StartCapture installs the low-level hooks on a dedicated
 // message-pump thread. Observation only — nothing is injected.
+// It fails with ErrBusy while a previous capture exists: the
+// handler is never silently replaced.
 func StartCapture(h Handler) error {
 	capMu.Lock()
-	if hookRunning {
-		capHandler = h
+	if capDone != nil {
 		capMu.Unlock()
-		return nil
+		return ErrBusy
 	}
+	done := make(chan struct{})
+	ready := make(chan error, 1)
+	capDone = done
 	capHandler = h
-	hookReady = make(chan error, 1)
 	capMu.Unlock()
 
-	go hookThreadMain(hookReady)
-	if err := <-hookReady; err != nil {
+	go func() {
+		defer close(done)
+		hookThreadMain(ready)
+	}()
+	if err := <-ready; err != nil {
+		<-done // the thread has fully exited
 		capMu.Lock()
+		if capDone == done {
+			capDone = nil
+			capThread = 0
+		}
 		capHandler = nil
 		capMu.Unlock()
 		return err
 	}
-	capMu.Lock()
-	hookRunning = true
-	capMu.Unlock()
 	return nil
 }
 
 func hookThreadMain(ready chan<- error) {
+	// done is closed by the wrapper below when this goroutine
+	// has completely finished (hooks uninstalled).
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -197,11 +214,11 @@ func hookThreadMain(ready chan<- error) {
 		ready <- fmt.Errorf("capture: keyboard hook: %v", kerr)
 		return
 	}
-	// Publish the handles WITHOUT holding capMu while signaling
-	// readiness: StartCapture does not hold the lock while it
-	// waits, and the pump below must be free to take it.
+	// The hooks are this thread's own locals; it uninstalls
+	// exactly what it installed. Only the thread id is shared,
+	// so StopCapture can post WM_QUIT.
 	capMu.Lock()
-	mouseHook, keyHook, hookThread = mh, kh, uint32(tid)
+	capThread = uint32(tid)
 	capMu.Unlock()
 	ready <- nil
 
@@ -220,21 +237,44 @@ func hookThreadMain(ready chan<- error) {
 			break
 		}
 	}
-	procUnhookWindowsHookEx.Call(mouseHook)
-	procUnhookWindowsHookEx.Call(keyHook)
-	capMu.Lock()
-	mouseHook, keyHook, hookRunning = 0, 0, false
-	capMu.Unlock()
+	procUnhookWindowsHookEx.Call(mh)
+	procUnhookWindowsHookEx.Call(kh)
 }
 
-// StopCapture uninstalls the hooks.
+// StopCapture uninstalls the hooks and WAITS until the hook
+// thread has fully exited before returning: after it returns,
+// no capture thread, hook or handler remains, and a new
+// StartCapture may proceed. It is idempotent — stopping an
+// already-stopped capture is a no-op.
 func StopCapture() {
 	capMu.Lock()
-	tid := hookThread
+	done := capDone
 	capHandler = nil
 	capMu.Unlock()
-	if tid != 0 {
-		procPostThreadMessageW.Call(uintptr(tid), wmQuit, 0, 0)
+	if done == nil {
+		return
+	}
+	// Post WM_QUIT until the thread exits. The post is retried
+	// because the thread's message queue (and its published id)
+	// may not exist yet when stop races a just-started capture.
+	for {
+		capMu.Lock()
+		tid := capThread
+		capMu.Unlock()
+		if tid != 0 {
+			procPostThreadMessageW.Call(uintptr(tid), wmQuit, 0, 0)
+		}
+		select {
+		case <-done:
+			capMu.Lock()
+			if capDone == done {
+				capDone = nil
+				capThread = 0
+			}
+			capMu.Unlock()
+			return
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 }
 

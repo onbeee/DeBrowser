@@ -239,7 +239,7 @@ export default function SyncPage() {
           <p className="mt-1 text-xs text-(--text-faint)">主实例界面能力：{state ? capsSummary(state.masterCaps) : ""}</p>
           {state && !state.tabMapOk && (
             <p className="mt-1 text-xs text-(--text-dim)">
-              标签切换同步当前不可用：无法可靠确认主实例的标签顺序与对应关系（例如存在同名标签），已停止切换跟随，不会激活可能错误的标签；新建、关闭标签仍会同步。
+              标签映射暂时无法确认（例如存在同名标签）：已暂停向跟随实例分发网页输入，会话保持运行，映射恢复后自动继续；期间不会向任何跟随实例发送可能发往错误标签的操作，新建、关闭标签仍会同步。
             </p>
           )}
           <ul className="mt-3 space-y-2">
@@ -261,7 +261,7 @@ export default function SyncPage() {
           </ul>
           {(state?.uiSkipped ?? 0) > 0 && (
             <p className="mt-3 text-xs text-(--text-dim)">
-              有 {state?.uiSkipped} 次浏览器界面操作未能通过语义通道同步（见下方支持范围），未做模拟输入处理。
+              有 {state?.uiSkipped} 次浏览器界面操作未能在部分跟随实例上执行（见各跟随实例的未执行提示），未做模拟输入处理。
             </p>
           )}
         </div>

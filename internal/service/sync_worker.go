@@ -209,13 +209,16 @@ func (q *followerQueue) evictOldestMove() bool {
 }
 
 // clearInput drops pending input events (pause semantics: stale
-// input is never replayed), keeping control events.
+// input is never replayed), keeping control events. evInit is a
+// session control event, NOT input: dropping it would leave a
+// paused-before-init worker permanently unattached, so it is
+// always kept (and, being consumed once, never re-initializes).
 func (q *followerQueue) clearInput() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	kept := q.items[:0]
 	for _, ev := range q.items {
-		if ev.kind == evRelease || ev.kind == evStop || ev.kind == evRefreshViewport {
+		if ev.kind == evRelease || ev.kind == evStop || ev.kind == evRefreshViewport || ev.kind == evInit {
 			kept = append(kept, ev)
 		} else {
 			q.dropped++

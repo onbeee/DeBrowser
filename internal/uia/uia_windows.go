@@ -347,44 +347,14 @@ func MenuButtonState(hwnd uintptr) (expanded bool, known bool) {
 }
 
 // ExecuteUIOp applies one semantic operation to the UNIQUE
-// control in the window's chrome matching op.Spec. It fails —
-// never guesses — when the control is missing, ambiguous, or
-// lacks the pattern the action needs. "expand"/"collapse"
-// prefer the ExpandCollapse pattern and fall back to Invoke
-// (the app-menu button toggles), because that is the control's
-// own semantic behavior, not an input simulation.
+// control in the window's chrome matching op.Spec. The control
+// is located, verified (stable properties, uniqueness, required
+// pattern) and executed within ONE tree walk, on the very
+// element whose properties were checked — there is no snapshot
+// index carried into a second enumeration. It fails — never
+// guesses — when the control is missing, ambiguous, or lacks
+// the pattern the action needs.
 func ExecuteUIOp(hwnd uintptr, op UIOp) error {
-	patternFor := func(el ElementInfo) (int32, uintptr, error) {
-		switch op.Action {
-		case "invoke":
-			if el.HasPattern(PatternInvoke) {
-				return PatternInvoke, slotPatternInvoke, nil
-			}
-		case "expand":
-			if el.HasPattern(PatternExpandCollapse) {
-				return PatternExpandCollapse, slotPatternExpand, nil
-			}
-			if el.HasPattern(PatternInvoke) {
-				return PatternInvoke, slotPatternInvoke, nil
-			}
-		case "collapse":
-			if el.HasPattern(PatternExpandCollapse) {
-				return PatternExpandCollapse, slotPatternCollapse, nil
-			}
-			if el.HasPattern(PatternInvoke) {
-				return PatternInvoke, slotPatternInvoke, nil
-			}
-		case "toggle":
-			if el.HasPattern(PatternToggle) {
-				return PatternToggle, slotPatternToggle, nil
-			}
-		case "select":
-			if el.HasPattern(PatternSelectionItem) {
-				return PatternSelectionItem, slotPatternSelect, nil
-			}
-		}
-		return 0, 0, fmt.Errorf("uia: control does not support the %q action", op.Action)
-	}
 	_, err := runJob(func(a *automation) (struct{}, error) {
 		if a.condErr != nil {
 			return struct{}{}, ErrUnsupported
@@ -394,25 +364,42 @@ func ExecuteUIOp(hwnd uintptr, op UIOp) error {
 			return struct{}{}, err
 		}
 		defer release(root)
-		elements := a.probeTree(root)
-		idx := FindMatch(elements, op.Spec)
-		if idx < 0 {
-			return struct{}{}, fmt.Errorf("uia: no unique control matches the request")
+		live := a.walkLive(root)
+		defer func() {
+			for _, le := range live {
+				if le.el != root {
+					release(le.el)
+				}
+			}
+		}()
+		infos := make([]ElementInfo, len(live))
+		for i, le := range live {
+			infos[i] = le.info
 		}
-		patternID, slot, err := patternFor(elements[idx])
+		idx, err := SelectExecutable(infos, op.Spec, op.Action)
 		if err != nil {
 			return struct{}{}, err
 		}
-		live, err := a.nthBySnapshotIndex(root, idx)
-		if err != nil {
-			return struct{}{}, err
-		}
-		defer release(live)
+		patternID, _ := PatternForAction(infos[idx], op.Action)
+		target := live[idx].el
 		var pat unsafe.Pointer
-		if hr := call(live, slotElementGetCurrentPattern, uintptr(patternID), uintptr(unsafe.Pointer(&pat))); failed(hr) || pat == nil {
+		if hr := call(target, slotElementGetCurrentPattern, uintptr(patternID), uintptr(unsafe.Pointer(&pat))); failed(hr) || pat == nil {
 			return struct{}{}, fmt.Errorf("uia: control does not support the requested pattern")
 		}
 		defer release(pat)
+		var slot uintptr
+		switch {
+		case patternID == PatternInvoke:
+			slot = slotPatternInvoke
+		case patternID == PatternExpandCollapse && op.Action == "expand":
+			slot = slotPatternExpand
+		case patternID == PatternExpandCollapse:
+			slot = slotPatternCollapse
+		case patternID == PatternToggle:
+			slot = slotPatternToggle
+		case patternID == PatternSelectionItem:
+			slot = slotPatternSelect
+		}
 		if hr := call(pat, slot); failed(hr) {
 			return struct{}{}, fmt.Errorf("uia: pattern call failed: %#x", hr)
 		}
@@ -421,29 +408,30 @@ func ExecuteUIOp(hwnd uintptr, op UIOp) error {
 	return err
 }
 
-// nthBySnapshotIndex returns the live element at position idx of
-// the probeTree traversal order.
-func (a *automation) nthBySnapshotIndex(root unsafe.Pointer, idx int) (unsafe.Pointer, error) {
+type liveElement struct {
+	info ElementInfo
+	el   unsafe.Pointer
+}
+
+// walkLive walks the window's chrome tree breadth-first like
+// probeTree (same pruning and caps) but KEEPS the live element
+// handles, so a decision made on an element's properties is
+// executed on that exact element. The caller owns every
+// returned handle except the root and must release them.
+func (a *automation) walkLive(root unsafe.Pointer) []liveElement {
 	const maxDepth = 8
+	const maxElements = 600
+	var out []liveElement
 	type item struct {
 		el    unsafe.Pointer
 		depth int
 	}
 	queue := []item{{root, 0}}
-	seen := -1
-	for len(queue) > 0 {
+	for len(queue) > 0 && len(out) < maxElements {
 		cur := queue[0]
 		queue = queue[1:]
-		seen++
-		if seen == idx {
-			for _, q := range queue {
-				if q.el != root {
-					release(q.el)
-				}
-			}
-			return cur.el, nil
-		}
 		info := a.snapshot(cur.el, cur.depth)
+		out = append(out, liveElement{info: info, el: cur.el})
 		if cur.depth < maxDepth && info.ControlType != ControlDocument {
 			children, err := a.findChildren(cur.el)
 			if err == nil {
@@ -452,9 +440,12 @@ func (a *automation) nthBySnapshotIndex(root unsafe.Pointer, idx int) (unsafe.Po
 				}
 			}
 		}
-		if cur.el != root {
-			release(cur.el)
+	}
+	// Elements still queued were never visited; release them.
+	for _, q := range queue {
+		if q.el != root {
+			release(q.el)
 		}
 	}
-	return nil, fmt.Errorf("uia: element index %d not found", idx)
+	return out
 }

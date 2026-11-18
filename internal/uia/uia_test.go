@@ -84,3 +84,53 @@ func TestFindMatchNameContainsAny(t *testing.T) {
 		t.Fatalf("FindMatch with two menu buttons = %d, want -1 (ambiguous)", idx)
 	}
 }
+
+func TestPatternForActionStrictStates(t *testing.T) {
+	invokeOnly := ElementInfo{Patterns: []int32{PatternInvoke}}
+	withEC := ElementInfo{Patterns: []int32{PatternInvoke, PatternExpandCollapse}}
+	// expand/collapse must never fall back to Invoke (a toggle
+	// cannot guarantee a target state).
+	if _, err := PatternForAction(invokeOnly, "expand"); err == nil {
+		t.Fatal("expand on an Invoke-only control must fail")
+	}
+	if _, err := PatternForAction(invokeOnly, "collapse"); err == nil {
+		t.Fatal("collapse on an Invoke-only control must fail")
+	}
+	if p, err := PatternForAction(withEC, "expand"); err != nil || p != PatternExpandCollapse {
+		t.Fatalf("expand with ExpandCollapse = %v, %v", p, err)
+	}
+	if p, err := PatternForAction(withEC, "collapse"); err != nil || p != PatternExpandCollapse {
+		t.Fatalf("collapse with ExpandCollapse = %v, %v", p, err)
+	}
+	if p, err := PatternForAction(invokeOnly, "invoke"); err != nil || p != PatternInvoke {
+		t.Fatalf("invoke = %v, %v", p, err)
+	}
+}
+
+func TestSelectExecutable(t *testing.T) {
+	spec := MatchSpec{ControlType: ControlButton, NameContains: "菜单"}
+	one := []ElementInfo{
+		{ControlType: ControlButton, Name: "菜单", Patterns: []int32{PatternExpandCollapse}},
+		{ControlType: ControlButton, Name: "返回", Patterns: []int32{PatternInvoke}},
+	}
+	if idx, err := SelectExecutable(one, spec, "expand"); err != nil || idx != 0 {
+		t.Fatalf("SelectExecutable = %d, %v; want 0, nil", idx, err)
+	}
+	// Ambiguous: refuse.
+	two := append(append([]ElementInfo{}, one...),
+		ElementInfo{ControlType: ControlButton, Name: "菜单二", Patterns: []int32{PatternExpandCollapse}})
+	if _, err := SelectExecutable(two, spec, "expand"); err == nil {
+		t.Fatal("ambiguous match must be refused")
+	}
+	// Unique but incapable: refuse.
+	incapable := []ElementInfo{
+		{ControlType: ControlButton, Name: "菜单", Patterns: []int32{PatternInvoke}},
+	}
+	if _, err := SelectExecutable(incapable, spec, "expand"); err == nil {
+		t.Fatal("control without ExpandCollapse must be refused for expand")
+	}
+	// Absent: refuse.
+	if _, err := SelectExecutable(one, MatchSpec{NameContains: "不存在"}, "invoke"); err == nil {
+		t.Fatal("missing control must be refused")
+	}
+}
