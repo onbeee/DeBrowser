@@ -4,6 +4,7 @@ package service
 
 import (
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -25,6 +26,17 @@ func ignoreCloseSignals() {}
 // Without the variable it just sleeps (used where only launch and
 // external termination matter).
 func fakeBrowserBlock() {
+	// The window and its message loop must live on ONE OS
+	// thread: Win32 delivers the window's messages to the
+	// creating thread's queue, and GetMessage below reads the
+	// current thread's queue. Without locking, the Go scheduler
+	// may migrate this goroutine to another thread between
+	// CreateWindowEx and GetMessage — the posted WM_CLOSE then
+	// waits in the original thread's queue forever and the
+	// process never exits. (This made the real-process abort
+	// tests flaky exactly under load, when migration is most
+	// likely.)
+	runtime.LockOSThread()
 	if os.Getenv("DEBROWSER_FAKE_WINDOW") != "1" {
 		for {
 			time.Sleep(time.Hour)
