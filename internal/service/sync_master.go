@@ -75,8 +75,9 @@ func (s *syncSession) setTabMapOK(ok bool) {
 		return
 	}
 	for _, w := range s.workers {
-		w.queue.clearInput()
-		w.Release()
+		// Gate first (inside suspendInput), then clear and
+		// release: no concurrent enqueue can land afterwards.
+		w.suspendInput()
 	}
 }
 
@@ -367,7 +368,10 @@ func (s *syncSession) historyPoller(ctx context.Context) {
 // target ids with bindTabOrder and only acts when the binding
 // verifies. When it does not, tabMapOK is cleared (the page
 // tells the user) and no activation is broadcast — a wrong tab
-// is never activated on a guess.
+// is never activated on a guess. When the binding verifies, the
+// master's current target is attached BEFORE the dispatch gate
+// opens; on recovery every follower re-verifies and re-attaches
+// through rebindFollowers before its own gate opens.
 func (s *syncSession) tabPoller(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(400 * time.Millisecond)
@@ -400,18 +404,123 @@ func (s *syncSession) tabPoller(ctx context.Context) {
 			s.setTabMapOK(false)
 			continue
 		}
-		s.setTabMapOK(true)
 		target := order[sel]
-		if target == s.currentTargetSnapshot() {
+		wasOK := s.tabMapOK.Load()
+		changed := target != s.currentTargetSnapshot()
+		// Attach BEFORE the dispatch gate may open. Any
+		// failure keeps the gate closed, keeps the previous
+		// target out of service, and is reported on the
+		// session state; the next cycle retries.
+		if !s.verifyAndAttachMaster(target) {
 			continue
 		}
-		if err := s.attachMasterTarget(target); err != nil {
+		if !wasOK {
+			// Mapping recovery: followers re-verify their
+			// bindings from fresh data and re-attach before
+			// their own gates open. Pre-loss bindings are
+			// never reused as a recovery basis.
+			s.rebindFollowers(titles, infos, sel, target)
+		} else {
+			if changed && !s.paused.Load() {
+				s.broadcast(syncEvent{kind: evActivateTab, masterTarget: target})
+			}
+			if s.followersUnready() && s.rebindTick%5 == 0 {
+				s.rebindFollowers(titles, infos, sel, target)
+			}
+		}
+		s.rebindTick++
+	}
+}
+
+// verifyAndAttachMaster attaches the master session to the
+// given (binding-verified) current target and only then opens
+// the input dispatch gate. On attach failure the gate stays
+// closed, the failure is recorded for the sync state, and
+// false is returned; the caller retries on the next cycle.
+func (s *syncSession) verifyAndAttachMaster(target string) bool {
+	if target == s.currentTargetSnapshot() && s.masterAttached() {
+		s.setMasterErr("")
+		s.setTabMapOK(true)
+		return true
+	}
+	if err := s.attachMasterTarget(target); err != nil {
+		s.setMasterErr("附加主实例当前标签失败：" + err.Error())
+		s.setTabMapOK(false)
+		return false
+	}
+	s.setMasterErr("")
+	s.refreshMasterViewport()
+	s.setTabMapOK(true)
+	return true
+}
+
+func (s *syncSession) masterAttached() bool {
+	s.mMu.Lock()
+	defer s.mMu.Unlock()
+	return s.currentTarget != "" && s.sessions[s.currentTarget] != ""
+}
+
+func (s *syncSession) setMasterErr(msg string) {
+	s.mMu.Lock()
+	s.masterErr = msg
+	s.mMu.Unlock()
+}
+
+func (s *syncSession) masterErrSnapshot() string {
+	s.mMu.Lock()
+	defer s.mMu.Unlock()
+	return s.masterErr
+}
+
+func (s *syncSession) followersUnready() bool {
+	for _, id := range s.order {
+		w := s.workers[id]
+		if w == nil {
 			continue
 		}
-		s.refreshMasterViewport()
-		if !s.paused.Load() {
-			s.broadcast(syncEvent{kind: evActivateTab, masterTarget: target})
+		if failed, _ := w.isFailed(); failed {
+			continue
 		}
+		if ready, _ := w.isReady(); !ready {
+			return true
+		}
+	}
+	return false
+}
+
+// rebindFollowers recomputes every not-yet-ready follower's
+// tab bindings from FRESH follower data (its current targets
+// and tab strip) against the master's verified strip, and
+// queues a rebind: the worker replaces its bindings and
+// re-attaches to the master's current target, opening its own
+// gate only on success. Followers that are ready or failed are
+// left alone — one follower's recovery never disturbs another.
+func (s *syncSession) rebindFollowers(masterTitles []string, masterInfos []cdp.TargetInfo, masterSel int, target string) {
+	for _, fid := range s.order {
+		w := s.workers[fid]
+		if w == nil {
+			continue
+		}
+		if failed, _ := w.isFailed(); failed {
+			continue
+		}
+		if ready, _ := w.isReady(); ready {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		finfos, err := w.client.Targets(ctx)
+		cancel()
+		if err != nil {
+			continue
+		}
+		var fcaps uia.Capabilities
+		if pid := s.svc.instances.instanceProcessID(fid); pid > 0 {
+			if hwnd := topHWND(uint32(pid)); hwnd != 0 {
+				fcaps, _ = uia.ProbeWindow(hwnd)
+			}
+		}
+		bindings := initialBindings(masterTitles, masterInfos, masterSel, fcaps.TabTitles, finfos, fcaps.SelectedTab)
+		w.Rebind(bindings, target)
 	}
 }
 

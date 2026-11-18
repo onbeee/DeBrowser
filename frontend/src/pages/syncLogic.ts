@@ -38,8 +38,13 @@ export function toggleFollower(selected: string[], id: string, masterId: string)
 export function followerSummary(followers: FollowerStateLike[]): string {
   if (followers.length === 0) return "";
   const failed = followers.filter((f) => f.status === "failed").length;
-  if (failed === 0) return `全部 ${followers.length} 个跟随实例正常`;
-  return `${followers.length - failed} 个正常 · ${failed} 个失败`;
+  const suspended = followers.filter((f) => f.status === "suspended").length;
+  const active = followers.length - failed - suspended;
+  if (failed === 0 && suspended === 0) return `全部 ${followers.length} 个跟随实例正常`;
+  const parts = [`${active} 个正常`];
+  if (suspended > 0) parts.push(`${suspended} 个等待标签映射`);
+  if (failed > 0) parts.push(`${failed} 个失败`);
+  return parts.join(" · ");
 }
 
 /** Support levels shown on the page. These describe the actual

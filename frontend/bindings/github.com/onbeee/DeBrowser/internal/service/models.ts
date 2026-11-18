@@ -311,10 +311,18 @@ export interface SyncState {
 
     /**
      * TabMapOK reports whether the master's tab strip is
-     * currently bound reliably to CDP target ids. When false,
-     * tab-switch following is paused rather than guessed.
+     * currently bound reliably to CDP target ids AND the
+     * master session is attached to the verified current
+     * target. When false, web input dispatch is paused
+     * rather than guessed.
      */
     "tabMapOk": boolean;
+
+    /**
+     * MasterError is the latest master attach failure, empty
+     * when the master is attached (or merely unverified).
+     */
+    "masterError"?: string;
     "followers": SyncFollowerState[] | null;
     "uiSkipped": number;
     "hasArranged": boolean;

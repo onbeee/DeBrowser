@@ -72,9 +72,14 @@ type SyncState struct {
 	MasterName string               `json:"masterName,omitempty"`
 	MasterCaps SyncCapabilitiesInfo `json:"masterCaps"`
 	// TabMapOK reports whether the master's tab strip is
-	// currently bound reliably to CDP target ids. When false,
-	// tab-switch following is paused rather than guessed.
-	TabMapOK    bool                `json:"tabMapOk"`
+	// currently bound reliably to CDP target ids AND the
+	// master session is attached to the verified current
+	// target. When false, web input dispatch is paused
+	// rather than guessed.
+	TabMapOK bool `json:"tabMapOk"`
+	// MasterError is the latest master attach failure, empty
+	// when the master is attached (or merely unverified).
+	MasterError string              `json:"masterError,omitempty"`
 	Followers   []SyncFollowerState `json:"followers"`
 	UISkipped   int64               `json:"uiSkipped"`
 	HasArranged bool                `json:"hasArranged"`
@@ -129,6 +134,13 @@ type syncSession struct {
 
 	opMu     sync.Mutex
 	opErrors map[string]string // follower id -> latest op failure
+
+	// masterErr is the latest master attach failure, shown on
+	// the sync page; empty while the master is attached (or
+	// simply unverified). Guarded by mMu. rebindTick counts
+	// verified poller cycles to pace follower rebind retries.
+	masterErr  string
+	rebindTick int
 
 	// Capture lifecycle for THIS session, serialized on capMu:
 	// teardown ends capture exactly once, and a capture start
@@ -329,16 +341,22 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 		sess.caps[masterID] = uia.Capabilities{SelectedTab: -1, Reason: "无法读取浏览器界面控件信息"}
 	}
 	masterCaps := sess.caps[masterID]
-	activeTarget := masterInfos[0].TargetID
+	// The master's active target is used ONLY when the title
+	// binding verifies. There is no fallback to the target
+	// list's first entry or any other unverified order: when
+	// the binding does not hold, the session starts with the
+	// dispatch gate closed and no master attachment, and the
+	// tab poller establishes both once the binding verifies.
+	activeTarget := ""
 	if order, bound := bindTabOrder(masterCaps.TabTitles, masterInfos); bound &&
 		masterCaps.SelectedTab >= 0 && masterCaps.SelectedTab < len(order) {
 		activeTarget = order[masterCaps.SelectedTab]
+		if err := sess.attachMasterTarget(activeTarget); err != nil {
+			return failStart(fmt.Errorf("连接主实例标签失败：%v", err))
+		}
 		sess.tabMapOK.Store(true)
+		sess.refreshMasterViewport()
 	}
-	if err := sess.attachMasterTarget(activeTarget); err != nil {
-		return failStart(fmt.Errorf("连接主实例标签失败：%v", err))
-	}
-	sess.refreshMasterViewport()
 
 	// Followers: connect and queue an init event on each worker.
 	for _, finst := range followers {
@@ -600,6 +618,7 @@ func (s *SyncService) GetSyncState(operationID string) (SyncState, error) {
 	}
 	st.MasterCaps = capsInfo(sess.caps[sess.masterID])
 	st.TabMapOK = sess.tabMapOK.Load()
+	st.MasterError = sess.masterErrSnapshot()
 	sess.opMu.Lock()
 	opErrors := make(map[string]string, len(sess.opErrors))
 	for k, v := range sess.opErrors {
@@ -615,6 +634,13 @@ func (s *SyncService) GetSyncState(operationID string) (SyncState, error) {
 		if failed, reason := w.isFailed(); failed {
 			fs.Status = "failed"
 			fs.Reason = reason
+		} else if ready, cause := w.isReady(); !ready {
+			// Not failed, but not dispatching either: no
+			// verified binding or no attachment for the
+			// master's current tab yet. Reported explicitly
+			// — never as normal sync.
+			fs.Status = "suspended"
+			fs.Reason = cause
 		}
 		st.Followers = append(st.Followers, fs)
 	}

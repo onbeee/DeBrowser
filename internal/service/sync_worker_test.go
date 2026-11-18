@@ -163,15 +163,17 @@ func dialWorker(t *testing.T, id string, f *recordingCDP) *followerWorker {
 		<-w.done
 		client.Close()
 	})
-	// Wait for init attach.
+	// Wait until the worker is READY (attached through its
+	// verified binding) — the attach call alone is not the
+	// readiness signal, and tab-bound input is gated on it.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if f.count("attachToTarget") >= 1 {
+		if ready, _ := w.isReady(); ready {
 			return w
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("worker init did not attach")
+	t.Fatal("worker init did not become ready")
 	return nil
 }
 
@@ -507,8 +509,18 @@ func TestWorkerOverloadFailsFollowerAndReleases(t *testing.T) {
 func TestWorkerTabOpsUseBindingsNotPositions(t *testing.T) {
 	f := newRecordingCDP(t)
 	w := dialWorker(t, "f1", f)
+	var opMu sync.Mutex
 	var opFails []string
-	w.onOpFail = func(id, op, reason string) { opFails = append(opFails, op+":"+reason) }
+	opFailSnapshot := func() []string {
+		opMu.Lock()
+		defer opMu.Unlock()
+		return append([]string(nil), opFails...)
+	}
+	w.onOpFail = func(id, op, reason string) {
+		opMu.Lock()
+		opFails = append(opFails, op+":"+reason)
+		opMu.Unlock()
+	}
 
 	// Create: counterpart tab is created and bound, NOT attached.
 	w.Enqueue(syncEvent{kind: evCreateTab, masterTarget: "m2"})
@@ -524,11 +536,11 @@ func TestWorkerTabOpsUseBindingsNotPositions(t *testing.T) {
 	// follower is NOT failed.
 	w.Enqueue(syncEvent{kind: evActivateTab, masterTarget: "mX"})
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && len(opFails) == 0 {
+	for time.Now().Before(deadline) && len(opFailSnapshot()) == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(opFails) != 1 || !strings.Contains(opFails[0], "切换标签") {
-		t.Fatalf("opFails = %v, want one tab-switch report", opFails)
+	if got := opFailSnapshot(); len(got) != 1 || !strings.Contains(got[0], "切换标签") {
+		t.Fatalf("opFails = %v, want one tab-switch report", got)
 	}
 	if failed, _ := w.isFailed(); failed {
 		t.Fatal("unbound activation must not fail the follower")
@@ -541,11 +553,11 @@ func TestWorkerTabOpsUseBindingsNotPositions(t *testing.T) {
 	f.waitFor(t, "closeTarget", 1)
 	w.Enqueue(syncEvent{kind: evActivateTab, masterTarget: "m2"})
 	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && len(opFails) < 2 {
+	for time.Now().Before(deadline) && len(opFailSnapshot()) < 2 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(opFails) != 2 {
-		t.Fatalf("opFails = %v, want a second report after close", opFails)
+	if got := opFailSnapshot(); len(got) != 2 {
+		t.Fatalf("opFails = %v, want a second report after close", got)
 	}
 }
 
@@ -555,19 +567,31 @@ func TestWorkerUIOpExecutesAndReportsPerFollower(t *testing.T) {
 	f := newRecordingCDP(t)
 	w := dialWorker(t, "f1", f)
 	w.hwnd = 4242
+	var mu sync.Mutex
 	var executed []string
+	var opFails []string
+	snapshot := func() ([]string, []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), executed...), append([]string(nil), opFails...)
+	}
 	w.uiExec = func(hwnd uintptr, op uia.UIOp) error {
 		if hwnd != 4242 {
 			t.Errorf("uiExec hwnd = %d, want 4242", hwnd)
 		}
+		mu.Lock()
 		executed = append(executed, op.Action)
+		mu.Unlock()
 		if op.Action == "collapse" {
 			return fmt.Errorf("uia: no unique control matches the request")
 		}
 		return nil
 	}
-	var opFails []string
-	w.onOpFail = func(id, op, reason string) { opFails = append(opFails, op+":"+reason) }
+	w.onOpFail = func(id, op, reason string) {
+		mu.Lock()
+		opFails = append(opFails, op+":"+reason)
+		mu.Unlock()
+	}
 
 	cmd := func(action string) syncEvent {
 		return syncEvent{kind: evUIOp, uiOp: &uiOpCommand{
@@ -577,9 +601,13 @@ func TestWorkerUIOpExecutesAndReportsPerFollower(t *testing.T) {
 	w.Enqueue(cmd("expand"))
 	w.Enqueue(cmd("collapse"))
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && len(opFails) == 0 {
+	for time.Now().Before(deadline) {
+		if _, fails := snapshot(); len(fails) > 0 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	executed, opFails = snapshot()
 	if len(executed) != 2 {
 		t.Fatalf("executed = %v, want both ops attempted", executed)
 	}
@@ -593,9 +621,13 @@ func TestWorkerUIOpExecutesAndReportsPerFollower(t *testing.T) {
 	w.hwnd = 0
 	w.Enqueue(cmd("expand"))
 	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && len(opFails) < 2 {
+	for time.Now().Before(deadline) {
+		if _, fails := snapshot(); len(fails) >= 2 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	executed, opFails = snapshot()
 	if len(opFails) != 2 || len(executed) != 2 {
 		t.Fatalf("opFails = %v executed = %v, want window-missing report without execution", opFails, executed)
 	}

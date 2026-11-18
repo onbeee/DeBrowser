@@ -50,6 +50,14 @@ describe("syncLogic", () => {
       followerSummary([{ id: "1", status: "active" }, { id: "2", status: "failed", reason: "x" }]),
       "1 个正常 · 1 个失败",
     );
+    assert.equal(
+      followerSummary([
+        { id: "1", status: "active" },
+        { id: "2", status: "suspended", reason: "未建立当前标签的同步映射" },
+        { id: "3", status: "failed", reason: "x" },
+      ]),
+      "1 个正常 · 1 个等待标签映射 · 1 个失败",
+    );
   });
 
   test("support levels name the unsupported IME case honestly", () => {

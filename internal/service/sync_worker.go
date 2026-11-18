@@ -52,6 +52,7 @@ const (
 	evRelease
 	evStop
 	evInit
+	evRebind
 )
 
 type syncEvent struct {
@@ -269,6 +270,20 @@ type followerWorker struct {
 	// field so tests can substitute a fake executor.
 	uiExec func(hwnd uintptr, op uia.UIOp) error
 
+	// Input readiness gate. Tab-bound input may only be
+	// enqueued while ready is true, and ready is true only
+	// while the worker is attached to the follower target
+	// bound to the master's CURRENT target through a verified
+	// binding. The check and the enqueue are atomic under
+	// gateMu, and suspending (mapping loss, unbinding) takes
+	// the same lock before clearing the queue — so no tab-bound
+	// event can slip into the queue after suspension, and none
+	// is silently consumed by an unattached worker: the
+	// worker's state reports exactly why it is not ready.
+	gateMu     sync.Mutex
+	ready      bool
+	readyCause string
+
 	// Owned by the worker goroutine only.
 	session       string
 	bindings      map[string]string // master target id -> follower target id
@@ -332,14 +347,68 @@ func (w *followerWorker) callCtx() (context.Context, context.CancelFunc) {
 // follower (with input-state release) instead of being dropped:
 // a silently lost press or release would corrupt the follower's
 // input state far worse than a clean, reported failure.
+//
+// Tab-bound input additionally passes the readiness gate: the
+// readiness check and the enqueue are atomic under gateMu, so
+// a suspension (which takes gateMu before clearing the queue)
+// can never be overtaken by a late enqueue.
 func (w *followerWorker) Enqueue(ev syncEvent) {
 	if failed, _ := w.isFailed(); failed {
+		return
+	}
+	if tabBoundInput(ev.kind) {
+		w.gateMu.Lock()
+		if !w.ready {
+			w.gateMu.Unlock()
+			return
+		}
+		res := w.queue.push(ev)
+		w.gateMu.Unlock()
+		if res == pushOverload {
+			w.markFailed("同步事件过多，已停止该实例的同步")
+			w.Release()
+		}
 		return
 	}
 	if w.queue.push(ev) == pushOverload {
 		w.markFailed("同步事件过多，已停止该实例的同步")
 		w.Release()
 	}
+}
+
+// isReady reports whether tab-bound input may currently be
+// dispatched to this follower, and why not when it may not.
+func (w *followerWorker) isReady() (bool, string) {
+	w.gateMu.Lock()
+	defer w.gateMu.Unlock()
+	return w.ready, w.readyCause
+}
+
+func (w *followerWorker) setReady() {
+	w.gateMu.Lock()
+	w.ready = true
+	w.readyCause = ""
+	w.gateMu.Unlock()
+}
+
+func (w *followerWorker) setUnready(cause string) {
+	w.gateMu.Lock()
+	w.ready = false
+	w.readyCause = cause
+	w.gateMu.Unlock()
+}
+
+// suspendInput closes the readiness gate FIRST (under gateMu,
+// so no concurrent enqueue can pass), then drops queued
+// tab-bound input and releases held input state. Control
+// events (release/stop) are never gated.
+func (w *followerWorker) suspendInput() {
+	w.gateMu.Lock()
+	w.ready = false
+	w.readyCause = "标签映射暂时无法确认"
+	w.gateMu.Unlock()
+	w.queue.clearInput()
+	w.Release()
 }
 
 // Release asks the worker to release all injected input state.
@@ -386,6 +455,25 @@ func (w *followerWorker) Run() {
 			w.master.w, w.master.h = ev.masterW, ev.masterH
 			if err := w.attachBound(ev.currentTarget); err != nil {
 				w.markFailed("连接跟随实例标签失败：" + err.Error())
+			}
+			continue
+		}
+		if ev.kind == evRebind {
+			// Freshly re-verified bindings after a mapping
+			// recovery: replace the old ones wholesale (stale
+			// bindings are never a recovery basis) and attach
+			// to the master's current target again.
+			w.bindings = ev.bindings
+			if w.bindings == nil {
+				w.bindings = make(map[string]string)
+			}
+			if failed, _ := w.isFailed(); !failed {
+				if err := w.attachBound(ev.currentTarget); err != nil {
+					w.setUnready("重新附加标签失败")
+					if w.onOpFail != nil {
+						w.onOpFail(w.id, "恢复标签同步", "重新附加标签失败："+err.Error())
+					}
+				}
 			}
 			continue
 		}
@@ -571,6 +659,7 @@ func (w *followerWorker) execCloseTab(masterTarget string) error {
 	}
 	if masterTarget == w.currentMaster {
 		w.session, w.currentMaster = "", ""
+		w.setUnready("当前标签已关闭，等待重新确认")
 	}
 	return nil
 }
@@ -581,9 +670,11 @@ func (w *followerWorker) execCloseTab(masterTarget string) error {
 func (w *followerWorker) execActivateTab(masterTarget string) error {
 	id, ok := w.bindings[masterTarget]
 	if !ok || id == "" {
+		w.setUnready("该标签未建立同步映射")
 		return &opFailure{op: "切换标签", reason: "该标签未建立同步映射，无法可靠切换"}
 	}
 	if masterTarget == w.currentMaster && w.session != "" {
+		w.setReady()
 		return nil
 	}
 	ctx, cancel := w.callCtx()
@@ -591,7 +682,12 @@ func (w *followerWorker) execActivateTab(masterTarget string) error {
 	if err := w.client.ActivateTarget(ctx, id); err != nil {
 		return &opFailure{op: "切换标签", reason: "切换标签失败：" + err.Error()}
 	}
-	return w.attachTo(id, masterTarget)
+	if err := w.attachTo(id, masterTarget); err != nil {
+		w.setUnready("附加标签失败")
+		return &opFailure{op: "切换标签", reason: "切换标签失败：" + err.Error()}
+	}
+	w.setReady()
+	return nil
 }
 
 // execUIOp executes one semantic browser-chrome operation on
@@ -611,19 +707,32 @@ func (w *followerWorker) execUIOp(cmd *uiOpCommand) error {
 }
 
 // attachBound attaches to the follower tab bound to a master
-// target (session start).
+// target and opens the readiness gate on success. A missing
+// binding is NOT success and NOT a hard failure: the worker
+// stays visibly unready (its state reports the cause) until a
+// rebind supplies a verified binding. A failed attach against
+// a bound target is returned as an error.
 func (w *followerWorker) attachBound(masterTarget string) error {
 	if masterTarget == "" {
+		w.setUnready("主实例当前标签尚未确认")
 		return nil
 	}
 	id, ok := w.bindings[masterTarget]
 	if !ok || id == "" {
-		// No verified binding for the master's current tab:
-		// input stays unattached until an activation with a
-		// binding arrives. Nothing is guessed.
+		w.setUnready("未建立当前标签的同步映射")
 		return nil
 	}
-	return w.attachTo(id, masterTarget)
+	if err := w.attachTo(id, masterTarget); err != nil {
+		w.setUnready("附加标签失败")
+		return err
+	}
+	w.setReady()
+	return nil
+}
+
+// Rebind queues freshly verified bindings for the worker.
+func (w *followerWorker) Rebind(bindings map[string]string, currentTarget string) {
+	w.queue.push(syncEvent{kind: evRebind, bindings: bindings, currentTarget: currentTarget})
 }
 
 // attachTo attaches to a follower target and makes it the input

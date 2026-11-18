@@ -237,6 +237,9 @@ export default function SyncPage() {
             </div>
           </div>
           <p className="mt-1 text-xs text-(--text-faint)">主实例界面能力：{state ? capsSummary(state.masterCaps) : ""}</p>
+          {state?.masterError && (
+            <p className="mt-1 text-xs text-(--text-dim)">主实例标签连接失败：{state.masterError}，网页输入同步暂不可用，正在自动重试。</p>
+          )}
           {state && !state.tabMapOk && (
             <p className="mt-1 text-xs text-(--text-dim)">
               标签映射暂时无法确认（例如存在同名标签）：已暂停向跟随实例分发网页输入，会话保持运行，映射恢复后自动继续；期间不会向任何跟随实例发送可能发往错误标签的操作，新建、关闭标签仍会同步。
@@ -251,11 +254,14 @@ export default function SyncPage() {
                   {f.status === "failed" && f.reason && (
                     <p className="mt-0.5 text-xs text-(--text-dim)">失败原因：{f.reason}</p>
                   )}
+                  {f.status === "suspended" && f.reason && (
+                    <p className="mt-0.5 text-xs text-(--text-dim)">等待标签映射：{f.reason}</p>
+                  )}
                   {f.opError && (
                     <p className="mt-0.5 text-xs text-(--text-dim)">最近一次界面操作未执行：{f.opError}</p>
                   )}
                 </div>
-                <span className="shrink-0 text-xs text-(--text-dim)">{f.status === "failed" ? "失败" : "正常"}</span>
+                <span className="shrink-0 text-xs text-(--text-dim)">{f.status === "failed" ? "失败" : f.status === "suspended" ? "已暂停" : "正常"}</span>
               </li>
             ))}
           </ul>

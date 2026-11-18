@@ -45,8 +45,21 @@ func TestBroadcastGatedByTabMap(t *testing.T) {
 		t.Fatalf("mouseMoved = %d, want 1 (persistent failure stays gated)", n)
 	}
 
-	// Mapping verified again: dispatch resumes.
+	// Mapping verified again (the poller re-attaches the
+	// master first, then re-activates followers): dispatch
+	// resumes for the re-attached follower.
 	sess.setTabMapOK(true)
+	sess.broadcast(syncEvent{kind: evActivateTab, masterTarget: "m1"})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if ready, _ := w.isReady(); ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not become ready after re-activation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	sess.broadcast(syncEvent{kind: evMouseMove, x: 40, y: 40})
 	f.waitFor(t, "mouseMoved", 2)
 }
