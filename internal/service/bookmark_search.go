@@ -109,7 +109,7 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 			continue
 		}
 		unlock := chromebookmarks.LockProfile(pdir)
-		loaded, lerr := chromebookmarks.Load(pdir)
+		loaded, lerr := chromebookmarks.LoadOrEmpty(pdir)
 		if lerr != nil {
 			result.UncheckedInstances++
 			unlock()
@@ -306,7 +306,7 @@ func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkT
 	}
 	unlock := chromebookmarks.LockProfile(pdir)
 	defer unlock()
-	loaded, err := chromebookmarks.Load(pdir)
+	loaded, err := chromebookmarks.LoadOrEmpty(pdir)
 	if err != nil {
 		result.FailedInstances++
 		result.FailedNodes += len(targets)

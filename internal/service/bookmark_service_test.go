@@ -73,6 +73,40 @@ func writeProfileBookmarks(t *testing.T, dir, content string) {
 	}
 }
 
+// freshProfileDir makes an instance look like a browser that has
+// been launched (its Default profile directory and a Local State
+// naming it last used both exist) but never given a bookmark: the
+// profile holds no Bookmarks file. It returns the profile dir.
+func freshProfileDir(t *testing.T, svc *BookmarkService, inst model.Instance) string {
+	t.Helper()
+	dir := profileDirOf(t, svc, inst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	udd := filepath.Dir(dir)
+	if err := os.WriteFile(filepath.Join(udd, "Local State"), []byte(`{"profile":{"last_used":"Default"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// bookmarkFixtureTwo is a second valid document whose bookmark
+// bar holds two bookmarks (A and B), for multi-profile fixtures.
+const bookmarkFixtureTwo = `{
+  "roots": {
+    "bookmark_bar": {
+      "children": [
+        {"date_added": "13350000000000001", "date_last_used": "0", "guid": "g-5", "id": "5", "name": "A", "type": "url", "url": "https://a.example/"},
+        {"date_added": "13350000000000002", "date_last_used": "0", "guid": "g-6", "id": "6", "name": "B", "type": "url", "url": "https://b.example/"}
+      ],
+      "date_added": "13300000000000000", "date_modified": "13350000000000001", "guid": "g-1", "id": "1", "name": "Bookmarks bar", "type": "folder"
+    },
+    "other": {"children": [], "date_added": "13300000000000000", "date_modified": "13300000000000000", "guid": "g-2", "id": "2", "name": "Other bookmarks", "type": "folder"},
+    "synced": {"children": [], "date_added": "13300000000000000", "date_modified": "13300000000000000", "guid": "g-3", "id": "3", "name": "Mobile bookmarks", "type": "folder"}
+  },
+  "version": 1
+}`
+
 func readProfileBookmarks(t *testing.T, dir string) *chromebookmarks.File {
 	t.Helper()
 	file, err := chromebookmarks.Load(dir)
@@ -330,13 +364,14 @@ const nestedFolderFixture = `{
   "version": 1
 }`
 
-func TestMissingBookmarksFileIsNotOperable(t *testing.T) {
+func TestMissingProfileDirIsNotOperable(t *testing.T) {
 	bs, instSvc, _ := bookmarkTestServices(t)
-	inst := makeInstance(t, instSvc, "no-bookmarks-file")
+	inst := makeInstance(t, instSvc, "no-profile-dir")
 	dir := profileDirOf(t, bs, inst)
-	// The profile directory exists but holds no Bookmarks file:
-	// nothing about it may be treated as a confirmed Chromium
-	// profile.
+	// Neither a Local State nor any profile directory exists:
+	// there is no profile to resolve, and nothing about the
+	// instance may be treated as operable — and resolution must
+	// not create directories or files to make it so.
 	infos, err := bs.ListBookmarkInstances()
 	if err != nil {
 		t.Fatal(err)
@@ -350,10 +385,10 @@ func TestMissingBookmarksFileIsNotOperable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Instances[0].Status != "failed" {
-		t.Errorf("sync to file-less profile = %+v, want failed", res.Instances[0])
+		t.Errorf("sync to a profile-less instance = %+v, want failed", res.Instances[0])
 	}
-	if _, err := os.Stat(filepath.Join(dir, "Bookmarks")); !os.IsNotExist(err) {
-		t.Error("a Bookmarks file was created for an unconfirmed profile")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Error("a profile directory was created for an unresolvable instance")
 	}
 	search, err := bs.SearchInstanceBookmarks("", "x", "bookmark")
 	if err != nil {
@@ -361,6 +396,174 @@ func TestMissingBookmarksFileIsNotOperable(t *testing.T) {
 	}
 	if search.UncheckedInstances != 1 || len(search.Groups) != 0 {
 		t.Errorf("search = %+v, want the instance unchecked and no groups", search)
+	}
+}
+
+// The reported defect: a freshly launched browser whose profile
+// exists but has no Bookmarks file yet. The instance must be
+// fully operable — count 0, searchable, and a sync target that
+// gets its Bookmarks file created with the synced content.
+func TestEmptyProfileIsFullyOperable(t *testing.T) {
+	bs, instSvc, _ := bookmarkTestServices(t)
+	inst := makeInstance(t, instSvc, "fresh")
+	dir := freshProfileDir(t, bs, inst)
+
+	infos, err := bs.ListBookmarkInstances()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos[0].BookmarkCount != 0 {
+		t.Errorf("count = %d, want 0 for an empty profile (not -1/unknown)", infos[0].BookmarkCount)
+	}
+	search, err := bs.SearchInstanceBookmarks("", "x", "bookmark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if search.UncheckedInstances != 0 || len(search.Groups) != 0 {
+		t.Errorf("search = %+v, want the empty instance checked with no groups", search)
+	}
+
+	bm, _ := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example/"})
+	res, err := bs.SyncBookmarks("", []string{bm.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := res.Instances[0]
+	if one.Status != "success" || one.Added != 1 {
+		t.Fatalf("sync to empty profile = %+v, want success with 1 added", one)
+	}
+	file := readProfileBookmarks(t, dir)
+	if file.CountBookmarks() != 1 || !chromebookmarks.ChildHasURL(file.Root("bookmark_bar"), "https://x.example/") {
+		t.Fatal("the created Bookmarks file does not hold the synced bookmark")
+	}
+	// And the now-existing file dedups like any other.
+	res, err = bs.SyncBookmarks("", []string{bm.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Instances[0].Added != 0 || res.Instances[0].Skipped != 1 {
+		t.Errorf("resync = %+v, want 0 added / 1 skipped", res.Instances[0])
+	}
+}
+
+// Sync only ever merges into a target: a target that already has
+// bookmarks keeps every one of them.
+func TestSyncPreservesExistingTargetBookmarks(t *testing.T) {
+	bs, instSvc, _ := bookmarkTestServices(t)
+	inst := makeInstance(t, instSvc, "has-bookmarks")
+	dir := profileDirOf(t, bs, inst)
+	writeProfileBookmarks(t, dir, bookmarkFixtureTwo)
+
+	bm, _ := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example/"})
+	res, err := bs.SyncBookmarks("", []string{bm.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Instances[0].Status != "success" || res.Instances[0].Added != 1 {
+		t.Fatalf("sync = %+v, want success with 1 added", res.Instances[0])
+	}
+	file := readProfileBookmarks(t, dir)
+	bar := file.Root("bookmark_bar")
+	if file.CountBookmarks() != 3 ||
+		!chromebookmarks.ChildHasURL(bar, "https://a.example/") ||
+		!chromebookmarks.ChildHasURL(bar, "https://b.example/") ||
+		!chromebookmarks.ChildHasURL(bar, "https://x.example/") {
+		t.Fatal("existing target bookmarks were not all preserved alongside the synced one")
+	}
+}
+
+// A corrupt Bookmarks file is a different thing from a missing
+// one: every entry point fails explicitly and the file is left
+// byte-for-byte untouched.
+func TestCorruptBookmarksStillFailsEverywhere(t *testing.T) {
+	bs, instSvc, _ := bookmarkTestServices(t)
+	inst := makeInstance(t, instSvc, "corrupt")
+	dir := profileDirOf(t, bs, inst)
+	const corrupt = "{not a bookmarks document"
+	writeProfileBookmarks(t, dir, corrupt)
+
+	infos, err := bs.ListBookmarkInstances()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos[0].BookmarkCount != -1 {
+		t.Errorf("count = %d, want -1 (unknown) for a corrupt file", infos[0].BookmarkCount)
+	}
+	bm, _ := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example/"})
+	res, err := bs.SyncBookmarks("", []string{bm.ID}, []string{inst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Instances[0].Status != "failed" {
+		t.Errorf("sync to corrupt profile = %+v, want failed", res.Instances[0])
+	}
+	search, err := bs.SearchInstanceBookmarks("", "x", "bookmark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if search.UncheckedInstances != 1 {
+		t.Errorf("search unchecked = %d, want 1 for the corrupt instance", search.UncheckedInstances)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "Bookmarks"))
+	if err != nil || string(raw) != corrupt {
+		t.Error("the corrupt file was modified")
+	}
+}
+
+// Each instance reads and writes its OWN resolved profile: an
+// instance whose Local State names "Profile 1" uses that profile
+// (not its Default, which also exists), and a sync to several
+// instances lands in each one's own profile only.
+func TestInstancesUseTheirOwnProfiles(t *testing.T) {
+	bs, instSvc, _ := bookmarkTestServices(t)
+	one := makeInstance(t, instSvc, "one")
+	two := makeInstance(t, instSvc, "two")
+
+	// Instance one: last_used = Profile 1 (1 bookmark); its
+	// Default holds a different document (2 bookmarks) that must
+	// never be read or written for this instance.
+	uddOne := filepath.Dir(profileDirOf(t, bs, one))
+	if err := os.WriteFile(filepath.Join(uddOne, "Local State"), []byte(`{"profile":{"last_used":"Profile 1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profileOne := filepath.Join(uddOne, "Profile 1")
+	writeProfileBookmarks(t, profileOne, bookmarkFixture)
+	writeProfileBookmarks(t, filepath.Join(uddOne, "Default"), bookmarkFixtureTwo)
+	// Instance two: plain Default fallback (1 bookmark).
+	dirTwo := profileDirOf(t, bs, two)
+	writeProfileBookmarks(t, dirTwo, bookmarkFixture)
+
+	infos, err := bs.ListBookmarkInstances()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, info := range infos {
+		counts[info.ID] = info.BookmarkCount
+	}
+	if counts[one.ID] != 1 || counts[two.ID] != 1 {
+		t.Fatalf("counts = %v, want each instance counted in its own profile (1 and 1)", counts)
+	}
+
+	bm, _ := bs.CreateLibraryNode("", CreateLibraryNodeInput{Kind: "bookmark", Name: "X", URL: "https://x.example/"})
+	res, err := bs.SyncBookmarks("", []string{bm.ID}, []string{one.ID, two.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.Instances {
+		if r.Status != "success" || r.Added != 1 {
+			t.Fatalf("sync result = %+v, want success with 1 added for both", r)
+		}
+	}
+	if got := readProfileBookmarks(t, profileOne).CountBookmarks(); got != 2 {
+		t.Errorf("instance one's Profile 1 holds %d bookmarks, want 2", got)
+	}
+	def := readProfileBookmarks(t, filepath.Join(uddOne, "Default"))
+	if def.CountBookmarks() != 2 || chromebookmarks.ChildHasURL(def.Root("bookmark_bar"), "https://x.example/") {
+		t.Error("instance one's Default profile was read or written by mistake")
+	}
+	if got := readProfileBookmarks(t, dirTwo).CountBookmarks(); got != 2 {
+		t.Errorf("instance two's Default holds %d bookmarks, want 2", got)
 	}
 }
 

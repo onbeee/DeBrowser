@@ -123,18 +123,64 @@ func TestResolveLastUsedTraversalRejected(t *testing.T) {
 	}
 }
 
-func TestResolveProfileMissingBookmarksFails(t *testing.T) {
+// A profile directory that exists but holds no Bookmarks file
+// yet — a browser that was launched but never given a bookmark —
+// is a VALID profile: the file's absence means "no bookmarks
+// yet", not "invalid profile". Resolution must succeed and must
+// still create nothing.
+func TestResolveProfileWithoutBookmarksSucceeds(t *testing.T) {
 	udd := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(udd, "Default"), 0o755); err != nil {
+	want := filepath.Join(udd, "Default")
+	if err := os.MkdirAll(want, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeLocalState(t, udd, `{"profile":{"last_used":"Default"}}`)
-	if _, err := ResolveProfileDir(udd); err == nil {
-		t.Fatal("a profile without a Bookmarks file must fail")
+	got, err := ResolveProfileDir(udd)
+	if err != nil || got != want {
+		t.Fatalf("resolve = %q, %v; want %q", got, err, want)
 	}
-	// And nothing may have been created for it.
 	if _, err := os.Stat(filepath.Join(udd, "Default", FileName)); !os.IsNotExist(err) {
 		t.Fatal("resolution must never create a Bookmarks file")
+	}
+}
+
+func TestResolveLastUsedProfileWithoutBookmarks(t *testing.T) {
+	udd := t.TempDir()
+	writeProfile(t, udd, "Default", profileFixture)
+	want := filepath.Join(udd, "Profile 1")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeLocalState(t, udd, `{"profile":{"last_used":"Profile 1"}}`)
+	got, err := ResolveProfileDir(udd)
+	if err != nil || got != want {
+		t.Fatalf("resolve = %q, %v; want Profile 1 dir %q (last_used wins, Bookmarks absence is fine)", got, err, want)
+	}
+}
+
+func TestResolveFallbackDefaultWithoutBookmarks(t *testing.T) {
+	udd := t.TempDir()
+	want := filepath.Join(udd, "Default")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No Local State at all: the Default directory alone is the
+	// unambiguous fallback, with or without a Bookmarks file.
+	got, err := ResolveProfileDir(udd)
+	if err != nil || got != want {
+		t.Fatalf("resolve = %q, %v; want Default fallback %q", got, err, want)
+	}
+}
+
+func TestResolveFallbackMissingDefaultFails(t *testing.T) {
+	udd := t.TempDir()
+	// Another profile exists — even WITH a Bookmarks file — but
+	// there is no last_used record and no Default directory:
+	// resolution must fail rather than scan and pick it.
+	writeProfile(t, udd, "Profile 1", profileFixture)
+	writeLocalState(t, udd, `{"browser":{"window_placement":{}}}`)
+	if _, err := ResolveProfileDir(udd); err == nil {
+		t.Fatal("missing Default with no last_used record must fail (no scanning)")
 	}
 }
 

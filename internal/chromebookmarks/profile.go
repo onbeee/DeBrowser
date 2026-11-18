@@ -33,20 +33,24 @@ const defaultProfileName = "Default"
 //
 //   - Local State present and valid, with a non-empty
 //     profile.last_used: that name must be a single safe relative
-//     directory name, the directory must exist, and its Bookmarks
-//     file must exist and be readable. Any failure is an error —
-//     there is NO fallback and NO scanning of other profiles,
-//     because Chromium has told us exactly which profile is in
-//     use and anything else would be a guess.
+//     directory name and the directory must exist. Any failure is
+//     an error — there is NO fallback and NO scanning of other
+//     profiles, because Chromium has told us exactly which profile
+//     is in use and anything else would be a guess.
 //   - Local State missing, or present without a usable last_used
-//     record: fall back to "Default", and only when
-//     Default/Bookmarks exists and is readable. No other profile
-//     directory is ever considered, so the fallback is
-//     unambiguous.
+//     record: fall back to "Default", and only when the Default
+//     directory exists. No other profile directory is ever
+//     considered, so the fallback is unambiguous.
 //   - Local State present but not valid JSON: an error. A corrupt
 //     state file is never silently second-guessed.
 //
-// ResolveProfileDir never creates directories or files.
+// Whether the profile already holds a Bookmarks file is NOT part
+// of validity: Chromium creates that file only once the user has
+// bookmarks, so a freshly used profile legitimately has none. A
+// missing Bookmarks file inside a resolved profile means "no
+// bookmarks yet" and is handled by LoadOrEmpty/Save; an existing
+// but corrupt file still fails there. ResolveProfileDir never
+// creates directories or files.
 func ResolveProfileDir(userDataDir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(userDataDir, LocalStateName))
 	switch {
@@ -95,8 +99,9 @@ func parseLastUsed(data []byte) (string, error) {
 // checkedProfileDir validates one candidate profile directory
 // name under userDataDir and returns its path. The name must be a
 // single relative path element (no separators, no "." or "..",
-// never absolute), the directory must exist, and its Bookmarks
-// file must exist as a readable regular file.
+// never absolute) and the directory must exist. The Bookmarks
+// file inside it is deliberately NOT checked: its absence is a
+// legitimate empty-bookmarks state, not an invalid profile.
 func checkedProfileDir(userDataDir, name string) (string, error) {
 	if name == "" || name == "." || name == ".." ||
 		filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) ||
@@ -116,18 +121,5 @@ func checkedProfileDir(userDataDir, name string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("chromebookmarks: profile directory %q is not a directory", name)
 	}
-	bookmarks := filepath.Join(dir, FileName)
-	binfo, err := os.Stat(bookmarks)
-	if err != nil {
-		return "", fmt.Errorf("%w: profile %q has no readable %s file", ErrNotChromium, name, FileName)
-	}
-	if !binfo.Mode().IsRegular() {
-		return "", fmt.Errorf("%w: profile %q %s is not a regular file", ErrNotChromium, name, FileName)
-	}
-	f, err := os.Open(bookmarks)
-	if err != nil {
-		return "", fmt.Errorf("%w: profile %q %s cannot be opened: %v", ErrNotChromium, name, FileName, err)
-	}
-	_ = f.Close()
 	return dir, nil
 }

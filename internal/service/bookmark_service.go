@@ -356,7 +356,7 @@ func (s *BookmarkService) ListBookmarkInstances() ([]BookmarkInstanceInfo, error
 		if gerr == nil && gate == BookmarkGateStopped {
 			if pdir, rerr := bookmarkProfileDir(dir); rerr == nil {
 				unlock := chromebookmarks.LockProfile(pdir)
-				if file, lerr := chromebookmarks.Load(pdir); lerr == nil {
+				if file, lerr := chromebookmarks.LoadOrEmpty(pdir); lerr == nil {
 					info.BookmarkCount = file.CountBookmarks()
 				}
 				unlock()
@@ -490,15 +490,15 @@ func (s *BookmarkService) syncToInstance(instanceID string, tops []model.Bookmar
 	pdir, rerr := bookmarkProfileDir(dir)
 	if rerr != nil {
 		res.Status = "failed"
-		res.Reason = "无法确定该实例实际的书签目录（浏览器配置无效或缺少书签文件）"
+		res.Reason = "无法确定该实例实际的书签目录（浏览器配置无效）"
 		return res
 	}
 	unlock := chromebookmarks.LockProfile(pdir)
 	defer unlock()
-	loaded, err := chromebookmarks.Load(pdir)
+	loaded, err := chromebookmarks.LoadOrEmpty(pdir)
 	if err != nil {
 		res.Status = "failed"
-		res.Reason = "无法确认该实例的书签格式或书签文件不可读（文件不存在、格式不支持或已损坏）"
+		res.Reason = "无法确认该实例的书签格式或书签文件不可读（格式不支持或已损坏）"
 		return res
 	}
 	initialCount := loaded.CountBookmarks()
