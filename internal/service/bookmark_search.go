@@ -103,8 +103,13 @@ func (s *BookmarkService) searchInstanceBookmarks(query string, kind string) (Bo
 			result.UncheckedInstances++
 			continue
 		}
-		unlock := chromebookmarks.LockProfile(dir)
-		loaded, lerr := chromebookmarks.Load(dir)
+		pdir, rerr := bookmarkProfileDir(dir)
+		if rerr != nil {
+			result.UncheckedInstances++
+			continue
+		}
+		unlock := chromebookmarks.LockProfile(pdir)
+		loaded, lerr := chromebookmarks.Load(pdir)
 		if lerr != nil {
 			result.UncheckedInstances++
 			unlock()
@@ -293,9 +298,15 @@ func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkT
 		result.SkippedInstances++
 		return
 	}
-	unlock := chromebookmarks.LockProfile(dir)
+	pdir, rerr := bookmarkProfileDir(dir)
+	if rerr != nil {
+		result.FailedInstances++
+		result.FailedNodes += len(targets)
+		return
+	}
+	unlock := chromebookmarks.LockProfile(pdir)
 	defer unlock()
-	loaded, err := chromebookmarks.Load(dir)
+	loaded, err := chromebookmarks.Load(pdir)
 	if err != nil {
 		result.FailedInstances++
 		result.FailedNodes += len(targets)
@@ -366,7 +377,7 @@ func (s *BookmarkService) applyToInstance(instanceID string, targets []bookmarkT
 		}
 		return
 	}
-	if err := chromebookmarks.Save(dir, loaded); err != nil {
+	if err := chromebookmarks.Save(pdir, loaded); err != nil {
 		// Nothing was persisted: the in-memory changes count as
 		// failed, not affected.
 		result.FailedInstances++

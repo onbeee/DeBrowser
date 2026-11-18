@@ -24,6 +24,7 @@ import {
   searchVisibleIds,
   notStoppedCount,
   selectionScope,
+  libraryCounts,
   siblingIds,
   syncEntryDecision,
   visibleRows,
@@ -201,6 +202,7 @@ export default function BookmarksPage() {
     return searchSet ? all.filter((r) => searchSet.has(r.node.id)) : all;
   }, [tree, collapsed, searchSet]);
   const scope = useMemo(() => selectionScope(nodes, selected), [nodes, selected]);
+  const counts = useMemo(() => libraryCounts(nodes), [nodes]);
   const folders = useMemo(() => folderOptions(nodes), [nodes]);
 
   const filteredInstances = useMemo(() => {
@@ -269,7 +271,7 @@ export default function BookmarksPage() {
       const count = await BookmarkService.DeleteLibraryNodes(opId, [...selected]);
       setSelected(new Set());
       await reload();
-      return "已删除 " + count + " 个节点";
+      return "已删除 " + count + " 项";
     });
   };
 
@@ -329,7 +331,7 @@ export default function BookmarksPage() {
         <section className="flex min-w-0 flex-1 flex-col rounded-lg border border-(--border) bg-(--panel-bg)">
           <header className="flex items-center gap-2 border-b border-(--border) px-3 py-2">
             <h3 className="text-sm font-semibold">书签列表</h3>
-            <span className="text-xs text-(--text-faint)">共 {nodes.length} 个节点</span>
+            <span className="text-xs text-(--text-faint)">书签 {counts.bookmarks} 个 · 文件夹 {counts.folders} 个</span>
             <label className="ml-auto flex items-center gap-1 rounded-md bg-(--hover-bg) px-2 py-1">
               <Search size={13} className="text-(--text-faint)" />
               <input
@@ -474,10 +476,8 @@ export default function BookmarksPage() {
           <div className="w-full max-w-md rounded-lg bg-(--panel-bg) p-4 shadow-xl">
             <h3 className="text-base font-semibold">确认删除</h3>
             <p className="mt-2 text-sm text-(--text-dim)">
-              将删除所选 {selected.size} 个节点
-              {scope.folders > 0
-                ? "，其中包含 " + scope.folders + " 个文件夹；文件夹内的全部内容（共 " + scope.total + " 个节点）将一并删除"
-                : "（共 " + scope.total + " 个节点）"}
+              将删除所选 {scope.total} 项（书签 {scope.bookmarks} 个、文件夹 {scope.folders} 个）
+              {scope.folders > 0 ? "。所选文件夹中的书签和子文件夹也会一并删除" : ""}
               。此操作只删除资源库内容，不会删除任何实例中的书签，且无法撤销。
             </p>
             <div className="mt-4 flex justify-end gap-2">

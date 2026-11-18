@@ -46,6 +46,11 @@ func makeInstance(t *testing.T, svc *InstanceService, name string) model.Instanc
 	return inst
 }
 
+// profileDirOf returns the instance's actual Chromium profile
+// directory for fixture purposes: the Default profile inside its
+// user data directory. Fixtures carry no Local State, so service
+// reads exercise the unambiguous Default fallback of
+// chromebookmarks.ResolveProfileDir.
 func profileDirOf(t *testing.T, svc *BookmarkService, inst model.Instance) string {
 	t.Helper()
 	_, dir, gate, err := svc.instances.InstanceBookmarkAccess(inst.ID)
@@ -55,7 +60,7 @@ func profileDirOf(t *testing.T, svc *BookmarkService, inst model.Instance) strin
 	if gate != BookmarkGateStopped {
 		t.Fatalf("gate = %q, want stopped", gate)
 	}
-	return dir
+	return filepath.Join(dir, "Default")
 }
 
 func writeProfileBookmarks(t *testing.T, dir, content string) {

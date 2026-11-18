@@ -102,6 +102,19 @@ export interface SelectionScope {
  * covers: the union of their subtrees, each node counted once even
  * when a folder and its child are both selected.
  */
+// libraryCounts tallies the resource library by kind, for the
+// header summary: bookmarks and folders are reported separately,
+// never lumped into one "nodes" number.
+export function libraryCounts(nodes: LibraryNodeLike[]): { bookmarks: number; folders: number } {
+  let bookmarks = 0;
+  let folders = 0;
+  for (const n of nodes) {
+    if (n.kind === "folder") folders++;
+    else bookmarks++;
+  }
+  return { bookmarks, folders };
+}
+
 export function selectionScope(nodes: LibraryNodeLike[], selected: ReadonlySet<string>): SelectionScope {
   const covered = new Set<string>();
   for (const id of selected) {

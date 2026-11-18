@@ -162,7 +162,7 @@ func (s *BookmarkService) createLibraryNode(input CreateLibraryNodeInput) (model
 		return model.BookmarkNode{}, fmt.Errorf("名称不能为空")
 	}
 	if input.Kind != model.BookmarkKindBookmark && input.Kind != model.BookmarkKindFolder {
-		return model.BookmarkNode{}, fmt.Errorf("节点类型无效")
+		return model.BookmarkNode{}, fmt.Errorf("书签类型无效")
 	}
 	nodeURL := ""
 	if input.Kind == model.BookmarkKindBookmark {
@@ -212,7 +212,7 @@ func (s *BookmarkService) updateLibraryNode(input UpdateLibraryNodeInput) (model
 	byID, _ := libraryIndex(nodes)
 	node, ok := byID[input.ID]
 	if !ok {
-		return model.BookmarkNode{}, fmt.Errorf("书签节点不存在")
+		return model.BookmarkNode{}, fmt.Errorf("书签或文件夹不存在")
 	}
 	if err := checkParent(byID, input.ParentID, input.ID); err != nil {
 		return model.BookmarkNode{}, err
@@ -246,7 +246,7 @@ func (s *BookmarkService) DeleteLibraryNodes(operationID string, ids []string) (
 
 func (s *BookmarkService) deleteLibraryNodes(ids []string) (int, error) {
 	if len(ids) == 0 {
-		return 0, fmt.Errorf("没有选择要删除的节点")
+		return 0, fmt.Errorf("没有选择要删除的书签或文件夹")
 	}
 	c, cancel := ctx()
 	defer cancel()
@@ -266,7 +266,7 @@ func (s *BookmarkService) deleteLibraryNodes(ids []string) (int, error) {
 		}
 		node, ok := byID[id]
 		if !ok {
-			return fmt.Errorf("书签节点不存在")
+			return fmt.Errorf("书签或文件夹不存在")
 		}
 		seen[id] = true
 		for _, child := range children[node.ID] {
@@ -317,10 +317,10 @@ func (s *BookmarkService) reorderLibrary(parentID *string, orderedIDs []string) 
 		for i, id := range orderedIDs {
 			node, ok := byID[id]
 			if !ok {
-				return fmt.Errorf("书签节点不存在")
+				return fmt.Errorf("书签或文件夹不存在")
 			}
 			if parentKey(node.ParentID) != parentKey(parentID) {
-				return fmt.Errorf("排序节点不属于同一层级")
+				return fmt.Errorf("排序的书签或文件夹不属于同一层级")
 			}
 			node.SortOrder = i
 			if _, err := tx.UpdateBookmarkNode(c, node); err != nil {
@@ -354,11 +354,13 @@ func (s *BookmarkService) ListBookmarkInstances() ([]BookmarkInstanceInfo, error
 		info := BookmarkInstanceInfo{ID: inst.ID, Name: inst.Name, BookmarkCount: -1}
 		_, dir, gate, gerr := s.instances.InstanceBookmarkAccess(inst.ID)
 		if gerr == nil && gate == BookmarkGateStopped {
-			unlock := chromebookmarks.LockProfile(dir)
-			if file, lerr := chromebookmarks.Load(dir); lerr == nil {
-				info.BookmarkCount = file.CountBookmarks()
+			if pdir, rerr := bookmarkProfileDir(dir); rerr == nil {
+				unlock := chromebookmarks.LockProfile(pdir)
+				if file, lerr := chromebookmarks.Load(pdir); lerr == nil {
+					info.BookmarkCount = file.CountBookmarks()
+				}
+				unlock()
 			}
-			unlock()
 		}
 		out = append(out, info)
 	}
@@ -418,7 +420,7 @@ func (s *BookmarkService) syncBookmarks(nodeIDs []string, instanceIDs []string) 
 	selected := make(map[string]bool, len(nodeIDs))
 	for _, id := range nodeIDs {
 		if _, ok := byID[id]; !ok {
-			return result, fmt.Errorf("书签节点不存在")
+			return result, fmt.Errorf("书签或文件夹不存在")
 		}
 		selected[id] = true
 	}
@@ -485,9 +487,15 @@ func (s *BookmarkService) syncToInstance(instanceID string, tops []model.Bookmar
 		res.Reason = "实例运行状态无法确认，已跳过以保护书签数据"
 		return res
 	}
-	unlock := chromebookmarks.LockProfile(dir)
+	pdir, rerr := bookmarkProfileDir(dir)
+	if rerr != nil {
+		res.Status = "failed"
+		res.Reason = "无法确定该实例实际的书签目录（浏览器配置无效或缺少书签文件）"
+		return res
+	}
+	unlock := chromebookmarks.LockProfile(pdir)
 	defer unlock()
-	loaded, err := chromebookmarks.Load(dir)
+	loaded, err := chromebookmarks.Load(pdir)
 	if err != nil {
 		res.Status = "failed"
 		res.Reason = "无法确认该实例的书签格式或书签文件不可读（文件不存在、格式不支持或已损坏）"
@@ -498,13 +506,13 @@ func (s *BookmarkService) syncToInstance(instanceID string, tops []model.Bookmar
 	for _, top := range tops {
 		s.addLibraryNode(loaded, bar, top, children, &res)
 	}
-	if err := chromebookmarks.Save(dir, loaded); err != nil {
+	if err := chromebookmarks.Save(pdir, loaded); err != nil {
 		res.Status = "failed"
 		res.Reason = "写入书签文件失败：" + err.Error()
 		return res
 	}
 	// Re-read and verify the additions actually landed.
-	verify, err := chromebookmarks.Load(dir)
+	verify, err := chromebookmarks.Load(pdir)
 	if err != nil || verify.CountBookmarks() != initialCount+res.Added {
 		res.Status = "failed"
 		res.Reason = "写入后验证失败，书签可能未完整保存"

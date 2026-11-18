@@ -112,7 +112,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 书签机制
 
-书签有两套完全独立的数据：DeBrowser 资源库（SQLite `bookmark_nodes` 树，见 [DATABASE.md](DATABASE.md)）与各实例 Profile 根目录下的 Chromium 原生 `Bookmarks` 文件。资源库的编辑、删除不自动影响任何实例；实例书签的修改不回写资源库。
+书签有两套完全独立的数据：DeBrowser 资源库（SQLite `bookmark_nodes` 树，见 [DATABASE.md](DATABASE.md)）与各实例实际 Profile 目录下的 Chromium 原生 `Bookmarks` 文件。实际 Profile 目录是用户数据目录（实例启动的 `--user-data-dir`）下的一个子目录（如 `Default`、`Profile 1`），不是用户数据目录本身；统一由 `chromebookmarks.ResolveProfileDir` 解析：优先读取用户数据目录下 `Local State` 的 `profile.last_used`（必须是安全的单一相对目录名，目标目录与其中 `Bookmarks` 文件必须存在且可读，否则明确失败，不回退、不扫描其他 Profile）；`Local State` 不存在或没有有效的最近使用记录时，仅在 `Default/Bookmarks` 存在且可读时回退到 `Default`；`Local State` 已损坏则明确失败。所有书签入口（数量统计、同步、搜索、编辑、删除）共用同一解析结果，文件锁、临时文件与恢复副本都位于实际 `Bookmarks` 文件所在目录。资源库的编辑、删除不自动影响任何实例；实例书签的修改不回写资源库。
 
 - **文件读写**：`internal/chromebookmarks` 把 `Bookmarks` 文档作为解码后的 JSON 结构整体处理，完整保留根节点、节点 ID/GUID、时间字段与未知字段；数字以原始文本精度保留。书签文件不存在、格式无法确认、无法解析或结构不符合 Chromium 书签格式时明确报错：文件不存在不视为「书签为 0」，也不为无法确认的 Profile 创建书签文件；绝不猜测其他浏览器的数据格式（不支持 Firefox 等非 Chromium 书签存储）。不读取、不检查用户登记的浏览器 EXE，兼容性只由 Profile 内书签文件本身判定。
 - **运行状态保护**：读写任何实例的书签文件之前，必须经运行时生效状态确认该实例已停止（不只看数据库落库状态）；运行中与无法确认状态一律禁止读写，批量操作逐实例独立判定、跳过并反馈原因。书签管理页面的「同步」入口会先检查全部实例：存在运行中实例时，由用户确认后调用既有正常关闭流程关闭全部实例并复查确认停止，才打开同步弹窗；后端在每次实际读写前仍独立复核目标实例状态。DeBrowser 不自动关闭或重启浏览器来迁就书签操作——关闭只发生在用户在同步入口明确确认时。
