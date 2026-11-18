@@ -368,7 +368,8 @@ func TestProcessExitIsDetected(t *testing.T) {
 }
 
 func TestStopFailureKeepsInstanceRunning(t *testing.T) {
-	defer shortenStopConfirm(t)()
+	restoreConfirm := shortenStopConfirm(t)
+	defer restoreConfirm()
 	fl := newFakeLauncher()
 	svc, _, db := testRuntimeService(t, fl)
 	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
@@ -387,7 +388,14 @@ func TestStopFailureKeepsInstanceRunning(t *testing.T) {
 	if got.Status != model.StatusRunning {
 		t.Fatalf("status after failed close = %q, want running (no false success)", got.Status)
 	}
-	// Once the browser cooperates, the close succeeds.
+	// Once the browser cooperates, the close succeeds. The
+	// shortened confirm window exists only to keep the FAILED
+	// stop fast; the success path gets the production window —
+	// demanding that the watcher's exit cleanup (a goroutine
+	// plus database writes) land inside 100 ms is a scheduling
+	// assumption no loaded CI runner can guarantee, and it is
+	// not part of the behavior under test.
+	restoreConfirm()
 	fl.lastProc.closeErr = nil
 	if err := svc.StopInstance("", inst.ID); err != nil {
 		t.Fatalf("second stop: %v", err)
