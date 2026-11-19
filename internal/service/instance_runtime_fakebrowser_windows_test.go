@@ -4,6 +4,7 @@ package service
 
 import (
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -30,6 +31,17 @@ func fakeBrowserBlock() {
 			time.Sleep(time.Hour)
 		}
 	}
+	// The window and its message loop MUST live on one OS
+	// thread: Win32 messages are queued to the thread that
+	// created the window, so if Go migrates this goroutine
+	// between CreateWindowExW and GetMessageW, the loop pumps
+	// another thread's (empty) queue and WM_CLOSE is never
+	// dispatched — the graceful close then times out even
+	// though the window procedure is correct. Lock the thread
+	// for the whole window lifetime; the unlock runs only
+	// after the message loop has exited.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	createWindowEx := user32.NewProc("CreateWindowExW")
 	setWindowLongPtr := user32.NewProc("SetWindowLongPtrW")
@@ -68,11 +80,20 @@ func fakeBrowserBlock() {
 		0, uintptr(unsafe.Pointer(className)), 0, 0,
 		0, 0, 100, 100, 0, 0, 0, 0)
 	if hwnd == 0 {
-		for {
-			time.Sleep(time.Hour)
-		}
+		// Window creation failed: exit loudly instead of
+		// sleeping forever, which would masquerade as a browser
+		// that "does not react" and only surface as a graceful
+		// close timeout in the parent test.
+		os.Exit(3)
 	}
-	prev, _, _ := setWindowLongPtr.Call(hwnd, gwlpWndProc, proc)
+	prev, _, callErr := setWindowLongPtr.Call(hwnd, gwlpWndProc, proc)
+	if prev == 0 && callErr != syscall.Errno(0) {
+		// Subclassing failed: without the replacement window
+		// procedure nothing would destroy the window on
+		// WM_CLOSE. Fail loudly rather than hang.
+		_, _, _ = destroyWindow.Call(hwnd)
+		os.Exit(4)
+	}
 	oldProc = prev
 
 	type msgStruct struct {

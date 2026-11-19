@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -68,8 +69,40 @@ func TestRealBrowserLaunchGracefulCloseAndExternalKill(t *testing.T) {
 	}
 	// Never leak the child on a failure path: a leftover fake
 	// browser keeps the test binary file locked on Windows and
-	// poisons the rest of the run.
-	defer func() { _ = svc.StopInstance("", inst.ID) }()
+	// poisons the rest of the run (the "service.test.exe:
+	// Access is denied" unlink failure). Try the graceful stop
+	// first; if the instance is still running afterwards,
+	// force-kill ONLY the process recorded for this test's own
+	// instance — the PID the service itself identity-verified
+	// at launch, in this test's own database. This is a test
+	// cleanup backstop, not a change to production close
+	// behaviour.
+	defer func() {
+		_ = svc.StopInstance("", inst.ID)
+		got, _ := svc.GetInstance(inst.ID)
+		if got.Status != model.StatusRunning {
+			return
+		}
+		db, err := database.Open(cfg.Layout.DatabaseFile)
+		if err != nil {
+			return
+		}
+		rt, err := store.New(db).GetInstanceRuntime(context.Background(), inst.ID)
+		_ = db.Close()
+		if err != nil || rt.PID <= 0 {
+			return
+		}
+		if proc, err := os.FindProcess(rt.PID); err == nil {
+			_ = proc.Kill()
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if got, _ := svc.GetInstance(inst.ID); got.Status != model.StatusRunning {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
 	got, _ := svc.GetInstance(inst.ID)
 	if got.Status != model.StatusRunning {
 		t.Fatalf("status = %q, want running", got.Status)
