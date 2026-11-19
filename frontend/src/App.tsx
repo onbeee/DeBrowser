@@ -10,6 +10,7 @@ import KernelsPage from "./pages/KernelsPage";
 import OverviewPage from "./pages/OverviewPage";
 import PlannedPage from "./pages/PlannedPage";
 import BookmarksPage from "./pages/BookmarksPage";
+import SyncPage from "./pages/SyncPage";
 import ProxyConfigPage from "./pages/ProxyConfigPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppStore, type Theme } from "./stores/useAppStore";
@@ -85,6 +86,8 @@ export default function App() {
             <DataManagementPage />
           ) : page === "bookmarks" ? (
             <BookmarksPage />
+          ) : page === "sync" ? (
+            <SyncPage />
           ) : (
             <PlannedPage page={page} />
           )}

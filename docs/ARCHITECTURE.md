@@ -79,12 +79,13 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | 设置 | 主题（浅色/暖色/深色）、日志容量等，存 `config/settings.json` | 已交付 |
 | 书签 | 资源库（文件夹树）管理 + 向实例分发、跨实例聚合搜索/编辑/删除 | 已交付（Stage 9C 书签部分） |
 | 代理配置 | 仅占位页面，无后端功能 | 待开发（Stage 6C） |
-| CDP | 每实例 localhost CDP 端口 | 未实现（Stage 9C 后续部分） |
-| 多开同步、程序内更新、备份与恢复 | — | 未实现（Stage 10–12） |
+| CDP | 每实例独立的 localhost 调试端口（启动时分配、仅存内存）与最小 CDP 客户端 | 已交付（Stage 10） |
+| 多开同步 | 基于 CDP 页面事件的主控—被控同步（见「多开同步机制」） | 实现完成，待 Windows 11 实机验收 |
+| 程序内更新、备份与恢复 | — | 未实现（Stage 11–12） |
 
 ## 前后端通信
 
-- **Bindings**：五个 Go 服务的导出方法经静态生成的 TypeScript bindings 暴露给前端（`wails3 generate bindings` 重新生成；CI 校验已提交的 bindings 与生成结果一致）。当前共 5 个服务、36 个方法。前端只能调用明确注册的服务方法，不能执行任意命令。
+- **Bindings**：六个 Go 服务的导出方法经静态生成的 TypeScript bindings 暴露给前端（`wails3 generate bindings` 重新生成；CI 校验已提交的 bindings 与生成结果一致）。当前共 6 个服务、44 个方法。前端只能调用明确注册的服务方法，不能执行任意命令。
 - **事件**：目前只有一个类型化事件 `app:status`（应用状态，每 10 秒发出，也可经 `AppService.GetStatus()` 按需获取）。
 - **前端状态**：单个 Zustand store 保存当前页面、后端状态与主题；页面级状态留在各页面内。每次用户操作由前端生成唯一的 `operation_id` 并作为绑定的第一个参数传入，贯穿该操作的全部日志记录（见「日志」）。
 
@@ -120,6 +121,18 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 - **分发规则**：同步把资源库所选节点（文件夹含全部子树、保留层级）写入目标实例的书签栏；同一目标文件夹内 URL 相同视为已存在并跳过，同名文件夹复用不重建。
 - **聚合搜索**：同步弹窗的编辑/删除先跨实例聚合搜索（只查已确认停止且可读的实例），结果只呈现名称、网址与不同实例数量，不暴露实例名称或明细；精确目标（实例、根节点、节点 ID、父级路径与内容快照）只保存在后端短期会话中，执行时重新核对实例状态、重新读取文件并按节点 ID 与路径复核后才修改。
 
+## 多开同步机制
+
+多开同步（Stage 10）采用基于 CDP 的主控—被控方案，核心组件为 `internal/cdp`（最小 CDP 客户端）、`internal/service` 的 SyncService 与 `internal/winmgr`（窗口几何）。第一版按每个实例一个主要浏览器窗口设计。
+
+- **连接**：每个实例启动时由应用分配一个仅监听 `127.0.0.1` 的调试端口并以 `--remote-debugging-address=127.0.0.1 --remote-debugging-port=<端口>` 启动浏览器；端口只保存在运行时内存中，不落库。应用重启后接管的进程没有端口，不能参加同步，须重启该实例。CDP 的 HTTP 发现与 WebSocket 地址在连接前强制校验为回环地址且端口一致，禁止重定向，调试端口不暴露到网络。
+- **页面事件捕获**：主实例的每个 page Target 经扁平会话接入，启用 Runtime 与 Page；观察脚本（Go embed 的单独文件）通过 `Page.addScriptToEvaluateOnNewDocument` 安装到未来文档、通过 `Page.createIsolatedWorld` + `Runtime.evaluate` 安装到当前文档，始终运行在名为 `debrowser-sync` 的隔离执行环境中；事件回传的 Runtime Binding 只绑定到该隔离环境的执行上下文，普通网页脚本不可见。脚本只观察并上报 `pointerdown/up/move`、`wheel`、`keydown/keyup`、`input`、`compositionend` 与 `visibilitychange`，不阻止网页默认行为。坐标为网页视口 CSS 像素（clientX/clientY），不做桌面坐标换算；跟随视口不同时按主/跟随视口比例换算（尺寸经 `Page.getLayoutMetrics` 获取）。
+- **文本与隐私**：普通字符的 keydown 不作为按键事件转发，文本只取 `input` 事件的本次增量经 `Input.insertText` 同步，删除、方向键与快捷键走 `Input.dispatchKeyEvent`，因此不会重复字符；中文输入法只同步 `compositionend` 的最终提交文本，不同步候选框与组合过程。不读取输入框完整值、网页正文、DOM、Cookie、Local Storage 与历史；输入文本只在会话内存中短暂传递，不写日志、数据库或文件。同步的开始、暂停、恢复、停止、主实例断开与跟随失败经统一记录系统记录，不新增第二套日志。
+- **活动 Target 与映射**：每个页面在初始化与 `visibilitychange` 时上报自身可见性；每个实例独立以「唯一报告 visible 的 page Target」为活动标签，零个或多个可见顶层页面时视为无法确认、绝不猜测。会话启动时把主实例活动 Target 与每个跟随实例的活动 Target 建立显式映射。主实例新建标签时，跟随实例经 `Target.createTarget`（后台创建，不带到 Windows 前台）新建页面并以实际返回的 Target ID 建立映射；主实例关闭标签时经映射 `Target.closeTarget` 关闭对应页面；主实例切换到会话开始前已存在且未映射的标签时，不按标题或 URL 猜测对应关系，而是以该标签当前 URL 为跟随实例新建页面并建立映射（跟随实例因此可能多出一个标签，这是避免错误匹配的明确行为）。标签切换通过 `Target.activateTarget` 执行；该命令是否会把跟随窗口带到 Windows 前台取决于浏览器自身行为，未做实机验证前标签视觉切换为条件支持，DeBrowser 不以窗口激活或 SendInput 兜底。
+- **分发与隔离**：每个跟随实例拥有独立连接、独立有界队列（256）与独立分发循环，鼠标移动在队列尾部合并，按下/释放、键盘与滚轮严格保序；关键事件在队列满时不静默丢弃——该跟随实例被标记失败并释放其输入状态，其他跟随不受影响。单个跟随连接、映射或执行失败只影响该实例；主实例连接断开则整个会话结束。暂停时清空待执行输入并释放按键与鼠标状态，恢复不重放旧输入；停止时释放全部跟随（包括已失败者）的输入状态并关闭 CDP 连接，不关闭浏览器、不触碰 Profile。
+- **能力边界**：可靠支持网页鼠标、滚动、键盘快捷键、普通文本与最终提交的中文输入法文本、页面导航（主框架提交导航与刷新经 CDP 事件同步）、标签创建/关闭/切换（切换受上述前台行为约束）。地址栏只同步最终提交的导航，不捕获未提交的输入文本；浏览器菜单、右键菜单、扩展弹窗、文件选择框等浏览器原生 UI 不做通用模拟，不使用 UIA 或 SendInput 兜底。跨域 iframe 内部输入不在第一版可靠支持范围内。同一实例出现多个可见顶层窗口时该实例的活动页面无法确认。
+- **窗口管理**：`internal/winmgr` 只保留窗口几何、状态、显示器枚举、网格排列与排列前位置保存/恢复；全部位置调整使用 `SWP_NOACTIVATE`，不激活跟随窗口；排列作用于全部运行中实例（有会话时主实例排在首位），与会话相互独立。
+
 ## 数据目录
 
 便携布局由 `internal/paths` 唯一定义，全部位于可执行文件旁边：
@@ -153,4 +166,4 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 当前功能边界
 
-已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。未接入：CDP（Stage 9C 后续部分）、多开同步（Stage 10）、程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
+已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）、每实例 CDP 接入与多开同步（Stage 10，实现完成，待 Windows 11 实机验收）。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。

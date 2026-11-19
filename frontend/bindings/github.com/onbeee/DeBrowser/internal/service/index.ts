@@ -6,12 +6,14 @@ import * as BookmarkService from "./bookmarkservice.js";
 import * as BrowserService from "./browserservice.js";
 import * as DiagnosticsService from "./diagnosticsservice.js";
 import * as InstanceService from "./instanceservice.js";
+import * as SyncService from "./syncservice.js";
 export {
     AppService,
     BookmarkService,
     BrowserService,
     DiagnosticsService,
-    InstanceService
+    InstanceService,
+    SyncService
 };
 
 export type {
@@ -31,7 +33,10 @@ export type {
     LogExportInfo,
     Status,
     SyncBookmarksResult,
+    SyncFollowerState,
     SyncInstanceResult,
+    SyncMonitor,
+    SyncState,
     UpdateInstanceInput,
     UpdateLibraryNodeInput
 } from "./models.js";

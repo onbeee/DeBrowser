@@ -104,6 +104,13 @@ var watchSettleHook func(instanceID string)
 type procWatch struct {
 	proc runner.Process
 	done chan struct{}
+	// cdpPort is the loopback debugging port this launch was
+	// started with (Stage 10 synchronization), assigned before the
+	// process was created and held only in memory. Zero means the
+	// process was not launched by this run of the app (startup
+	// re-attachment) or no port could be allocated: such a process
+	// cannot join a sync session until the instance is restarted.
+	cdpPort int
 	// exited is set under rtMu by the watcher the moment it
 	// observes the exit, before any cleanup: a start operation
 	// that sees it knows the process is gone and must not
@@ -610,7 +617,18 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	}
 	s.rtMu.Unlock()
 
+	// Stage 10: every launch gets its own loopback-only CDP
+	// debugging port so the instance can join a sync session. The
+	// port lives only in memory (on the procWatch below); if no
+	// port can be allocated the launch proceeds without one and
+	// the instance simply cannot sync until it is restarted.
+	cdpPort := allocateLoopbackPort()
 	args := []string{"--user-data-dir=" + launchDir}
+	if cdpPort > 0 {
+		args = append(args,
+			"--remote-debugging-address=127.0.0.1",
+			"--remote-debugging-port="+strconv.Itoa(cdpPort))
+	}
 	if strings.TrimSpace(inst.StartURL) != "" {
 		args = append(args, strings.TrimSpace(inst.StartURL))
 	}
@@ -640,7 +658,7 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	// so an exit at any point of the remaining start sequence is
 	// observed exactly once and can never be overwritten by the
 	// start flow persisting a running state for a dead process.
-	w := &procWatch{proc: proc, done: make(chan struct{})}
+	w := &procWatch{proc: proc, done: make(chan struct{}), cdpPort: cdpPort}
 	s.rtMu.Lock()
 	s.procs[id] = w
 	s.rtMu.Unlock()

@@ -243,6 +243,21 @@ export interface SyncBookmarksResult {
     "failedBookmarks": number;
 }
 
+/**
+ * SyncFollowerState is one follower's reported state.
+ */
+export interface SyncFollowerState {
+    "instanceId": string;
+    "connected": boolean;
+    "pageReady": boolean;
+
+    /**
+     * ready | unconfirmed | failed
+     */
+    "state": string;
+    "reason": string;
+}
+
 export interface SyncInstanceResult {
     "instanceId": string;
     "instanceName": string;
@@ -255,6 +270,28 @@ export interface SyncInstanceResult {
     "skipped": number;
     "failed": number;
     "reason": string;
+}
+
+/**
+ * SyncMonitor is one display's work area for the arrange feature.
+ */
+export interface SyncMonitor {
+    "index": number;
+    "width": number;
+    "height": number;
+    "scale": number;
+    "primary": boolean;
+}
+
+/**
+ * SyncState is the sync page's view of the session.
+ */
+export interface SyncState {
+    "phase": string;
+    "masterId": string;
+    "masterConnected": boolean;
+    "masterPageReady": boolean;
+    "followers": SyncFollowerState[] | null;
 }
 
 /**
