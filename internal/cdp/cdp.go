@@ -62,6 +62,7 @@ type Client struct {
 	evClosed bool
 
 	closeOnce sync.Once
+	doneOnce  sync.Once
 }
 
 // FetchVersion queries the HTTP discovery endpoint of a Chromium
@@ -159,11 +160,11 @@ func (c *Client) failAll(err error) {
 		p.ch <- callResult{err: err}
 	}
 	c.closeEvents()
-	select {
-	case <-c.done:
-	default:
-		close(c.done)
-	}
+	// done must close exactly once even when failAll is entered
+	// concurrently (Close racing the read loop's failure path):
+	// a check-then-close select here panicked with "close of
+	// closed channel" when both sides saw the channel still open.
+	c.doneOnce.Do(func() { close(c.done) })
 }
 
 // enqueueEvent appends an event for the delivery goroutine. It

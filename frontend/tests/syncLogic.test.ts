@@ -5,8 +5,9 @@ import {
   capsSummary,
   eligibleInstances,
   followerSummary,
-  supportLevels,
+  sessionFollower,
   toggleFollower,
+  toggleMaster,
   unsupportedInstances,
 } from "../src/pages/syncLogic.ts";
 
@@ -60,12 +61,19 @@ describe("syncLogic", () => {
     );
   });
 
-  test("support levels name the unsupported IME case honestly", () => {
-    const levels = supportLevels();
-    assert.ok(levels.some((l) => l.level === "reliable"));
-    assert.ok(levels.some((l) => l.level === "conditional"));
-    const ime = levels.find((l) => l.level === "unsupported");
-    assert.ok(ime && ime.label.includes("输入法"));
+  test("toggleMaster selects, replaces and clears on re-click", () => {
+    assert.equal(toggleMaster("", "a"), "a");
+    assert.equal(toggleMaster("a", "d"), "d");
+    assert.equal(toggleMaster("a", "a"), "");
+  });
+
+  test("sessionFollower finds only participants", () => {
+    const followers = [
+      { id: "1", status: "active" },
+      { id: "2", status: "failed", reason: "x" },
+    ];
+    assert.equal(sessionFollower(followers, "2")?.status, "failed");
+    assert.equal(sessionFollower(followers, "3"), undefined);
   });
 
   test("capsSummary reflects probe results", () => {

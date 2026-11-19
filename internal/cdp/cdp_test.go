@@ -168,3 +168,32 @@ func TestFetchVersionRejectsNonCDP(t *testing.T) {
 		t.Fatal("expected an error for a non-CDP endpoint")
 	}
 }
+
+// failAll can be entered concurrently — Close() racing the read
+// loop's failure path when a connection dies during teardown.
+// The done channel must still close exactly once: the previous
+// check-then-close select panicked with "close of closed
+// channel" under that race (caught by the service race suite).
+func TestFailAllConcurrentClosesDoneOnce(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		c := &Client{
+			done:    make(chan struct{}),
+			pending: make(map[int64]*pendingCall),
+		}
+		c.evCond = sync.NewCond(&c.evMu)
+		var wg sync.WaitGroup
+		for g := 0; g < 8; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.failAll(fmt.Errorf("boom"))
+			}()
+		}
+		wg.Wait()
+		select {
+		case <-c.Done():
+		default:
+			t.Fatal("done channel not closed after failAll")
+		}
+	}
+}

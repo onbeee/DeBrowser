@@ -189,6 +189,14 @@ func runJob[T any](fn func(*automation) (T, error)) (T, error) {
 		return [2]any{v, err}
 	}, done: done}
 	res := (<-done).([2]any)
+	// res[1] holds the job's error as an `any`: when the job
+	// succeeded it is a NIL interface, and a direct .(error)
+	// assertion on it panics ("interface conversion: interface
+	// is nil, not error") — that panic fired inside StartSync on
+	// the first successful ProbeWindow. Check for nil first.
+	if res[1] == nil {
+		return res[0].(T), nil
+	}
 	return res[0].(T), res[1].(error)
 }
 
