@@ -396,9 +396,19 @@ func (w *followerWorker) dispatchInput(ctx context.Context, act syncAction) erro
 			"deltaX": ev.DeltaX, "deltaY": ev.DeltaY,
 		})
 	case "keydown", "keyup":
-		if ev.IsTextProducingKeyEvent() {
-			return nil // the character itself arrives as a text event
+		if ev.IsPasteShortcut() {
+			// Paste follows the insertFromPaste text path only;
+			// the native shortcut is never also dispatched (that
+			// would paste twice).
+			return nil
 		}
+		// Every key event is dispatched, including plain character
+		// keys that games and canvas apps listen for. The CDP
+		// parameters deliberately carry NO text/unmodifiedText
+		// field, so the key event itself inserts no character on
+		// the follower — committed text arrives separately as a
+		// text event and is inserted exactly once via
+		// Input.insertText.
 		w.mu.Lock()
 		if ev.Kind == "keydown" {
 			w.pressedKeys[ev.Code] = ev

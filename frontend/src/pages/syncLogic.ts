@@ -30,6 +30,27 @@ export function pruneSelection(
   return { masterId: master, followerIds: followers };
 }
 
+/**
+ * One polling refresh applied to the current selection: prune
+ * only IDs that no longer exist, keep every still-valid choice,
+ * and — while a session is live — follow the session's master.
+ * Pure and side-effect free, so repeated polls are idempotent:
+ * applying it any number of times never erodes the selection.
+ */
+export function refreshSelection(
+  masterId: string,
+  followerIds: readonly string[],
+  existingIds: ReadonlySet<string>,
+  sessionMasterId: string,
+): { masterId: string; followerIds: string[] } {
+  const pruned = pruneSelection(masterId, followerIds, existingIds);
+  const master = sessionMasterId || pruned.masterId;
+  return {
+    masterId: master,
+    followerIds: pruned.followerIds.filter((id) => id !== master),
+  };
+}
+
 /** A start is possible only with a master and at least one follower, and no live session. */
 export function canStart(phase: string, masterId: string, followerCount: number): boolean {
   return phase === "idle" && masterId !== "" && followerCount > 0;

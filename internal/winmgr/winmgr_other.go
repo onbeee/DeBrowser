@@ -12,8 +12,12 @@ func Monitors() ([]Monitor, error) { return nil, ErrUnsupported }
 // WindowForPID finds the top-level window owned by a process.
 func WindowForPID(pid int) (uintptr, error) { return 0, ErrUnsupported }
 
-// GetPlacement reads a window's current placement.
+// ForegroundWindow returns the current foreground window.
+func ForegroundWindow() uintptr { return 0 }
+
+// GetPlacement reads a window's full placement.
 func GetPlacement(hwnd uintptr) (Placement, error) { return Placement{}, ErrUnsupported }
 
-// SetPlacement applies a placement without activating the window.
+// SetPlacement applies a full placement without activating the
+// window.
 func SetPlacement(hwnd uintptr, p Placement) error { return ErrUnsupported }

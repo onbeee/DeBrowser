@@ -7,6 +7,7 @@ import {
   canStart,
   followerStateText,
   pruneSelection,
+  refreshSelection,
   sessionSummary,
   toggleFollower,
   toggleMaster,
@@ -34,6 +35,46 @@ test("pruneSelection drops vanished instances and master clashes", () => {
   assert.deepEqual(pruneSelection("a", ["a", "b"], ids), {
     masterId: "a",
     followerIds: ["b"],
+  });
+});
+
+test("repeated polling refreshes never erode a still-valid selection", () => {
+  // Regression test for the stale-closure bug: the 2s poll once
+  // rebuilt the selection from the initial (empty) follower list
+  // captured by the first refresh closure, wiping the user's
+  // choices. Applying a refresh must be idempotent for any
+  // number of polls while the instances still exist.
+  const ids = new Set(["m", "f1", "f2", "other"]);
+  let sel = { masterId: "m", followerIds: ["f1", "f2"] };
+  for (let poll = 0; poll < 10; poll++) {
+    sel = refreshSelection(sel.masterId, sel.followerIds, ids, "");
+    assert.deepEqual(sel, { masterId: "m", followerIds: ["f1", "f2"] });
+  }
+  // Only genuinely vanished instances are pruned.
+  const shrunk = new Set(["m", "f2"]);
+  assert.deepEqual(refreshSelection("m", ["f1", "f2"], shrunk, ""), {
+    masterId: "m",
+    followerIds: ["f2"],
+  });
+  assert.deepEqual(refreshSelection("m", ["f2"], shrunk, ""), {
+    masterId: "m",
+    followerIds: ["f2"],
+  });
+  // A vanished master clears, and the master is never its own
+  // follower after a refresh.
+  assert.deepEqual(refreshSelection("gone", ["m", "f2"], shrunk, ""), {
+    masterId: "",
+    followerIds: ["m", "f2"],
+  });
+  assert.deepEqual(refreshSelection("m", ["m", "f2"], ids, ""), {
+    masterId: "m",
+    followerIds: ["f2"],
+  });
+  // While a session is live the refresh follows the session's
+  // master without resurrecting stale followers.
+  assert.deepEqual(refreshSelection("stale", ["f1"], ids, "m"), {
+    masterId: "m",
+    followerIds: ["f1"],
   });
 });
 

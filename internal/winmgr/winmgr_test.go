@@ -39,3 +39,64 @@ func TestGridRectsEmpty(t *testing.T) {
 		t.Fatalf("zero windows = %v, want nil", got)
 	}
 }
+
+func TestPlacementsEqualComparesShowCmdAndNormalRect(t *testing.T) {
+	base := Placement{
+		NormalRect:  Rect{X: -1600, Y: 10, Width: 800, Height: 600}, // negative-coordinate monitor
+		MinPosition: Point{X: -1600, Y: 0},
+		MaxPosition: Point{X: 0, Y: 0},
+		ShowCmd:     ShowNormal,
+	}
+	if !PlacementsEqual(base, base) {
+		t.Fatal("identical placements must compare equal")
+	}
+	moved := base
+	moved.NormalRect.X += 10
+	if PlacementsEqual(base, moved) {
+		t.Fatal("a moved normal rectangle must compare unequal")
+	}
+	maxed := base
+	maxed.ShowCmd = ShowMaximized
+	if PlacementsEqual(base, maxed) {
+		t.Fatal("a different show command must compare unequal")
+	}
+	// Min/max positions alone do not constitute a visible change.
+	shifted := base
+	shifted.MinPosition = Point{X: 5, Y: 5}
+	if !PlacementsEqual(base, shifted) {
+		t.Fatal("min position alone should not trigger mirroring")
+	}
+}
+
+func TestMirrorPlacementNeverMinimizesAFollower(t *testing.T) {
+	// The minimize boundary short-circuits before any platform
+	// call, so this holds on every platform: mirroring a
+	// minimized master must not hide a follower window.
+	applied, err := MirrorPlacement(0, Placement{ShowCmd: ShowMinimized})
+	if err != nil {
+		t.Fatalf("minimize mirror returned error: %v", err)
+	}
+	if applied {
+		t.Fatal("minimize must never be mirrored")
+	}
+}
+
+func TestPlacementCarriesFullWindowState(t *testing.T) {
+	// A placement is the full WINDOWPLACEMENT state — normal
+	// rect, min/max positions and show command — not a rect plus
+	// two booleans. This guards the struct contract the Windows
+	// implementation round-trips.
+	p := Placement{
+		NormalRect:  Rect{X: 100, Y: 50, Width: 1024, Height: 768},
+		MinPosition: Point{X: -32000, Y: -32000},
+		MaxPosition: Point{X: 0, Y: 0},
+		ShowCmd:     ShowMaximized,
+		Flags:       0,
+	}
+	if p.NormalRect.Width != 1024 || p.ShowCmd != ShowMaximized || p.MinPosition.X != -32000 {
+		t.Fatalf("placement fields not preserved: %+v", p)
+	}
+	if ShowNormal != 1 || ShowMinimized != 2 || ShowMaximized != 3 {
+		t.Fatal("show command values must mirror SW_SHOWNORMAL/SW_SHOWMINIMIZED/SW_SHOWMAXIMIZED")
+	}
+}

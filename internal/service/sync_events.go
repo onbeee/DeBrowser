@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // Stage 10 v3 page-event model. Events are produced by the
@@ -37,10 +38,11 @@ type PageEvent struct {
 	DeltaY  float64 `json:"deltaY,omitempty"`
 
 	// keyboard (browser terms)
-	Key      string `json:"key,omitempty"`
-	Code     string `json:"code,omitempty"`
-	Location int    `json:"location,omitempty"`
-	Repeat   bool   `json:"repeat,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Code      string `json:"code,omitempty"`
+	Location  int    `json:"location,omitempty"`
+	Repeat    bool   `json:"repeat,omitempty"`
+	Composing bool   `json:"composing,omitempty"`
 
 	// modifiers
 	Alt   bool `json:"alt,omitempty"`
@@ -50,22 +52,31 @@ type PageEvent struct {
 
 	// text increment (kind == "text")
 	Text string `json:"text,omitempty"`
+	// Source says how a text increment was produced: "input"
+	// (typed or dropped text), "paste" (insertFromPaste) or
+	// "composition" (an IME composition's final commit). It drives
+	// the composition-twin dedup and is never the text itself.
+	Source string `json:"source,omitempty"`
 }
 
-// IsTextProducingKeyEvent reports whether a key event is the
-// keydown/keyup of a printable character typed without command
-// modifiers. The observer script already withholds those (the
-// text itself arrives as a text event); the dispatch side applies
-// the same rule defensively so a character can never be sent
-// twice — once as a key event and once as inserted text.
-func (e PageEvent) IsTextProducingKeyEvent() bool {
+// IsPasteShortcut reports whether a key event is a paste
+// shortcut (Ctrl/Cmd+V or Shift+Insert). Paste follows ONE path
+// in this design — the insertFromPaste text increment — so the
+// shortcut itself is never dispatched to followers: dispatching
+// both would paste twice. The observer script already withholds
+// these; the check is applied again on the dispatch side so the
+// single-path rule holds even if a report slips through. A paste
+// that produces no input event (for example into a canvas) is an
+// explicitly unsupported paste target, never guessed at.
+func (e PageEvent) IsPasteShortcut() bool {
 	if e.Kind != "keydown" && e.Kind != "keyup" {
 		return false
 	}
-	if e.Ctrl || e.Meta || e.Alt {
-		return false
+	if (e.Ctrl || e.Meta) && (e.Code == "KeyV" || strings.EqualFold(e.Key, "v")) {
+		return true
 	}
-	return len([]rune(e.Key)) == 1
+	return e.Shift && !e.Ctrl && !e.Meta && !e.Alt &&
+		(e.Code == "Insert" || e.Key == "Insert")
 }
 
 // cdpModifiers folds the modifier booleans into the CDP Input

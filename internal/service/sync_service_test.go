@@ -31,7 +31,8 @@ func startTestSession(t *testing.T, master, follower *fakeChromium, masterActive
 	if err != nil {
 		t.Fatalf("dial master: %v", err)
 	}
-	sess.masterClient, sess.masterTracker = mc, mt
+	sess.masterClient = mc
+	sess.setTracker(mt)
 	active, _, ok := waitActiveTarget(mt, 3*time.Second)
 	if !ok || active != masterActive {
 		t.Fatalf("master active = %q ok=%v, want %q", active, ok, masterActive)
@@ -47,9 +48,8 @@ func startTestSession(t *testing.T, master, follower *fakeChromium, masterActive
 	sess.mu.Lock()
 	worker.masterW, worker.masterH = sess.masterW, sess.masterH
 	sess.mu.Unlock()
-	fc, ft, err := dialBrowser(ctx, follower.Port(), pageCallbacks{
-		OnTargetDestroyed: sess.onFollowerTargetDestroyed("follower"),
-	})
+	sess.addFollower("follower", worker)
+	fc, ft, err := dialBrowser(ctx, follower.Port(), sess.followerCallbacks("follower"))
 	if err != nil {
 		t.Fatalf("dial follower: %v", err)
 	}
@@ -64,8 +64,8 @@ func startTestSession(t *testing.T, master, follower *fakeChromium, masterActive
 	worker.mapTarget(masterActive, fActive)
 	worker.setActiveTarget(fActive)
 	worker.setReady()
-	sess.followers["follower"] = worker
 	go worker.run()
+	sess.live.Store(true)
 	t.Cleanup(sess.teardown)
 	return sess, worker
 }
@@ -90,11 +90,14 @@ func TestSyncInputFlowScalesCoordinatesAndSendsTextOnce(t *testing.T) {
 	master.PushBindingEvent("M1", PageEvent{Kind: "pointerdown", X: 400, Y: 300, Button: 0, Buttons: 1, Detail: 1})
 	master.PushBindingEvent("M1", PageEvent{Kind: "pointerup", X: 400, Y: 300, Button: 0, Buttons: 0, Detail: 1})
 	// Committed text goes through insertText exactly once.
-	master.PushBindingEvent("M1", PageEvent{Kind: "text", Text: "你好"})
-	// A shortcut is a key event; a bare printable keydown is not
-	// (its character already arrived as text).
+	master.PushBindingEvent("M1", PageEvent{Kind: "text", Text: "你好", Source: "input"})
+	// Shortcuts AND bare printable keydowns are all key events
+	// (games and canvas apps listen for them). The key event
+	// carries no text payload, so it inserts nothing by itself;
+	// the character still arrives only via the text event.
 	master.PushBindingEvent("M1", PageEvent{Kind: "keydown", Key: "a", Code: "KeyA", Ctrl: true})
 	master.PushBindingEvent("M1", PageEvent{Kind: "keydown", Key: "x", Code: "KeyX"})
+	master.PushBindingEvent("M1", PageEvent{Kind: "keyup", Key: "x", Code: "KeyX"})
 	master.PushBindingEvent("M1", PageEvent{Kind: "keydown", Key: "Backspace", Code: "Backspace"})
 
 	mouse := follower.WaitCommands("Input.dispatchMouseEvent", 2, 3*time.Second)
@@ -114,9 +117,29 @@ func TestSyncInputFlowScalesCoordinatesAndSendsTextOnce(t *testing.T) {
 	if tp["text"] != "你好" {
 		t.Fatalf("insertText = %v", tp)
 	}
-	keys := follower.WaitCommands("Input.dispatchKeyEvent", 2, 3*time.Second)
-	if len(keys) != 2 {
-		t.Fatalf("key commands = %d, want 2 (shortcut + Backspace, no bare x)", len(keys))
+	keys := follower.WaitCommands("Input.dispatchKeyEvent", 4, 3*time.Second)
+	if len(keys) != 4 {
+		t.Fatalf("key commands = %d, want 4 (shortcut, bare x down+up, Backspace)", len(keys))
+	}
+	// Key events must never carry a text payload: that is what
+	// keeps a dispatched keydown from ALSO inserting its
+	// character (the text event above is the single insert).
+	for _, k := range keys {
+		var kp map[string]any
+		_ = json.Unmarshal(k.Params, &kp)
+		if _, hasText := kp["text"]; hasText {
+			t.Fatalf("key event carries a text payload (would duplicate input): %v", kp)
+		}
+		if _, hasText := kp["unmodifiedText"]; hasText {
+			t.Fatalf("key event carries unmodifiedText (would duplicate input): %v", kp)
+		}
+	}
+	// down/up stay paired for the bare character key.
+	var xDown, xUp map[string]any
+	_ = json.Unmarshal(keys[1].Params, &xDown)
+	_ = json.Unmarshal(keys[2].Params, &xUp)
+	if xDown["type"] != "keyDown" || xUp["type"] != "keyUp" || xDown["code"] != "KeyX" || xUp["code"] != "KeyX" {
+		t.Fatalf("bare key pair = %v / %v, want keyDown+keyUp for KeyX", xDown, xUp)
 	}
 }
 

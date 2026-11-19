@@ -12,7 +12,7 @@ import { sortInstancesByName } from "./instancesLogic";
 import {
   canStart,
   followerStateText,
-  pruneSelection,
+  refreshSelection,
   sessionSummary,
   toggleFollower,
   toggleMaster,
@@ -34,9 +34,26 @@ export default function SyncPage() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  // The selection's source of truth for the polling refresh: the
+  // refresh callback is created once and must never read the
+  // selection from a stale render closure (that once reset the
+  // followers to the initial empty array on every 2s poll). The
+  // refs always hold the latest selection; state mirrors them
+  // for rendering.
+  const masterRef = useRef("");
+  const followerRef = useRef<string[]>([]);
 
   const phase = syncState?.phase ?? "idle";
   const sessionActive = phase !== "idle";
+
+  const applyMaster = useCallback((id: string) => {
+    masterRef.current = id;
+    setMasterId(id);
+  }, []);
+  const applyFollowers = useCallback((ids: string[]) => {
+    followerRef.current = ids;
+    setFollowerIds(ids);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -48,16 +65,23 @@ export default function SyncPage() {
       setInstances(sorted);
       setSyncState(state);
       const ids = new Set(sorted.map((i) => i.id));
-      setMasterId((prev) => {
-        const pruned = pruneSelection(prev, followerIds, ids);
-        setFollowerIds(pruned.followerIds);
-        return state.phase !== "idle" && state.masterId ? state.masterId : pruned.masterId;
-      });
+      // Prune ONLY what no longer exists (or clashes with the
+      // master) from the CURRENT selection, read from the refs —
+      // a poll never resets a still-valid selection. While a
+      // session is live the toolbar/table follow the session's
+      // own state, as before.
+      const next = refreshSelection(
+        masterRef.current,
+        followerRef.current,
+        ids,
+        state.phase !== "idle" ? state.masterId : "",
+      );
+      applyMaster(next.masterId);
+      applyFollowers(next.followerIds);
     } catch (err) {
       log("error", `加载同步状态失败：${err instanceof Error ? err.message : String(err)}`);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [log]);
+  }, [log, applyMaster, applyFollowers]);
 
   useEffect(() => {
     void refresh();
@@ -224,7 +248,7 @@ export default function SyncPage() {
       </div>
 
       <p className="border-b border-(--border) px-4 py-2 text-xs text-(--text-dim)">
-        同步范围为网页内的鼠标、滚动、键盘与文本输入，以及页面导航和标签的创建、关闭与切换。地址栏未提交的输入、浏览器菜单、扩展弹窗与文件选择框等浏览器自身界面不在同步范围内；跟随窗口不会被带到前台，标签切换在跟随窗口中的可见效果取决于浏览器自身的标签激活行为。
+        同步范围为网页内的鼠标、滚动、键盘与文本输入，页面导航和标签的创建、关闭与切换，以及主窗口的移动、调整大小、最大化与还原（最小化不同步）。粘贴只通过文本增量同步一次，粘贴到画布等不产生文本输入的位置不支持；iframe 内的输入不支持。地址栏未提交的输入、浏览器菜单、扩展弹窗与文件选择框等浏览器自身界面不在同步范围内；暂停会停止全部分发。跟随窗口不会被带到前台，标签切换在跟随窗口中的可见效果取决于浏览器自身的标签激活行为。
       </p>
       {message && (
         <p className="border-b border-(--border) px-4 py-2 text-sm text-(--danger)">{message}</p>
@@ -255,7 +279,7 @@ export default function SyncPage() {
                       name="sync-master"
                       checked={isMaster}
                       disabled={sessionActive}
-                      onClick={() => setMasterId((cur) => toggleMaster(cur, inst.id))}
+                      onClick={() => applyMaster(toggleMaster(masterRef.current, inst.id))}
                       onChange={() => undefined}
                       aria-label={`将 ${inst.name} 设为主实例`}
                     />
@@ -265,7 +289,9 @@ export default function SyncPage() {
                       type="checkbox"
                       checked={isFollower}
                       disabled={sessionActive || isMaster}
-                      onChange={() => setFollowerIds((cur) => toggleFollower(cur, inst.id, masterId))}
+                      onChange={() =>
+                        applyFollowers(toggleFollower(followerRef.current, inst.id, masterRef.current))
+                      }
                       aria-label={`将 ${inst.name} 设为跟随实例`}
                     />
                   </td>

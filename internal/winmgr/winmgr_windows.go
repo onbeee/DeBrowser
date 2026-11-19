@@ -9,29 +9,25 @@ import (
 )
 
 var (
-	user32   = syscall.NewLazyDLL("user32.dll")
-	shcore   = syscall.NewLazyDLL("shcore.dll")
-	enumWin  = user32.NewProc("EnumWindows")
-	enumMon  = user32.NewProc("EnumDisplayMonitors")
-	getMon   = user32.NewProc("GetMonitorInfoW")
-	getPid   = user32.NewProc("GetWindowThreadProcessId")
-	isVis    = user32.NewProc("IsWindowVisible")
-	getRect  = user32.NewProc("GetWindowRect")
-	setPos   = user32.NewProc("SetWindowPos")
-	showWin  = user32.NewProc("ShowWindowAsync")
-	isZoomed = user32.NewProc("IsZoomed")
-	isIconic = user32.NewProc("IsIconic")
-	getDpi   = shcore.NewProc("GetDpiForMonitor")
+	user32     = syscall.NewLazyDLL("user32.dll")
+	shcore     = syscall.NewLazyDLL("shcore.dll")
+	enumWin    = user32.NewProc("EnumWindows")
+	enumMon    = user32.NewProc("EnumDisplayMonitors")
+	getMon     = user32.NewProc("GetMonitorInfoW")
+	getPid     = user32.NewProc("GetWindowThreadProcessId")
+	isVis      = user32.NewProc("IsWindowVisible")
+	getRect    = user32.NewProc("GetWindowRect")
+	getPlcmt   = user32.NewProc("GetWindowPlacement")
+	setPlcmt   = user32.NewProc("SetWindowPlacement")
+	getForegnd = user32.NewProc("GetForegroundWindow")
+	getDpi     = shcore.NewProc("GetDpiForMonitor")
 )
 
 const (
-	swpNoActivate = 0x0010
-	swpNoZOrder   = 0x0004
-	swpShowWindow = 0x0040
-
-	swRestore  = 9
-	swMinimize = 6
-	swMaximize = 3
+	// WPF_ASYNCWINDOWPLACEMENT: SetWindowPlacement posts the
+	// placement request instead of sending it, so it never
+	// activates the target window.
+	wpfAsyncWindowPlacement = 0x0004
 
 	monitorDefaultToNull = 0
 	mdtEffectiveDpi      = 0
@@ -39,6 +35,25 @@ const (
 
 type winRect struct {
 	Left, Top, Right, Bottom int32
+}
+
+type winPoint struct {
+	X, Y int32
+}
+
+// windowPlacement mirrors the Win32 WINDOWPLACEMENT structure.
+type windowPlacement struct {
+	Length         uint32
+	Flags          uint32
+	ShowCmd        uint32
+	MinPosition    winPoint
+	MaxPosition    winPoint
+	NormalPosition winRect
+	Device         winRect // Vista+: part of the structure
+}
+
+func toWinRect(r Rect) winRect {
+	return winRect{Left: r.X, Top: r.Y, Right: r.X + r.Width, Bottom: r.Y + r.Height}
 }
 
 type monitorInfo struct {
@@ -118,40 +133,57 @@ func WindowForPID(pid int) (uintptr, error) {
 	return best, nil
 }
 
-// GetPlacement reads the window's normal rectangle and its
-// maximized/minimized state.
+// ForegroundWindow returns the window currently in the
+// foreground, so callers and checks can prove a placement change
+// did not steal focus.
+func ForegroundWindow() uintptr {
+	hwnd, _, _ := getForegnd.Call()
+	return hwnd
+}
+
+// GetPlacement reads the window's FULL placement through
+// GetWindowPlacement: normal rectangle, minimized and maximized
+// positions, show command and flags, in WINDOWPLACEMENT
+// workspace coordinates (round-tripped unchanged by
+// SetPlacement).
 func GetPlacement(hwnd uintptr) (Placement, error) {
-	var r winRect
-	if ok, _, err := getRect.Call(hwnd, uintptr(unsafe.Pointer(&r))); ok == 0 {
+	var wp windowPlacement
+	wp.Length = uint32(unsafe.Sizeof(wp))
+	if ok, _, err := getPlcmt.Call(hwnd, uintptr(unsafe.Pointer(&wp))); ok == 0 {
 		return Placement{}, fmt.Errorf("读取窗口位置失败：%v", err)
 	}
-	zoomed, _, _ := isZoomed.Call(hwnd)
-	iconic, _, _ := isIconic.Call(hwnd)
 	return Placement{
-		Rect:      toRect(r),
-		Maximized: zoomed != 0,
-		Minimized: iconic != 0,
+		NormalRect:  toRect(wp.NormalPosition),
+		MinPosition: Point{X: wp.MinPosition.X, Y: wp.MinPosition.Y},
+		MaxPosition: Point{X: wp.MaxPosition.X, Y: wp.MaxPosition.Y},
+		ShowCmd:     wp.ShowCmd,
+		Flags:       wp.Flags,
 	}, nil
 }
 
-// SetPlacement applies a placement. Geometry changes always pass
-// SWP_NOACTIVATE: arranging or restoring a follower window never
-// brings it to the foreground.
+// SetPlacement applies a full placement through
+// SetWindowPlacement with WPF_ASYNCWINDOWPLACEMENT. Unlike the
+// previous ShowWindow(SW_RESTORE / SW_MINIMIZE / SW_MAXIMIZE)
+// sequence — whose commands can activate the target or another
+// window — an async placement never activates the window it
+// moves, maximizes, minimizes or restores, so arranging or
+// restoring a follower window never changes the user's
+// foreground window. An unset ShowCmd is treated as normal.
 func SetPlacement(hwnd uintptr, p Placement) error {
-	if p.Minimized {
-		_, _, _ = showWin.Call(hwnd, swMinimize)
-		return nil
+	showCmd := p.ShowCmd
+	if showCmd == 0 {
+		showCmd = ShowNormal
 	}
-	// Restore first so the rectangle applies to a normal window.
-	_, _, _ = showWin.Call(hwnd, swRestore)
-	if ok, _, err := setPos.Call(hwnd, 0,
-		uintptr(p.Rect.X), uintptr(p.Rect.Y),
-		uintptr(p.Rect.Width), uintptr(p.Rect.Height),
-		swpNoActivate|swpNoZOrder|swpShowWindow); ok == 0 {
+	wp := windowPlacement{
+		Length:         uint32(unsafe.Sizeof(windowPlacement{})),
+		Flags:          p.Flags | wpfAsyncWindowPlacement,
+		ShowCmd:        showCmd,
+		MinPosition:    winPoint{X: p.MinPosition.X, Y: p.MinPosition.Y},
+		MaxPosition:    winPoint{X: p.MaxPosition.X, Y: p.MaxPosition.Y},
+		NormalPosition: toWinRect(p.NormalRect),
+	}
+	if ok, _, err := setPlcmt.Call(hwnd, uintptr(unsafe.Pointer(&wp))); ok == 0 {
 		return fmt.Errorf("设置窗口位置失败：%v", err)
-	}
-	if p.Maximized {
-		_, _, _ = showWin.Call(hwnd, swMaximize)
 	}
 	return nil
 }

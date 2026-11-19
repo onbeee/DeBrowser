@@ -23,7 +23,7 @@
     "dev": "vite",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/instancesLogic.test.ts tests/bookmarksLogic.test.ts tests/syncLogic.test.ts"
+    "test": "node --test tests/instancesLogic.test.ts tests/bookmarksLogic.test.ts tests/syncLogic.test.ts tests/syncCaptureScript.test.mjs"
   },
   "type": "module",
   "version": "0.1.0"

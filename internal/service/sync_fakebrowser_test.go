@@ -33,6 +33,15 @@ type fakeChromium struct {
 	conn     *websocket.Conn
 	activeID string // targetID reported visible
 	viewport map[string][2]float64
+
+	// Attach scripting for the concurrency/readiness tests:
+	// attachDelay slows every Target.attachToTarget answer,
+	// failAttach makes attach fail for the named targets, and
+	// attachCounts records how many attach commands arrived.
+	attachDelay  time.Duration
+	failAttach   map[string]bool
+	attachCounts map[string]int
+	lastCreated  string
 }
 
 type fakePage struct {
@@ -52,16 +61,24 @@ type fakeWire struct {
 	Params    json.RawMessage `json:"params,omitempty"`
 	SessionID string          `json:"sessionId,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
+	Error     *fakeWireError  `json:"error,omitempty"`
+}
+
+type fakeWireError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 func newFakeChromium(t *testing.T, pageURLs map[string]string, activeID string) *fakeChromium {
 	t.Helper()
 	f := &fakeChromium{
-		t:        t,
-		pages:    make(map[string]*fakePage),
-		sessions: make(map[string]string),
-		viewport: make(map[string][2]float64),
-		activeID: activeID,
+		t:            t,
+		pages:        make(map[string]*fakePage),
+		sessions:     make(map[string]string),
+		viewport:     make(map[string][2]float64),
+		activeID:     activeID,
+		failAttach:   make(map[string]bool),
+		attachCounts: make(map[string]int),
 	}
 	for id, url := range pageURLs {
 		f.pages[id] = &fakePage{targetID: id, url: url}
@@ -111,8 +128,13 @@ func (f *fakeChromium) serveWS(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.commands = append(f.commands, fakeCommand{SessionID: msg.SessionID, Method: msg.Method, Params: msg.Params})
 		f.mu.Unlock()
-		result := f.answer(msg)
-		out, _ := json.Marshal(fakeWire{ID: msg.ID, Result: result})
+		result, errMsg := f.answer(msg)
+		outWire := fakeWire{ID: msg.ID, Result: result}
+		if errMsg != "" {
+			outWire.Result = nil
+			outWire.Error = &fakeWireError{Code: -32000, Message: errMsg}
+		}
+		out, _ := json.Marshal(outWire)
 		if err := conn.Write(ctx, websocket.MessageText, out); err != nil {
 			return
 		}
@@ -121,10 +143,24 @@ func (f *fakeChromium) serveWS(w http.ResponseWriter, r *http.Request) {
 		if msg.Method == "Runtime.evaluate" {
 			f.reportVisibility(msg.SessionID)
 		}
+		// A real browser with target discovery on announces a
+		// created target right after Target.createTarget answers.
+		if msg.Method == "Target.createTarget" && errMsg == "" {
+			f.mu.Lock()
+			created := f.lastCreated
+			url := ""
+			if p := f.pages[created]; p != nil {
+				url = p.url
+			}
+			f.mu.Unlock()
+			if created != "" {
+				f.pushTargetCreatedEvent(created, url)
+			}
+		}
 	}
 }
 
-func (f *fakeChromium) answer(msg fakeWire) json.RawMessage {
+func (f *fakeChromium) answer(msg fakeWire) (json.RawMessage, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	params := map[string]any{}
@@ -140,21 +176,28 @@ func (f *fakeChromium) answer(msg fakeWire) json.RawMessage {
 			})
 		}
 		b, _ := json.Marshal(map[string]any{"targetInfos": infos})
-		return b
+		return b, ""
 	case "Target.attachToTarget":
 		targetID, _ := params["targetId"].(string)
+		f.attachCounts[targetID]++
+		if f.failAttach[targetID] {
+			return nil, "fake attach failure"
+		}
+		if f.attachDelay > 0 {
+			time.Sleep(f.attachDelay)
+		}
 		sessionID := "sess-" + targetID
 		f.sessions[sessionID] = targetID
 		b, _ := json.Marshal(map[string]any{"sessionId": sessionID})
-		return b
+		return b, ""
 	case "Page.getFrameTree":
 		targetID := f.sessions[msg.SessionID]
 		b, _ := json.Marshal(map[string]any{"frameTree": map[string]any{
 			"frame": map[string]any{"id": "frame-" + targetID},
 		}})
-		return b
+		return b, ""
 	case "Page.createIsolatedWorld":
-		return json.RawMessage(`{"executionContextId": 42}`)
+		return json.RawMessage(`{"executionContextId": 42}`), ""
 	case "Page.getLayoutMetrics":
 		targetID := f.sessions[msg.SessionID]
 		vp := f.viewport[targetID]
@@ -164,20 +207,43 @@ func (f *fakeChromium) answer(msg fakeWire) json.RawMessage {
 		b, _ := json.Marshal(map[string]any{"cssVisualViewport": map[string]any{
 			"clientWidth": vp[0], "clientHeight": vp[1],
 		}})
-		return b
+		return b, ""
 	case "Target.createTarget":
 		f.seq++
 		id := fmt.Sprintf("created-%d", f.seq)
 		url, _ := params["url"].(string)
 		f.pages[id] = &fakePage{targetID: id, url: url}
+		f.lastCreated = id
 		b, _ := json.Marshal(map[string]any{"targetId": id})
-		return b
+		return b, ""
 	case "Target.closeTarget":
 		targetID, _ := params["targetId"].(string)
 		delete(f.pages, targetID)
-		return json.RawMessage(`{"success": true}`)
+		return json.RawMessage(`{"success": true}`), ""
 	}
-	return json.RawMessage(`{}`)
+	return json.RawMessage(`{}`), ""
+}
+
+// setAttachDelay slows every subsequent attach answer.
+func (f *fakeChromium) setAttachDelay(d time.Duration) {
+	f.mu.Lock()
+	f.attachDelay = d
+	f.mu.Unlock()
+}
+
+// failAttachFor makes Target.attachToTarget fail for a target.
+func (f *fakeChromium) failAttachFor(targetID string) {
+	f.mu.Lock()
+	f.failAttach[targetID] = true
+	f.mu.Unlock()
+}
+
+// attachCount reports how many attach commands arrived for a
+// target (the single-flight attach proof).
+func (f *fakeChromium) attachCount(targetID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attachCounts[targetID]
 }
 
 // reportVisibility pushes the observer script's visibility report
@@ -230,8 +296,17 @@ func (f *fakeChromium) PushBindingEvent(targetID string, ev PageEvent) {
 func (f *fakeChromium) PushTargetCreated(targetID, url string) {
 	f.mu.Lock()
 	f.pages[targetID] = &fakePage{targetID: targetID, url: url}
+	f.mu.Unlock()
+	f.pushTargetCreatedEvent(targetID, url)
+}
+
+func (f *fakeChromium) pushTargetCreatedEvent(targetID, url string) {
+	f.mu.Lock()
 	conn := f.conn
 	f.mu.Unlock()
+	if conn == nil {
+		return
+	}
 	msg, _ := json.Marshal(fakeWire{
 		Method: "Target.targetCreated",
 		Params: mustJSON(map[string]any{"targetInfo": map[string]any{
@@ -239,6 +314,30 @@ func (f *fakeChromium) PushTargetCreated(targetID, url string) {
 		}}),
 	})
 	_ = conn.Write(context.Background(), websocket.MessageText, msg)
+}
+
+// PushExecutionContextCreated injects a
+// Runtime.executionContextCreated event for the sync isolated
+// world on the given page session, with the supplied frame ID —
+// used to prove subframe contexts are never bound.
+func (f *fakeChromium) PushExecutionContextCreated(targetID, frameID string, contextID int) {
+	f.mu.Lock()
+	conn := f.conn
+	f.mu.Unlock()
+	if conn == nil {
+		f.t.Fatalf("fake browser not connected")
+	}
+	msg, _ := json.Marshal(fakeWire{
+		Method:    "Runtime.executionContextCreated",
+		SessionID: "sess-" + targetID,
+		Params: mustJSON(map[string]any{"context": map[string]any{
+			"id": contextID, "name": syncWorldName,
+			"auxData": map[string]any{"frameId": frameID, "isDefault": false},
+		}}),
+	})
+	if err := conn.Write(context.Background(), websocket.MessageText, msg); err != nil {
+		f.t.Fatalf("push context event: %v", err)
+	}
 }
 
 // PushTargetDestroyed injects a Target.targetDestroyed event.

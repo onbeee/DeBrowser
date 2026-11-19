@@ -38,8 +38,12 @@ export function ListSyncMonitors(): $CancellablePromise<$models.SyncMonitor[] | 
 }
 
 /**
- * PauseSync halts input dispatch: pending input is dropped and
- * pressed state is released; nothing is replayed on resume.
+ * PauseSync halts ALL sync dispatch: pending actions are
+ * dropped, pressed state is released, and while paused the
+ * session handlers dispatch nothing at all — no page input, no
+ * navigation, no tab creation/closure/switching, no window
+ * mirroring. Nothing observed during the pause is replayed on
+ * resume; resume re-confirms the current active pages instead.
  */
 export function PauseSync(operationID: string): $CancellablePromise<void> {
     return $Call.ByID(3907902309, operationID);
@@ -54,7 +58,10 @@ export function RestoreWindows(operationID: string): $CancellablePromise<void> {
 }
 
 /**
- * ResumeSync resumes input dispatch with empty queues.
+ * ResumeSync resumes dispatch with empty queues: the master's
+ * current active page and every follower's mapping are
+ * re-confirmed first, so only events produced after the resume
+ * are ever dispatched.
  */
 export function ResumeSync(operationID: string): $CancellablePromise<void> {
     return $Call.ByID(1585605416, operationID);
