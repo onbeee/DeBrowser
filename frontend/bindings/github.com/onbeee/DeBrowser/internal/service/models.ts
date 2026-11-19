@@ -243,6 +243,19 @@ export interface SyncBookmarksResult {
     "failedBookmarks": number;
 }
 
+/**
+ * SyncCandidate is one instance's synchronization capability.
+ */
+export interface SyncCandidate {
+    "instanceId": string;
+    "name": string;
+    "kernelName": string;
+    "running": boolean;
+    "verified": boolean;
+    "cdpAvailable": boolean;
+    "reason": string;
+}
+
 export interface SyncInstanceResult {
     "instanceId": string;
     "instanceName": string;
@@ -255,6 +268,89 @@ export interface SyncInstanceResult {
     "skipped": number;
     "failed": number;
     "reason": string;
+}
+
+/**
+ * SyncMonitor is one display for the UI.
+ */
+export interface SyncMonitor {
+    "id": number;
+    "primary": boolean;
+    "label": string;
+}
+
+/**
+ * SyncParticipantView is one instance's state in the UI.
+ */
+export interface SyncParticipantView {
+    "instanceId": string;
+    "name": string;
+
+    /**
+     * master / follower / ""
+     */
+    "role": string;
+
+    /**
+     * 同步中 / 已暂停 / 失败 / 未参与
+     */
+    "status": string;
+    "reason": string;
+}
+
+/**
+ * SyncRuntimeInfo is the verified runtime identity of one
+ * instance for the synchronization module (Stage 10). It is the
+ * ONLY channel through which sync learns about processes: sync
+ * never scans for processes or ports itself.
+ */
+export interface SyncRuntimeInfo {
+    "InstanceID": string;
+    "Running": boolean;
+
+    /**
+     * Verified is true when a tracked process exists and its
+     * recorded identity is complete.
+     */
+    "Verified": boolean;
+    "PID": number;
+    "ProcessCreateAt": number;
+    "ExecutablePath": string;
+
+    /**
+     * absolute profile directory
+     */
+    "UserDataDir": string;
+
+    /**
+     * 0 = no DeBrowser-assigned CDP port
+     */
+    "CDPPort": number;
+}
+
+/**
+ * SyncStateView is the whole synchronization state for the UI.
+ */
+export interface SyncStateView {
+    /**
+     * 已停止 / 启动中 / 同步中 / 已暂停 / 停止中
+     */
+    "phase": string;
+    "masterId": string;
+    "masterName": string;
+    "participants": SyncParticipantView[] | null;
+
+    /**
+     * NativeUIObserved reports whether the native-UI hook
+     * observer is active this session (observation only).
+     */
+    "nativeUiObserved": boolean;
+
+    /**
+     * MirrorActive reports whether master window mirroring is
+     * running this session.
+     */
+    "mirrorActive": boolean;
 }
 
 /**

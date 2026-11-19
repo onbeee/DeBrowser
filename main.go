@@ -188,8 +188,10 @@ func run() error {
 	instanceService.ReportReconciliation()
 
 	diagnosticsService := service.NewDiagnosticsService(db, logSystem, appService)
+	syncService := service.NewSyncService(instanceService)
+	syncService.Auditor = logSystem
 
-	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, logger, assets)
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, logger, assets)
 	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)
 	runErr := wailsApp.Run()
 	if runErr != nil {

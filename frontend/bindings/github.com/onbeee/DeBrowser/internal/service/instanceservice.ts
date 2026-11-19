@@ -147,8 +147,29 @@ export function StopInstance(operationID: string, id: string): $CancellablePromi
 }
 
 /**
+ * SyncRuntimeInfo returns the instance's current runtime
+ * identity, re-verifying the tracked process against the
+ * persisted runtime record. ok=false means the instance does
+ * not exist. A process whose identity cannot be fully verified
+ * reports Verified=false and must not join synchronization.
+ */
+export function SyncRuntimeInfo(id: string): $CancellablePromise<[$models.SyncRuntimeInfo, boolean]> {
+    return $Call.ByID(3339661473, id);
+}
+
+/**
  * UpdateInstance updates an instance (recorded, unified recording).
  */
 export function UpdateInstance(operationID: string, input: $models.UpdateInstanceInput): $CancellablePromise<model$0.Instance> {
     return $Call.ByID(1861349874, operationID, input);
+}
+
+/**
+ * VerifySyncIdentity re-checks that the process identified by a
+ * previously obtained SyncRuntimeInfo is still the tracked
+ * process of the instance (PID + creation time + executable
+ * path). Used before window operations and on session resume.
+ */
+export function VerifySyncIdentity(info: $models.SyncRuntimeInfo): $CancellablePromise<boolean> {
+    return $Call.ByID(4270707828, info);
 }
