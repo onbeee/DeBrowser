@@ -193,6 +193,12 @@ type syncSession struct {
 	followerHWNDs map[string]uintptr
 	mirrorStop    chan struct{}
 	lastMasterPl  *winmgr.Placement
+	// lastMasterScreen is the master window's last mirrored
+	// ACTUAL screen rectangle (from GetWindowRect). Placement
+	// rectangles are workspace coordinates and are never used
+	// as screen geometry; both are tracked because a move can
+	// change one view before the other settles.
+	lastMasterScreen *winmgr.Rect
 }
 
 // followerByID reads the session's follower map under its lock:
@@ -1033,16 +1039,17 @@ func (s *SyncService) windowForInstance(instanceID string) (uintptr, error) {
 
 // runWindowMirror polls the master window's placement and
 // mirrors changes (move, resize, maximize, restore) to every
-// follower window. Geometry-only changes go through the
+// follower window. Geometry changes are mirrored from the
+// master's ACTUAL screen rectangle (GetWindowRect) through the
 // non-activating SetWindowPos path; a show-state change
 // (maximize/restore) goes through full placement application,
 // for which no absolute foreground guarantee is claimed (see
-// winmgr.MirrorPlacement).
-// Minimizing the master is NOT mirrored (documented boundary:
-// a minimized follower could not be restored by the user
-// through sync, and hiding follower windows unprompted would be
-// surprising). Mirroring pauses with the session and stops with
-// it; it is independent of page input dispatch.
+// winmgr.MirrorPlacement). Minimizing the master is NOT
+// mirrored (documented boundary: a minimized follower could
+// not be restored by the user through sync, and hiding
+// follower windows unprompted would be surprising). Mirroring
+// pauses with the session and stops with it; it is
+// independent of page input dispatch.
 func (sess *syncSession) runWindowMirror() {
 	if sess.masterHWND == 0 || len(sess.followerHWNDs) == 0 {
 		return
@@ -1062,11 +1069,18 @@ func (sess *syncSession) runWindowMirror() {
 		if err != nil {
 			continue
 		}
+		screen, err := winmgr.GetWindowRect(sess.masterHWND)
+		if err != nil {
+			continue
+		}
 		sess.mu.Lock()
-		changed := sess.lastMasterPl == nil || !winmgr.PlacementsEqual(*sess.lastMasterPl, placement)
+		changed := sess.lastMasterPl == nil || !winmgr.PlacementsEqual(*sess.lastMasterPl, placement) ||
+			sess.lastMasterScreen == nil || *sess.lastMasterScreen != screen
 		if changed {
 			p := placement
 			sess.lastMasterPl = &p
+			r := screen
+			sess.lastMasterScreen = &r
 		}
 		sess.mu.Unlock()
 		if !changed {
@@ -1076,12 +1090,10 @@ func (sess *syncSession) runWindowMirror() {
 			// Best-effort per window: one window's failure never
 			// blocks the others, and mirroring failures do not
 			// fail the page sync session.
-			_, _ = winmgr.MirrorPlacement(hwnd, placement)
+			_, _ = winmgr.MirrorPlacement(hwnd, placement.ShowCmd, screen, placement)
 		}
 	}
 }
-
-// --- window management (independent of any session) ---
 
 // ListSyncMonitors returns the displays available for arranging.
 func (s *SyncService) ListSyncMonitors() ([]SyncMonitor, error) {
@@ -1194,22 +1206,42 @@ func (s *SyncService) arrangeWindows(monitorIndex int) error {
 	return firstErr
 }
 
-// RestoreWindows returns arranged windows to the placements saved
-// before the last arrange.
+// setWindowPlacement applies one saved placement during a
+// restore. It is a package variable so tests can script
+// per-window outcomes; production always uses
+// winmgr.SetPlacement.
+var setWindowPlacement = winmgr.SetPlacement
+
+// RestoreWindows returns arranged windows to the placements
+// saved before the last arrange. Records are consumed PER
+// WINDOW: a window that restores successfully has its record
+// removed; a window whose restore fails KEEPS its original
+// saved placement, so the user can retry restoring it later.
+// One window's failure never stops the others from being
+// attempted, and when every window succeeds the records are
+// fully cleared.
 func (s *SyncService) RestoreWindows(operationID string) error {
 	op := beginOp(s.Auditor, operationID, "多开同步", "恢复窗口", "", "")
 	s.mu.Lock()
-	saved := s.savedPlacements
-	s.savedPlacements = make(map[string]savedPlacement)
+	saved := make(map[string]savedPlacement, len(s.savedPlacements))
+	for id, sp := range s.savedPlacements {
+		saved[id] = sp
+	}
 	s.mu.Unlock()
 	var err error
 	if len(saved) == 0 {
 		err = fmt.Errorf("没有可恢复的窗口布局")
 	} else {
-		for _, sp := range saved {
-			if serr := winmgr.SetPlacement(sp.hwnd, sp.placement); serr != nil && err == nil {
-				err = serr
+		for id, sp := range saved {
+			if serr := setWindowPlacement(sp.hwnd, sp.placement); serr != nil {
+				if err == nil {
+					err = serr
+				}
+				continue // record retained for a later retry
 			}
+			s.mu.Lock()
+			delete(s.savedPlacements, id)
+			s.mu.Unlock()
 		}
 	}
 	finishOp(op, err)

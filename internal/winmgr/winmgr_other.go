@@ -15,6 +15,9 @@ func WindowForPID(pid int) (uintptr, error) { return 0, ErrUnsupported }
 // ForegroundWindow returns the current foreground window.
 func ForegroundWindow() uintptr { return 0 }
 
+// GetWindowRect reads a window's actual screen rectangle.
+func GetWindowRect(hwnd uintptr) (Rect, error) { return Rect{}, ErrUnsupported }
+
 // GetPlacement reads a window's full placement.
 func GetPlacement(hwnd uintptr) (Placement, error) { return Placement{}, ErrUnsupported }
 

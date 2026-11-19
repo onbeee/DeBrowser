@@ -146,6 +146,19 @@ func ForegroundWindow() uintptr {
 	return hwnd
 }
 
+// GetWindowRect reads the window's ACTUAL rectangle in SCREEN
+// coordinates through GetWindowRect — the only source of
+// rectangles for SetWindowRect / SetWindowPos. (A placement's
+// normal rectangle is workspace coordinates and is never used
+// as a screen rectangle.)
+func GetWindowRect(hwnd uintptr) (Rect, error) {
+	var r winRect
+	if ok, _, err := getRect.Call(hwnd, uintptr(unsafe.Pointer(&r))); ok == 0 {
+		return Rect{}, fmt.Errorf("读取窗口矩形失败：%v", err)
+	}
+	return toRect(r), nil
+}
+
 // GetPlacement reads the window's FULL placement through
 // GetWindowPlacement: normal rectangle, minimized and maximized
 // positions, show command and flags, in WINDOWPLACEMENT

@@ -50,8 +50,14 @@ export function PauseSync(operationID: string): $CancellablePromise<void> {
 }
 
 /**
- * RestoreWindows returns arranged windows to the placements saved
- * before the last arrange.
+ * RestoreWindows returns arranged windows to the placements
+ * saved before the last arrange. Records are consumed PER
+ * WINDOW: a window that restores successfully has its record
+ * removed; a window whose restore fails KEEPS its original
+ * saved placement, so the user can retry restoring it later.
+ * One window's failure never stops the others from being
+ * attempted, and when every window succeeds the records are
+ * fully cleared.
  */
 export function RestoreWindows(operationID: string): $CancellablePromise<void> {
     return $Call.ByID(3028793179, operationID);

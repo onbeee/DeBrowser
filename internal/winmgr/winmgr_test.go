@@ -72,7 +72,7 @@ func TestMirrorPlacementNeverMinimizesAFollower(t *testing.T) {
 	// The minimize boundary short-circuits before any platform
 	// call, so this holds on every platform: mirroring a
 	// minimized master must not hide a follower window.
-	applied, err := MirrorPlacement(0, Placement{ShowCmd: ShowMinimized})
+	applied, err := MirrorPlacement(0, ShowMinimized, Rect{}, Placement{ShowCmd: ShowMinimized})
 	if err != nil {
 		t.Fatalf("minimize mirror returned error: %v", err)
 	}
@@ -98,5 +98,99 @@ func TestPlacementCarriesFullWindowState(t *testing.T) {
 	}
 	if ShowNormal != 1 || ShowMinimized != 2 || ShowMaximized != 3 {
 		t.Fatal("show command values must mirror SW_SHOWNORMAL/SW_SHOWMINIMIZED/SW_SHOWMAXIMIZED")
+	}
+}
+
+func TestPlanWindowMirrorNormalGeometryUsesMasterScreenRectVerbatim(t *testing.T) {
+	// The follower's placement rectangle is WORKSPACE
+	// coordinates (work area origin at 0,0); its actual SCREEN
+	// rectangle is offset by the taskbar height (40). The
+	// master sits on a monitor at negative screen X. Mirroring
+	// must plan the master's SCREEN rectangle verbatim —
+	// negative coordinates included — never its placement
+	// rectangle.
+	follower := Placement{NormalRect: Rect{X: 0, Y: 0, Width: 800, Height: 600}, ShowCmd: ShowNormal}
+	followerScreen := Rect{X: 0, Y: 40, Width: 800, Height: 600}
+	masterPlacement := Placement{NormalRect: Rect{X: -1600, Y: 0, Width: 800, Height: 600}, ShowCmd: ShowNormal}
+	masterScreen := Rect{X: -1600, Y: 40, Width: 800, Height: 600}
+
+	action, rect, _ := planWindowMirror(follower, followerScreen, ShowNormal, masterScreen, masterPlacement)
+	if action != mirrorSetRect {
+		t.Fatalf("action = %v, want mirrorSetRect", action)
+	}
+	if rect != masterScreen {
+		t.Fatalf("planned rect = %v, want the master screen rect %v verbatim", rect, masterScreen)
+	}
+	if rect == masterPlacement.NormalRect {
+		t.Fatal("planned rect equals the master's WORKSPACE rect: coordinate systems were mixed")
+	}
+
+	// Already at the master's screen rectangle: no action,
+	// even though the workspace rectangles differ.
+	action, _, _ = planWindowMirror(follower, masterScreen, ShowNormal, masterScreen, masterPlacement)
+	if action != mirrorNoop {
+		t.Fatalf("action = %v, want mirrorNoop when screen rects match", action)
+	}
+}
+
+func TestPlanWindowMirrorStateTransitionUsesPlacementVerbatim(t *testing.T) {
+	// Master maximized, follower normal: a state transition.
+	// The payload must be the master's PLACEMENT verbatim
+	// (workspace coordinates stay inside the placement system);
+	// no screen rectangle may be converted into it.
+	follower := Placement{NormalRect: Rect{X: 0, Y: 0, Width: 800, Height: 600}, ShowCmd: ShowNormal}
+	masterPlacement := Placement{
+		NormalRect:  Rect{X: -1600, Y: 0, Width: 1024, Height: 768},
+		MinPosition: Point{X: -32000, Y: -32000},
+		MaxPosition: Point{X: -1600, Y: 0},
+		ShowCmd:     ShowMaximized,
+	}
+	masterScreen := Rect{X: -1600, Y: 0, Width: 1600, Height: 900}
+	action, _, placement := planWindowMirror(follower, Rect{X: 0, Y: 40, Width: 800, Height: 600}, ShowMaximized, masterScreen, masterPlacement)
+	if action != mirrorSetPlacement {
+		t.Fatalf("action = %v, want mirrorSetPlacement", action)
+	}
+	if placement != masterPlacement {
+		t.Fatalf("planned placement = %+v, want the master placement %+v verbatim", placement, masterPlacement)
+	}
+
+	// Both maximized with identical placements: nothing to do.
+	action, _, _ = planWindowMirror(masterPlacement, masterScreen, ShowMaximized, masterScreen, masterPlacement)
+	if action != mirrorNoop {
+		t.Fatalf("action = %v, want mirrorNoop for identical maximized placements", action)
+	}
+
+	// Master minimized: never mirrored.
+	action, _, _ = planWindowMirror(follower, Rect{}, ShowMinimized, Rect{}, Placement{ShowCmd: ShowMinimized})
+	if action != mirrorNoop {
+		t.Fatalf("action = %v, want mirrorNoop for a minimized master", action)
+	}
+}
+
+func TestPlanArrangeKeepsCoordinateSystemsApart(t *testing.T) {
+	target := Rect{X: -1600, Y: 40, Width: 800, Height: 860} // screen coords: left monitor work area
+
+	// Normal window already at the target SCREEN rect: noop,
+	// even though its workspace NormalRect differs.
+	normal := Placement{NormalRect: Rect{X: -1600, Y: 0, Width: 800, Height: 860}, ShowCmd: ShowNormal}
+	if got := planArrange(normal, target, target); got != arrangeNoop {
+		t.Fatalf("planArrange(normal, at target) = %v, want arrangeNoop", got)
+	}
+	// Normal window elsewhere on screen: geometry only.
+	if got := planArrange(normal, Rect{X: 0, Y: 40, Width: 800, Height: 860}, target); got != arrangeSetRect {
+		t.Fatalf("planArrange(normal, elsewhere) = %v, want arrangeSetRect", got)
+	}
+	// Maximized window: restore-then-set-rect — even when its
+	// stored NormalRect happens to equal the target, the state
+	// transition comes first and the target is applied as a
+	// screen rectangle afterwards, never written into the
+	// placement.
+	maxed := Placement{NormalRect: target, ShowCmd: ShowMaximized}
+	if got := planArrange(maxed, Rect{X: -1600, Y: 0, Width: 1600, Height: 900}, target); got != arrangeRestoreThenSetRect {
+		t.Fatalf("planArrange(maximized) = %v, want arrangeRestoreThenSetRect", got)
+	}
+	minned := Placement{NormalRect: target, ShowCmd: ShowMinimized}
+	if got := planArrange(minned, Rect{}, target); got != arrangeRestoreThenSetRect {
+		t.Fatalf("planArrange(minimized) = %v, want arrangeRestoreThenSetRect", got)
 	}
 }
