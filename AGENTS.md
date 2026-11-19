@@ -106,8 +106,8 @@ Chromium 正在使用某个 Profile 时，永不复制该活动 Profile。
 ## 7. GitHub 工作流
 
 - main：稳定的生产分支。
-- develop：集成分支。
 - feature/*：隔离的功能分支。
+- 当前仓库未启用 develop 分支；功能分支一律从最新 main 创建并通过 PR 合回 main。
 - 每个功能必须通过 Pull Request 交付。
 - 合并前运行自动化检查。
 - 未经批准不得强推或删除分支。
