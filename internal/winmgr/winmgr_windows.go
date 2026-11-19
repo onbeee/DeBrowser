@@ -20,17 +20,22 @@ var (
 	getPlcmt   = user32.NewProc("GetWindowPlacement")
 	setPlcmt   = user32.NewProc("SetWindowPlacement")
 	getForegnd = user32.NewProc("GetForegroundWindow")
+	setWinPos  = user32.NewProc("SetWindowPos")
 	getDpi     = shcore.NewProc("GetDpiForMonitor")
 )
 
 const (
-	// WPF_ASYNCWINDOWPLACEMENT: SetWindowPlacement posts the
-	// placement request instead of sending it, so it never
-	// activates the target window.
-	wpfAsyncWindowPlacement = 0x0004
-
 	monitorDefaultToNull = 0
 	mdtEffectiveDpi      = 0
+
+	// SetWindowPos flags for geometry-only changes:
+	// SWP_NOZORDER keeps the Z order, SWP_NOACTIVATE does not
+	// activate the window, and SWP_NOOWNERZORDER keeps the
+	// owner's Z order. Together they are the documented
+	// non-activating way to move/resize a window.
+	swpNoZOrder      = 0x0004
+	swpNoActivate    = 0x0010
+	swpNoOwnerZOrder = 0x0200
 )
 
 type winRect struct {
@@ -134,8 +139,8 @@ func WindowForPID(pid int) (uintptr, error) {
 }
 
 // ForegroundWindow returns the window currently in the
-// foreground, so callers and checks can prove a placement change
-// did not steal focus.
+// foreground, so real-machine checks can observe whether an
+// operation changed it.
 func ForegroundWindow() uintptr {
 	hwnd, _, _ := getForegnd.Call()
 	return hwnd
@@ -162,13 +167,22 @@ func GetPlacement(hwnd uintptr) (Placement, error) {
 }
 
 // SetPlacement applies a full placement through
-// SetWindowPlacement with WPF_ASYNCWINDOWPLACEMENT. Unlike the
-// previous ShowWindow(SW_RESTORE / SW_MINIMIZE / SW_MAXIMIZE)
-// sequence — whose commands can activate the target or another
-// window — an async placement never activates the window it
-// moves, maximizes, minimizes or restores, so arranging or
-// restoring a follower window never changes the user's
-// foreground window. An unset ShowCmd is treated as normal.
+// SetWindowPlacement: show state plus the restored, minimized
+// and maximized positions, round-tripping GetPlacement's
+// workspace coordinates unchanged.
+//
+// Honest limitation: SetWindowPlacement is used ONLY where a
+// show-state transition or a full-state restore is required.
+// No flag turns it into a non-activation guarantee — the old
+// WPF_ASYNCWINDOWPLACEMENT flag merely posts the request
+// asynchronously when the window lives on a different input
+// queue; it says nothing about activation, so it is no longer
+// set or described as one. A state transition applied here
+// (maximize / restore / minimize) is not guaranteed to leave
+// the foreground window unchanged in every situation; that is
+// a documented limitation, verified only by real-machine
+// checks. Geometry-only changes never come through here —
+// they use SetWindowRect.
 func SetPlacement(hwnd uintptr, p Placement) error {
 	showCmd := p.ShowCmd
 	if showCmd == 0 {
@@ -176,13 +190,31 @@ func SetPlacement(hwnd uintptr, p Placement) error {
 	}
 	wp := windowPlacement{
 		Length:         uint32(unsafe.Sizeof(windowPlacement{})),
-		Flags:          p.Flags | wpfAsyncWindowPlacement,
+		Flags:          p.Flags,
 		ShowCmd:        showCmd,
 		MinPosition:    winPoint{X: p.MinPosition.X, Y: p.MinPosition.Y},
 		MaxPosition:    winPoint{X: p.MaxPosition.X, Y: p.MaxPosition.Y},
 		NormalPosition: toWinRect(p.NormalRect),
 	}
 	if ok, _, err := setPlcmt.Call(hwnd, uintptr(unsafe.Pointer(&wp))); ok == 0 {
+		return fmt.Errorf("设置窗口位置失败：%v", err)
+	}
+	return nil
+}
+
+// SetWindowRect moves and resizes a window that stays in its
+// current (normal) show state, through SetWindowPos with
+// SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER: by the
+// Windows API contract the window is not activated, its Z
+// order does not change, and the user's foreground window is
+// not changed. This is the geometry-only path used by
+// arranging, restoring geometry and window mirroring; it
+// cannot change a window's show state.
+func SetWindowRect(hwnd uintptr, r Rect) error {
+	flags := uintptr(swpNoZOrder | swpNoActivate | swpNoOwnerZOrder)
+	if ok, _, err := setWinPos.Call(hwnd, 0,
+		uintptr(uint32(r.X)), uintptr(uint32(r.Y)),
+		uintptr(uint32(r.Width)), uintptr(uint32(r.Height)), flags); ok == 0 {
 		return fmt.Errorf("设置窗口位置失败：%v", err)
 	}
 	return nil

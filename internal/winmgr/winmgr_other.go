@@ -18,6 +18,9 @@ func ForegroundWindow() uintptr { return 0 }
 // GetPlacement reads a window's full placement.
 func GetPlacement(hwnd uintptr) (Placement, error) { return Placement{}, ErrUnsupported }
 
-// SetPlacement applies a full placement without activating the
-// window.
+// SetPlacement applies a full placement (show state included).
 func SetPlacement(hwnd uintptr, p Placement) error { return ErrUnsupported }
+
+// SetWindowRect applies a geometry-only move/resize through
+// the non-activating SetWindowPos path.
+func SetWindowRect(hwnd uintptr, r Rect) error { return ErrUnsupported }

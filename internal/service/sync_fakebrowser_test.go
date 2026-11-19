@@ -42,6 +42,12 @@ type fakeChromium struct {
 	failAttach   map[string]bool
 	attachCounts map[string]int
 	lastCreated  string
+
+	// Creation scripting for the duplicate-creation tests:
+	// createDelay slows every Target.createTarget answer and
+	// failCreate makes creation fail outright.
+	createDelay time.Duration
+	failCreate  bool
 }
 
 type fakePage struct {
@@ -209,6 +215,12 @@ func (f *fakeChromium) answer(msg fakeWire) (json.RawMessage, string) {
 		}})
 		return b, ""
 	case "Target.createTarget":
+		if f.failCreate {
+			return nil, "fake create failure"
+		}
+		if f.createDelay > 0 {
+			time.Sleep(f.createDelay)
+		}
 		f.seq++
 		id := fmt.Sprintf("created-%d", f.seq)
 		url, _ := params["url"].(string)
@@ -222,6 +234,29 @@ func (f *fakeChromium) answer(msg fakeWire) (json.RawMessage, string) {
 		return json.RawMessage(`{"success": true}`), ""
 	}
 	return json.RawMessage(`{}`), ""
+}
+
+// setCreateDelay slows every subsequent Target.createTarget
+// answer, widening the window in which duplicate creation
+// triggers can race.
+func (f *fakeChromium) setCreateDelay(d time.Duration) {
+	f.mu.Lock()
+	f.createDelay = d
+	f.mu.Unlock()
+}
+
+// setFailCreate makes Target.createTarget fail (or succeed
+// again) on this fake browser.
+func (f *fakeChromium) setFailCreate(fail bool) {
+	f.mu.Lock()
+	f.failCreate = fail
+	f.mu.Unlock()
+}
+
+// createTargetCount reports how many Target.createTarget
+// commands this browser received — the duplicate-creation proof.
+func (f *fakeChromium) createTargetCount() int {
+	return len(f.Commands("Target.createTarget"))
 }
 
 // setAttachDelay slows every subsequent attach answer.

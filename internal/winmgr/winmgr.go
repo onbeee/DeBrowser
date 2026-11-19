@@ -1,11 +1,24 @@
 // Package winmgr is the small native window-geometry helper used
 // by Stage 10 synchronization: enumerate monitor work areas, find
 // an instance's top-level window by process ID, read and apply
-// full window placements, and compute grid arrangements. Every
-// placement change is made without activating the target window —
-// a follower window is never brought to the foreground, the
-// user's foreground window is never changed, and the user's real
-// mouse is never moved.
+// window placements, and compute grid arrangements.
+//
+// Non-activation is handled honestly, in two tiers:
+//
+//   - Geometry-only changes (move / resize of a window that
+//     stays in the normal show state) go through SetWindowPos
+//     with SWP_NOACTIVATE | SWP_NOZORDER, which by the Windows
+//     API contract does not activate the window and does not
+//     change the Z order: the user's foreground window is not
+//     changed by these operations.
+//   - Show-state changes (maximize / restore / minimize and
+//     full placement restores that include them) have no
+//     Windows API that promises the foreground window can never
+//     change in every situation. They are applied through
+//     SetWindowPlacement and are a documented limitation, NOT
+//     an absolute non-activation guarantee.
+//
+// The user's real mouse is never moved by any operation here.
 package winmgr
 
 import "errors"
@@ -73,8 +86,20 @@ func PlacementsEqual(a, b Placement) bool {
 // MirrorPlacement applies the master's placement to a follower
 // window, with the mirroring boundary: minimizing is never
 // mirrored (a follower the user did not minimize must not be
-// hidden by sync). It reports whether a change was applied. The
-// apply itself never activates the follower window.
+// hidden by sync). It reports whether a change was applied.
+//
+// The apply path is chosen by what actually changes:
+//   - Same show state, normal: geometry only — SetWindowRect
+//     (SetWindowPos with SWP_NOACTIVATE), which does not
+//     activate the follower or change the foreground window.
+//   - Same show state, non-normal (e.g. both maximized): only
+//     the stored normal rectangle can differ; it is updated
+//     through SetPlacement with the show command unchanged, so
+//     no state transition is requested.
+//   - Different show state (maximize / restore): a state
+//     transition, applied through SetPlacement. No absolute
+//     foreground guarantee is claimed for this case — it is the
+//     documented limitation described in the package comment.
 func MirrorPlacement(hwnd uintptr, master Placement) (bool, error) {
 	if master.ShowCmd == ShowMinimized {
 		return false, nil
@@ -86,10 +111,42 @@ func MirrorPlacement(hwnd uintptr, master Placement) (bool, error) {
 	if PlacementsEqual(current, master) {
 		return false, nil
 	}
+	if current.ShowCmd == master.ShowCmd && master.ShowCmd == ShowNormal {
+		if err := SetWindowRect(hwnd, master.NormalRect); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	if err := SetPlacement(hwnd, master); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// PlaceWindow moves a window to a rectangle in the normal show
+// state — the arrange operation. A window already in the normal
+// state is moved through the geometry-only SetWindowRect path
+// (SetWindowPos with SWP_NOACTIVATE: no activation, no Z-order
+// change, foreground untouched). A maximized or minimized
+// window must first change show state back to normal; that
+// transition is applied through SetPlacement and carries the
+// documented limitation — no absolute foreground guarantee is
+// claimed for it.
+func PlaceWindow(hwnd uintptr, rect Rect) error {
+	current, err := GetPlacement(hwnd)
+	if err != nil {
+		return err
+	}
+	if current.ShowCmd == ShowNormal {
+		if current.NormalRect == rect {
+			return nil
+		}
+		return SetWindowRect(hwnd, rect)
+	}
+	placement := current
+	placement.NormalRect = rect
+	placement.ShowCmd = ShowNormal
+	return SetPlacement(hwnd, placement)
 }
 
 // GridRects divides a work area into n near-equal tiles in

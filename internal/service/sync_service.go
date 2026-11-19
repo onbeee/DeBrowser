@@ -166,6 +166,17 @@ type syncSession struct {
 	followers map[string]*followerWorker
 	order     []string
 	tornDown  atomic.Bool
+
+	// Follower page creation single-flight: for one master
+	// target, each follower creates AT MOST ONE counterpart page
+	// per session, no matter which path asks first — the
+	// TargetCreated callback, a visibility-driven refresh, or a
+	// resume re-point. creating holds the in-flight creations;
+	// an existing mapping, an in-flight creation and a completed
+	// creation are three distinct states, and a failed creation
+	// removes its entry so a later trigger can retry cleanly.
+	createMu sync.Mutex
+	creating map[targetCreationKey]*targetCreation
 	// live is set once session setup (master + every follower's
 	// initial state) has completed. Follower visibility callbacks
 	// may fire during setup; they must not run recovery logic
@@ -289,6 +300,7 @@ func (s *SyncService) startSync(masterID string, followerIDs []string) error {
 		order:         append([]string(nil), followerIDs...),
 		followerHWNDs: make(map[string]uintptr),
 		mirrorStop:    make(chan struct{}),
+		creating:      make(map[targetCreationKey]*targetCreation),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -496,6 +508,13 @@ func (sess *syncSession) refreshMasterActive() {
 // (the documented no-guessing behaviour), and the mapping is
 // established only after the new page is fully attached and
 // ready — never from the createTarget result alone.
+// pointFollower points one follower at the master's active
+// target: an existing mapping is activated; an unmapped target
+// gets a NEW follower page created from the master's current URL
+// (the documented no-guessing behaviour), through the shared
+// single-flight creation in ensureFollowerTarget, and the
+// mapping is established only after the new page is fully
+// attached and ready — never from the createTarget result alone.
 func (sess *syncSession) pointFollower(worker *followerWorker, targetID, url string) {
 	sess.mu.Lock()
 	masterW, masterH := sess.masterW, sess.masterH
@@ -508,23 +527,95 @@ func (sess *syncSession) pointFollower(worker *followerWorker, targetID, url str
 		worker.enqueueControl(syncAction{kind: actionActivate, target: ft})
 		return
 	}
+	ft, err := sess.ensureFollowerTarget(worker, targetID, url)
+	if err != nil {
+		return // the creation path already recorded the outcome on the follower
+	}
+	worker.setActiveTarget(ft)
+	worker.enqueueControl(syncAction{kind: actionActivate, target: ft})
+}
+
+// targetCreationKey identifies one in-flight follower page
+// creation: one master target on one follower instance.
+type targetCreationKey struct {
+	followerID   string
+	masterTarget string
+}
+
+// targetCreation is one in-flight (or just-completed) follower
+// page creation shared by every caller asking for the same
+// master target on the same follower. done is closed exactly
+// once by the creator; followerTarget and err are written before
+// done closes, so waiters read the shared result safely.
+type targetCreation struct {
+	done           chan struct{}
+	followerTarget string
+	err            error
+}
+
+// ensureFollowerTarget returns the follower page mapped to one
+// master target, creating it if necessary. It is the SINGLE
+// creation path for follower pages: the TargetCreated callback,
+// visibility-driven refreshes and resume re-pointing all funnel
+// through here, so concurrent or repeated triggers for the same
+// master target can never issue a second Target.createTarget on
+// the same follower — late callers join the in-flight creation
+// and share its result. The mapping is established only after
+// the new page reports ready (WaitReady). A failed creation
+// leaves NO mapping and removes its in-flight entry, recording
+// the failure on the follower (creation failure: unconfirmed;
+// readiness failure: failed), so a later trigger may retry.
+func (sess *syncSession) ensureFollowerTarget(worker *followerWorker, masterTarget, url string) (string, error) {
+	if ft, ok := worker.mappedTarget(masterTarget); ok {
+		return ft, nil
+	}
+	key := targetCreationKey{followerID: worker.instanceID, masterTarget: masterTarget}
+	sess.createMu.Lock()
+	if sess.creating == nil {
+		sess.creating = make(map[targetCreationKey]*targetCreation)
+	}
+	if call, inFlight := sess.creating[key]; inFlight {
+		sess.createMu.Unlock()
+		<-call.done
+		return call.followerTarget, call.err
+	}
+	call := &targetCreation{done: make(chan struct{})}
+	sess.creating[key] = call
+	sess.createMu.Unlock()
+
 	if url == "" {
 		url = "about:blank"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	ft, err := worker.createTarget(ctx, url)
-	if err != nil {
+	switch {
+	case err != nil:
 		worker.setUnconfirmed("无法为跟随实例创建对应页面：" + err.Error())
-		return
-	}
-	if err := worker.tracker.WaitReady(ctx, ft); err != nil {
+	case worker.tracker == nil:
+		err = fmt.Errorf("跟随实例页面跟踪未就绪")
 		worker.markFailed("跟随页面接入失败：" + err.Error())
-		return
+	default:
+		// Wait until the new page's session and tracking are
+		// fully attached before the mapping becomes usable;
+		// the createTarget result alone is not readiness.
+		if werr := worker.tracker.WaitReady(ctx, ft); werr != nil {
+			err = werr
+			worker.markFailed("跟随页面接入失败：" + werr.Error())
+		} else {
+			worker.mapTarget(masterTarget, ft)
+			call.followerTarget = ft
+		}
 	}
-	worker.mapTarget(targetID, ft)
-	worker.setActiveTarget(ft)
-	worker.enqueueControl(syncAction{kind: actionActivate, target: ft})
+	call.err = err
+	sess.createMu.Lock()
+	delete(sess.creating, key)
+	sess.createMu.Unlock()
+	close(call.done)
+	if err != nil {
+		return "", err
+	}
+	return call.followerTarget, nil
 }
 
 // repointFollowers re-points every follower at the master's
@@ -600,26 +691,16 @@ func (sess *syncSession) onMasterTargetCreated(targetID string) {
 		if view, ok := tracker.Pages()[targetID]; ok && view.URL != "" {
 			url = view.URL
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 		for _, id := range sess.order {
 			worker := sess.followerByID(id)
 			if worker == nil {
 				continue
 			}
-			ft, err := worker.createTarget(ctx, url)
-			if err != nil {
-				worker.setUnconfirmed("无法为跟随实例创建对应页面：" + err.Error())
-				continue
-			}
-			// Wait until the new page's session and tracking are
-			// fully attached before the mapping becomes usable;
-			// the createTarget result alone is not readiness.
-			if err := worker.tracker.WaitReady(ctx, ft); err != nil {
-				worker.markFailed("跟随页面接入失败：" + err.Error())
-				continue
-			}
-			worker.mapTarget(targetID, ft)
+			// The shared single-flight creation: if a
+			// visibility-driven refresh is already creating (or
+			// has created) this target's follower page, this
+			// joins it instead of creating a duplicate.
+			_, _ = sess.ensureFollowerTarget(worker, targetID, url)
 		}
 	}()
 }
@@ -952,7 +1033,11 @@ func (s *SyncService) windowForInstance(instanceID string) (uintptr, error) {
 
 // runWindowMirror polls the master window's placement and
 // mirrors changes (move, resize, maximize, restore) to every
-// follower window, without ever activating a follower window.
+// follower window. Geometry-only changes go through the
+// non-activating SetWindowPos path; a show-state change
+// (maximize/restore) goes through full placement application,
+// for which no absolute foreground guarantee is claimed (see
+// winmgr.MirrorPlacement).
 // Minimizing the master is NOT mirrored (documented boundary:
 // a minimized follower could not be restored by the user
 // through sync, and hiding follower windows unprompted would be
@@ -1095,10 +1180,14 @@ func (s *SyncService) arrangeWindows(monitorIndex int) error {
 	s.mu.Unlock()
 	var firstErr error
 	for i, tg := range targets {
-		if serr := winmgr.SetPlacement(tg.hwnd, winmgr.Placement{
-			NormalRect: rects[i],
-			ShowCmd:    winmgr.ShowNormal,
-		}); serr != nil && firstErr == nil {
+		// Arranging is a geometry operation: PlaceWindow moves
+		// and resizes a normal-state window through the
+		// non-activating SetWindowPos path; only a window that
+		// first needs a show-state change (maximized/minimized
+		// back to normal) goes through full placement restore,
+		// whose foreground behaviour is a documented limitation
+		// rather than an absolute guarantee.
+		if serr := winmgr.PlaceWindow(tg.hwnd, rects[i]); serr != nil && firstErr == nil {
 			firstErr = serr
 		}
 	}
