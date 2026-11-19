@@ -46,7 +46,15 @@ type winPoint struct {
 	X, Y int32
 }
 
-// windowPlacement mirrors the Win32 WINDOWPLACEMENT structure.
+// windowPlacement mirrors the Win32 WINDOWPLACEMENT structure
+// EXACTLY as defined for Windows: length, flags and show command
+// (4 bytes each), the minimized and maximized points (8 bytes
+// each) and the normal-position rectangle (16 bytes) — 44 bytes
+// in total, no more, no less. (The rcDevice field some headers
+// show belongs to a different platform's variant; on Windows it
+// does not exist, and carrying it here once made this struct 60
+// bytes, which made GetWindowPlacement/SetWindowPlacement
+// reject the length outright.)
 type windowPlacement struct {
 	Length         uint32
 	Flags          uint32
@@ -54,8 +62,12 @@ type windowPlacement struct {
 	MinPosition    winPoint
 	MaxPosition    winPoint
 	NormalPosition winRect
-	Device         winRect // Vista+: part of the structure
 }
+
+// Compile-time size guard: this assignment only compiles while
+// windowPlacement is exactly 44 bytes, so a future field cannot
+// silently change the size the APIs validate.
+var _ [unsafe.Sizeof(windowPlacement{})]byte = [44]byte{}
 
 func toWinRect(r Rect) winRect {
 	return winRect{Left: r.X, Top: r.Y, Right: r.X + r.Width, Bottom: r.Y + r.Height}
