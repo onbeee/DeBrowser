@@ -46,6 +46,8 @@
 
 索引：`proxy_id`、`status`。
 
+实例与实例文件是一对一关系（见上表 `user_data_dir`）。删除实例的默认行为是只删除本表中的记录、**保留**实例文件目录及其全部浏览器数据；只有用户在删除时明确选择「删除实例及实例文件」，才删除对应目录（删除的保护规则见 [ARCHITECTURE.md](ARCHITECTURE.md) 的「安全与数据保护」）。
+
 ### `bookmark_nodes`
 
 DeBrowser 书签资源库（migration 0014）：文件夹与书签组成的树。列：`id`、`kind`（CHECK：`bookmark` / `folder`）、`name`、`url`（文件夹为空串）、`parent_id`（外键 → `bookmark_nodes(id)`；NULL 表示根级）、`sort_order`、时间戳。`(parent_id, sort_order, created_at)` 索引供逐层有序读取。文件夹循环引用由服务层校验阻止（不得移入自身或其后代）；删除文件夹由服务层在事务内自底向上删除整个子树，外键保证不留孤儿。

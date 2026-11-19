@@ -6,9 +6,11 @@ DeBrowser 面向 **Windows 11 x64**，设计目标是稳定、简单、可靠、
 
 ## 当前状态
 
-核心功能已经交付：浏览器手动登记、浏览器实例管理与真实运行均可正常使用。Windows 11 已完成基本实机验收，用户未报告问题。
+核心功能已经交付：浏览器手动登记、浏览器实例管理与真实运行、书签管理均可正常使用。Windows 11 已完成基本实机验收，用户未报告问题。
 
-书签管理已交付（Stage 9C 书签部分）：DeBrowser 书签资源库（文件夹树）与实例真实书签相互独立；实例书签通过其 Profile 的 Chromium 原生书签文件管理，仅限已确认停止的实例，支持分发同步与跨实例批量编辑、删除。尚未开放：每实例 CDP 接入（Stage 9C 后续部分）、代理配置（Stage 6C，待开发）、多开同步、程序内更新、完整备份与恢复。各阶段状态见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+书签管理已交付（Stage 9C 书签部分，PR #16、#18 已合并）：DeBrowser 书签资源库（文件夹树）与实例真实书签相互独立；实例书签通过其 Profile 的 Chromium 原生书签文件管理，仅限已确认停止的实例，支持分发同步与跨实例批量编辑、删除。
+
+多开同步（Stage 10）的实现已经提交（PR #20），目前处于代码审查与 Windows 11 实机验证阶段，**尚未合并、尚未正式交付**，本页不将其列为已实现功能。尚未开放：代理配置（Stage 6C，待开发）、程序内更新、完整备份与恢复。各阶段状态见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 功能概览
 
@@ -37,25 +39,27 @@ DeBrowser 面向 **Windows 11 x64**，设计目标是稳定、简单、可靠、
 | 构建工具 | Vite | 8.3.7 |
 | 样式 | Tailwind CSS | 4.3.5 |
 | 状态管理 | Zustand | 5.1.0 |
+| 图标 | lucide-react | 0.469.0 |
 | 数据库 | SQLite（modernc.org/sqlite） | 1.62.0 |
 
-依赖版本全部锁定（`go.mod`/`go.sum`、`package.json`/`package-lock.json`）。参与开发前请先阅读 [AGENTS.md](AGENTS.md)，它定义了本项目的工程规则。
+依赖版本全部锁定（`go.mod`/`go.sum`、`package.json`/`package-lock.json`）。参与贡献请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)；[AGENTS.md](AGENTS.md) 是面向 AI Agent 与自动化执行者的工程约束文件。
 
-## 快速开始
+## 下载与使用
 
-前置条件（Windows 11 x64）：Go 1.26+、Node.js 22+（含 npm）、Git，以及 WebView2 运行时（Windows 11 已预装）。
+项目尚未发布正式版本，目前没有可供下载的安装包或便携包；现阶段只能从源码构建运行，构建与开发流程见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。正式发布渠道确定后，本节会更新为真实的下载与启动说明，不在此预先承诺。
 
-```powershell
-go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
-git clone https://github.com/onbeee/DeBrowser.git
-cd DeBrowser
-wails3 dev          # 开发模式：前端热重载
-```
+DeBrowser 按便携方式设计使用：应用文件夹放在哪里，程序与全部数据就都在哪里（见下文「数据与隐私」的目录结构）。运行 `debrowser.exe` 即直接启动，没有欢迎页或首次启动选择页；要管理哪个浏览器，由用户在「浏览器内核」页面手动登记本机已安装的程序。
 
-生产构建与完整开发流程见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+## 系统要求
+
+- Windows 11 x64。
+- WebView2 运行时（Windows 11 已预装）。
+- 至少一个由用户自行安装的浏览器程序（DeBrowser 不自带浏览器，只登记和使用本机已有程序）。
 
 ## 文档导航
 
+- [CONTRIBUTING.md](CONTRIBUTING.md)——如何参与贡献
+- [CHANGELOG.md](CHANGELOG.md)——版本变化记录（尚无正式版本）
 - [docs/ROADMAP.md](docs/ROADMAP.md)——阶段进度与后续计划
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)——系统架构与运行机制
 - [docs/DATABASE.md](docs/DATABASE.md)——数据库结构、迁移与数据保护
