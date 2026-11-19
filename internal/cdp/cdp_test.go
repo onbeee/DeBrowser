@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -229,5 +230,131 @@ func TestDiscoverRejectsWrongPortEndpoint(t *testing.T) {
 	}
 	if _, err := Discover(context.Background(), p); err == nil {
 		t.Fatal("endpoint on a different port accepted")
+	}
+}
+
+// blastCDP is a fake server that, once connected, emits a
+// scripted burst of events (or an unbounded stream) so tests
+// can assert dispatch order and overflow behaviour.
+func blastServer(t *testing.T, script func(conn *websocket.Conn, ctx context.Context)) *fakeCDP {
+	t.Helper()
+	f := &fakeCDP{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/json/version", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"webSocketDebuggerUrl": "ws://" + f.srv.Listener.Addr().String() + "/devtools/browser/blast",
+		})
+	})
+	mux.HandleFunc("/devtools/browser/blast", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		go script(conn, r.Context())
+		for {
+			var msg struct {
+				ID int64 `json:"id"`
+			}
+			if err := wsjson.Read(r.Context(), conn, &msg); err != nil {
+				return
+			}
+			_ = wsjson.Write(r.Context(), conn, map[string]any{"id": msg.ID, "result": map[string]any{}})
+		}
+	})
+	f.srv = httptest.NewServer(mux)
+	_, portStr, _ := net.SplitHostPort(f.srv.Listener.Addr().String())
+	p := 0
+	for _, ch := range portStr {
+		p = p*10 + int(ch-'0')
+	}
+	f.port = p
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func TestEventsAreDispatchedInReceiveOrder(t *testing.T) {
+	const n = 300
+	f := blastServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		time.Sleep(50 * time.Millisecond) // let the client register its handler
+		for i := 0; i < n; i++ {
+			kind := "keydown"
+			if i%2 == 1 {
+				kind = "keyup"
+			}
+			_ = wsjson.Write(ctx, conn, map[string]any{
+				"method": "Seq.event",
+				"params": map[string]any{"seq": i, "kind": kind},
+			})
+		}
+	})
+	ctx := context.Background()
+	wsURL, err := Discover(ctx, f.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(ctx, wsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var mu sync.Mutex
+	seen := make([]int, 0, n)
+	done := make(chan struct{})
+	client.On("Seq.event", func(ev Event) {
+		var p struct {
+			Seq int `json:"seq"`
+		}
+		_ = json.Unmarshal(ev.Params, &p)
+		mu.Lock()
+		seen = append(seen, p.Seq)
+		if len(seen) == n {
+			close(done)
+		}
+		mu.Unlock()
+	})
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("only %d/%d events delivered", len(seen), n)
+	}
+	for i, v := range seen {
+		if v != i {
+			t.Fatalf("event %d arrived as seq %d: order not preserved", i, v)
+		}
+	}
+}
+
+func TestEventQueueOverflowClosesConnection(t *testing.T) {
+	f := blastServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		time.Sleep(50 * time.Millisecond)
+		for i := 0; i < eventQueueSize*3; i++ {
+			if err := wsjson.Write(ctx, conn, map[string]any{
+				"method": "Flood.event", "params": map[string]any{"seq": i},
+			}); err != nil {
+				return
+			}
+		}
+	})
+	ctx := context.Background()
+	wsURL, err := Discover(ctx, f.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(ctx, wsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	release := make(chan struct{})
+	defer close(release)
+	client.On("Flood.event", func(Event) { <-release }) // wedged handler
+	select {
+	case <-client.Done():
+		// Overflow shut the connection down instead of
+		// dropping events silently or spawning goroutines.
+	case <-time.After(15 * time.Second):
+		t.Fatal("overflow did not close the connection")
 	}
 }

@@ -50,16 +50,41 @@ func (s *SyncService) resolveWindow(instanceID string) (uintptr, SyncRuntimeInfo
 	if !ok || !info.Running || !info.Verified {
 		return 0, info, fmt.Errorf("实例未运行或运行状态无法确认")
 	}
-	wins, err := winmgr.ProcessWindows(info.PID)
+	wins, err := winmgr.ListProcessWindows(info.PID)
 	if err != nil {
 		return 0, info, err
 	}
-	for _, hwnd := range wins {
-		if winmgr.WindowOwnerPID(hwnd) == info.PID {
-			return hwnd, info, nil
-		}
+	// The main window must be UNIQUELY identifiable; the
+	// first window in enumeration order is never guessed.
+	hwnd, err := winmgr.PickMainWindow(wins)
+	if err != nil {
+		return 0, info, err
 	}
-	return 0, info, fmt.Errorf("未找到实例的浏览器窗口")
+	if winmgr.WindowOwnerPID(hwnd) != info.PID {
+		return 0, info, fmt.Errorf("窗口身份复核失败")
+	}
+	return hwnd, info, nil
+}
+
+// defaultVerifySavedWindow performs the restore-time identity
+// re-check: the instance must still be running with the SAME
+// pid and process creation time as when the placement was
+// saved. (The caller additionally re-checks the HWND's
+// current owner, catching handle recycling.)
+func (s *SyncService) defaultVerifySavedWindow(hwnd uintptr, rec savedWindow) bool {
+	if s.instances == nil || rec.InstanceID == "" || rec.PID <= 0 {
+		return false
+	}
+	info, ok := s.instances.SyncRuntimeInfo(rec.InstanceID)
+	if !ok || !info.Running || !info.Verified {
+		return false
+	}
+	if info.PID != rec.PID || info.ProcessCreateAt != rec.CreatedAt {
+		return false
+	}
+	// The handle itself must still belong to that process —
+	// this is what catches HWND recycling.
+	return winmgr.WindowOwnerPID(hwnd) == rec.PID
 }
 
 // ArrangeSyncWindows tiles the given instances' windows on
@@ -99,7 +124,7 @@ func (s *SyncService) arrange(instanceIDs []string, monitorID int) error {
 	}
 	wins := make([]winRef, 0, len(instanceIDs))
 	for _, id := range instanceIDs {
-		hwnd, _, err := s.resolveWindow(id)
+		hwnd, info, err := s.resolveWindow(id)
 		if err != nil {
 			return fmt.Errorf("实例 %s：%w", id, err)
 		}
@@ -113,7 +138,10 @@ func (s *SyncService) arrange(instanceIDs []string, monitorID int) error {
 		}
 		s.savedMu.Lock()
 		if _, kept := s.savedPlacements[hwnd]; !kept {
-			s.savedPlacements[hwnd] = pl
+			s.savedPlacements[hwnd] = savedWindow{
+				InstanceID: id, PID: info.PID,
+				CreatedAt: info.ProcessCreateAt, Placement: pl,
+			}
 		}
 		s.savedMu.Unlock()
 		wins = append(wins, winRef{hwnd: hwnd, current: pl, screen: scr})
@@ -148,20 +176,40 @@ func (s *SyncService) RestoreSyncWindows(operationID string) error {
 
 func (s *SyncService) restore() error {
 	s.savedMu.Lock()
-	snapshot := make(map[uintptr]winmgr.Placement, len(s.savedPlacements))
-	for hwnd, pl := range s.savedPlacements {
-		snapshot[hwnd] = pl
+	snapshot := make(map[uintptr]savedWindow, len(s.savedPlacements))
+	for hwnd, rec := range s.savedPlacements {
+		snapshot[hwnd] = rec
 	}
 	s.savedMu.Unlock()
 	if len(snapshot) == 0 {
 		return fmt.Errorf("没有可恢复的窗口排列")
 	}
 	var firstErr error
-	for hwnd, pl := range snapshot {
-		if err := s.setWindowPlacement(hwnd, pl); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+	note := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	for hwnd, rec := range snapshot {
+		// Identity first: the instance must still be the
+		// same process AND the handle must still belong to
+		// it. A record whose identity died can never succeed
+		// on retry, so it is dropped and reported — never
+		// silently treated as restored, and the (possibly
+		// recycled) window is never touched.
+		verify := s.verifySavedWindow
+		if verify == nil {
+			verify = s.defaultVerifySavedWindow
+		}
+		if !verify(hwnd, rec) {
+			s.savedMu.Lock()
+			delete(s.savedPlacements, hwnd)
+			s.savedMu.Unlock()
+			note(fmt.Errorf("一个窗口的身份已失效，已跳过并清除其恢复记录"))
+			continue
+		}
+		if err := s.setWindowPlacement(hwnd, rec.Placement); err != nil {
+			note(err)
 			continue
 		}
 		s.savedMu.Lock()
@@ -190,7 +238,7 @@ func (s *SyncService) startMirror(sess *syncSession) {
 		return
 	}
 	sess.masterHWND = masterHWND
-	for id := range sess.followers {
+	for id := range sess.followersSnapshot() {
 		if hwnd, _, err := s.resolveWindow(id); err == nil && hwnd != 0 {
 			sess.followerHWNDs[id] = hwnd
 		}

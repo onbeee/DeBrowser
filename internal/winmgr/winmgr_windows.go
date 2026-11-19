@@ -22,6 +22,8 @@ var (
 	procEnumDisplayMonitors      = user32.NewProc("EnumDisplayMonitors")
 	procGetMonitorInfoW          = user32.NewProc("GetMonitorInfoW")
 	procGetDpiForWindow          = user32.NewProc("GetDpiForWindow")
+	procGetClassNameW            = user32.NewProc("GetClassNameW")
+	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
 )
 
 type winRect struct {
@@ -207,4 +209,43 @@ func DPIForWindow(hwnd uintptr) uint32 {
 		return 96
 	}
 	return uint32(dpi)
+}
+
+func listProcessWindows(pid int) ([]WindowInfo, error) {
+	if pid <= 0 {
+		return nil, fmt.Errorf("进程号无效")
+	}
+	var out []WindowInfo
+	cb := syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
+		var owner uint32
+		_, _, _ = procGetWindowThreadProcessID.Call(hwnd, uintptr(unsafe.Pointer(&owner)))
+		if int(owner) != pid {
+			return 1
+		}
+		visible, _, _ := procIsWindowVisible.Call(hwnd)
+		if visible == 0 {
+			return 1
+		}
+		info := WindowInfo{HWND: hwnd}
+		var classBuf [256]uint16
+		n, _, _ := procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&classBuf[0])), uintptr(len(classBuf)))
+		if n > 0 {
+			info.ClassName = syscall.UTF16ToString(classBuf[:n])
+		}
+		var titleBuf [512]uint16
+		n, _, _ = procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), uintptr(len(titleBuf)))
+		if n > 0 {
+			info.Title = syscall.UTF16ToString(titleBuf[:n])
+		}
+		if r, err := windowScreenRect(hwnd); err == nil {
+			info.Area = int64(r.Width) * int64(r.Height)
+		}
+		out = append(out, info)
+		return 1
+	})
+	ret, _, err := procEnumWindows.Call(cb, 0)
+	if ret == 0 {
+		return nil, fmt.Errorf("枚举窗口失败：%w", err)
+	}
+	return out, nil
 }

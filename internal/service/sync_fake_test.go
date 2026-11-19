@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,11 +23,51 @@ import (
 // workers use, counts Target.createTarget calls, and can
 // delay or fail creation on demand.
 type fakeBrowserCDP struct {
-	srv     *httptest.Server
-	port    int
-	creates atomic.Int64
-	delay   time.Duration
-	fail    bool
+	srv      *httptest.Server
+	port     int
+	creates  atomic.Int64
+	closes   atomic.Int64
+	detaches atomic.Int64
+	delay    time.Duration
+	fail     bool
+	// failEnable makes Page.enable fail (attach cleanup tests).
+	failEnable bool
+
+	callsMu sync.Mutex
+	calls   []recordedCall
+}
+
+// recordedCall is one input command the fake received.
+type recordedCall struct {
+	Method    string
+	SessionID string
+	Type      string // keyDown/keyUp/mousePressed/mouseReleased
+	Code      string
+	Button    string
+}
+
+func (f *fakeBrowserCDP) record(method, sessionID string, params json.RawMessage) {
+	var p struct {
+		Type   string `json:"type"`
+		Code   string `json:"code"`
+		Button string `json:"button"`
+	}
+	_ = json.Unmarshal(params, &p)
+	f.callsMu.Lock()
+	f.calls = append(f.calls, recordedCall{Method: method, SessionID: sessionID, Type: p.Type, Code: p.Code, Button: p.Button})
+	f.callsMu.Unlock()
+}
+
+func (f *fakeBrowserCDP) findCalls(method, sessionID, typ, code string) int {
+	f.callsMu.Lock()
+	defer f.callsMu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c.Method == method && c.SessionID == sessionID && c.Type == typ && (code == "" || c.Code == code) {
+			n++
+		}
+	}
+	return n
 }
 
 func newFakeBrowserCDP(t *testing.T) *fakeBrowserCDP {
@@ -58,6 +99,23 @@ func newFakeBrowserCDP(t *testing.T) *fakeBrowserCDP {
 				_ = wsjson.Write(r.Context(), conn, map[string]any{"id": msg.ID, "result": result})
 			}
 			switch msg.Method {
+			case "Input.dispatchKeyEvent", "Input.dispatchMouseEvent":
+				f.record(msg.Method, msg.SessionID, msg.Params)
+				reply(map[string]any{})
+			case "Target.closeTarget":
+				f.closes.Add(1)
+				reply(map[string]any{"success": true})
+			case "Target.detachFromTarget":
+				f.detaches.Add(1)
+				reply(map[string]any{})
+			case "Page.enable":
+				if f.failEnable {
+					_ = wsjson.Write(r.Context(), conn, map[string]any{
+						"id": msg.ID, "error": map[string]any{"code": -1, "message": "enable failed"},
+					})
+					continue
+				}
+				reply(map[string]any{})
 			case "Target.createTarget":
 				n := f.creates.Add(1)
 				if f.delay > 0 {

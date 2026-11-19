@@ -26,11 +26,19 @@
 //     work areas. The two are never mixed.
 package winmgr
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrUnsupported marks window operations on non-Windows
 // platforms.
 var ErrUnsupported = errors.New("当前平台不支持窗口管理")
+
+var (
+	errNoWindow        = fmt.Errorf("未找到实例的浏览器窗口")
+	errAmbiguousWindow = fmt.Errorf("实例存在多个候选窗口，无法唯一确认主窗口")
+)
 
 // Rect is a window rectangle. Which coordinate system it is in
 // depends on where it came from (see package rules).
@@ -179,4 +187,47 @@ func ArrangeRects(work Rect, n int) []Rect {
 		out = append(out, Rect{X: x0, Y: y0, Width: x1 - x0, Height: y1 - y0})
 	}
 	return out
+}
+
+// WindowInfo describes one visible top-level window of a
+// process, for identity disambiguation.
+type WindowInfo struct {
+	HWND      uintptr
+	ClassName string
+	Title     string
+	Area      int64
+}
+
+// ListProcessWindows returns the visible top-level windows
+// owned by the process, with class and title.
+func ListProcessWindows(pid int) ([]WindowInfo, error) { return listProcessWindows(pid) }
+
+// chromiumMainWindowClass is the window class Chromium uses
+// for its top-level browser windows.
+const chromiumMainWindowClass = "Chrome_WidgetWin_1"
+
+// PickMainWindow uniquely identifies a process's main browser
+// window: exactly one Chromium-class top-level window wins;
+// with no Chromium-class window, a single candidate wins;
+// anything else is ambiguous and returns an error — the first
+// window is never guessed.
+func PickMainWindow(wins []WindowInfo) (uintptr, error) {
+	var chromium []WindowInfo
+	for _, w := range wins {
+		if w.ClassName == chromiumMainWindowClass {
+			chromium = append(chromium, w)
+		}
+	}
+	switch {
+	case len(chromium) == 1:
+		return chromium[0].HWND, nil
+	case len(chromium) > 1:
+		return 0, errAmbiguousWindow
+	case len(wins) == 1:
+		return wins[0].HWND, nil
+	case len(wins) == 0:
+		return 0, errNoWindow
+	default:
+		return 0, errAmbiguousWindow
+	}
 }

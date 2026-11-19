@@ -154,6 +154,6 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 当前功能边界
 
-已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。正在验证（未合并，不属于 main 的已交付能力）：Stage 10 多开同步——重构实现位于分支 `feature/stage-10-sync-refactor`（实例运行层统一分配回环 CDP 端口、`internal/cdp` 客户端、页面事件捕获与 CDP 输入执行、`internal/capture` 钩子观察与 `internal/uia` 原生界面识别、`internal/winmgr` 原生窗口管理），其旧方案 PR #17、PR #19、PR #20 不是当前架构的一部分，本文档不按它们描述系统。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
+已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。正在验证（未合并，不属于 main 的已交付能力）：Stage 10 多开同步——重构实现位于分支 `feature/stage-10-sync-refactor`（实例运行层统一分配回环 CDP 端口、`internal/cdp` 客户端、页面事件捕获与 CDP 输入执行、`internal/capture` 页面观察脚本、`internal/winmgr` 原生窗口管理），其旧方案 PR #17、PR #19、PR #20 不是当前架构的一部分，本文档不按它们描述系统。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
 
 补充说明：`DiagnosticsService` 是数据管理页面的后端（应用版本、数据库状态与统一日志的查看，以及日志按类别导出），名字沿用自早期的诊断功能；早期的一键诊断导出已经移除，统一日志是唯一的记录系统（见「日志」），不存在第二套审计或诊断通道。

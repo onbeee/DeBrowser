@@ -10,8 +10,13 @@
 //     belong to the exact port the instance was assigned.
 //   - No call waits forever: every command carries the caller's
 //     context.
-//   - Event handlers never run on the read loop and never under
-//     the client lock, so a handler may itself issue commands.
+//   - Events are dispatched in strict receive order by ONE
+//     dispatcher goroutine per connection, from a bounded
+//     queue. If the queue overflows, the connection is closed
+//     rather than silently dropping a critical event: callers
+//     observe Done and apply their failure policy. Command
+//     responses are handled on the read loop itself, so a slow
+//     event handler can never stall command replies.
 //   - Raw protocol payloads are never logged by this package.
 package cdp
 
@@ -131,9 +136,16 @@ type Client struct {
 	handlersMu sync.RWMutex
 	handlers   map[string][]EventHandler
 
+	events   chan Event
 	done     chan struct{}
 	doneOnce sync.Once
 }
+
+// eventQueueSize bounds one connection's pending event queue.
+// At 60+ events per second of pointer traffic this is many
+// seconds of headroom; overflow closes the connection (see
+// the package comment) instead of dropping critical events.
+const eventQueueSize = 1024
 
 // Dial connects to a previously discovered WebSocket URL. The
 // URL is re-validated here so no caller can dial a remote
@@ -151,18 +163,23 @@ func Dial(ctx context.Context, wsURL string) (*Client, error) {
 		conn:     conn,
 		pending:  map[int64]*pendingCall{},
 		handlers: map[string][]EventHandler{},
+		events:   make(chan Event, eventQueueSize),
 		done:     make(chan struct{}),
 	}
 	go c.readLoop()
+	go c.dispatchLoop()
 	return c, nil
 }
 
 // Done is closed when the connection ends for any reason.
 func (c *Client) Done() <-chan struct{} { return c.done }
 
-// On registers a handler for one event method. Handlers run on
-// fresh goroutines; ordering between events is not guaranteed
-// at this layer (the sync engine serializes per target).
+// On registers a handler for one event method. Handlers run
+// sequentially on the connection's single dispatcher
+// goroutine, in receive order; a handler must therefore be
+// quick or hand its work off — while it runs, later events
+// wait, but command responses do not (they are read on the
+// separate read loop).
 func (c *Client) On(method string, h EventHandler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
@@ -189,12 +206,35 @@ func (c *Client) readLoop() {
 		if msg.Method == "" {
 			continue
 		}
-		c.handlersMu.RLock()
-		hs := append([]EventHandler(nil), c.handlers[msg.Method]...)
-		c.handlersMu.RUnlock()
 		ev := Event{Method: msg.Method, SessionID: msg.SessionID, Params: msg.Params}
-		for _, h := range hs {
-			go h(ev)
+		select {
+		case c.events <- ev:
+		default:
+			// The dispatcher is more than a full queue
+			// behind: continuing would mean either blocking
+			// command responses or dropping an event whose
+			// criticality this layer cannot judge. Close
+			// the connection; the owner applies its failure
+			// policy (fail the follower / end the session).
+			return
+		}
+	}
+}
+
+// dispatchLoop is the connection's single event dispatcher:
+// handlers run sequentially, in receive order.
+func (c *Client) dispatchLoop() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case ev := <-c.events:
+			c.handlersMu.RLock()
+			hs := append([]EventHandler(nil), c.handlers[ev.Method]...)
+			c.handlersMu.RUnlock()
+			for _, h := range hs {
+				h(ev)
+			}
 		}
 	}
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -29,15 +30,17 @@ func TestCompositionTwinDedup(t *testing.T) {
 
 	got := []PageEvent{}
 	for i := 0; i < 2; i++ {
-		got = append(got, <-w.queue)
+		ev, ok := w.queue.pop(2 * time.Second)
+		if !ok {
+			t.Fatalf("expected queued event %d", i)
+		}
+		got = append(got, ev)
 	}
 	if got[0].Kind != "compositionend" || got[1].Text != "!" {
 		t.Fatalf("queue = %+v, want compositionend + '!'", got)
 	}
-	select {
-	case extra := <-w.queue:
-		t.Fatalf("unexpected third event: %+v", extra)
-	default:
+	if _, ok := w.queue.pop(50 * time.Millisecond); ok {
+		t.Fatal("unexpected third event in queue")
 	}
 }
 
@@ -175,48 +178,89 @@ func TestTrackerAttachSingleFlight(t *testing.T) {
 }
 
 func TestRestoreWindowsRetainsOnlyFailedRecords(t *testing.T) {
-	s := &SyncService{savedPlacements: map[uintptr]winmgr.Placement{}}
-	pl := winmgr.Placement{ShowCmd: winmgr.ShowNormal, NormalRect: winmgr.Rect{X: 1, Y: 2, Width: 3, Height: 4}}
-	s.savedPlacements[101] = pl
-	s.savedPlacements[102] = pl
-	s.savedPlacements[103] = pl
+	svc := &SyncService{savedPlacements: map[uintptr]savedWindow{
+		101: {InstanceID: "a", PID: 111, CreatedAt: 1, Placement: winmgr.Placement{ShowCmd: 1}},
+		102: {InstanceID: "b", PID: 222, CreatedAt: 2, Placement: winmgr.Placement{ShowCmd: 1}},
+	}}
+	svc.verifySavedWindow = func(uintptr, savedWindow) bool { return true }
 	attempts := map[uintptr]int{}
-	s.setWindowPlacement = func(hwnd uintptr, p winmgr.Placement) error {
+	svc.setWindowPlacement = func(hwnd uintptr, p winmgr.Placement) error {
 		attempts[hwnd]++
-		if hwnd == 102 {
-			return errTestRestore
+		if hwnd == 102 && attempts[hwnd] == 1 {
+			return errors.New("恢复失败（模拟）")
 		}
 		return nil
 	}
-	if err := s.restore(); err == nil {
-		t.Fatal("restore with one failure should report it")
+	if err := svc.restore(); err == nil {
+		t.Fatal("partial failure must be reported")
 	}
-	if len(s.savedPlacements) != 1 {
-		t.Fatalf("records left = %d, want only the failed one", len(s.savedPlacements))
+	if len(svc.savedPlacements) != 1 {
+		t.Fatalf("records left = %d, want exactly the failed one", len(svc.savedPlacements))
 	}
-	if _, ok := s.savedPlacements[102]; !ok {
-		t.Fatal("the failed window's record must be retained verbatim")
+	if _, ok := svc.savedPlacements[102]; !ok {
+		t.Fatal("the FAILED window's record must be retained for retry")
 	}
-	for _, hwnd := range []uintptr{101, 102, 103} {
-		if attempts[hwnd] != 1 {
-			t.Fatalf("window %d attempted %d times, want 1", hwnd, attempts[hwnd])
-		}
-	}
-	// Retry succeeds and clears the record.
-	s.setWindowPlacement = func(hwnd uintptr, p winmgr.Placement) error { return nil }
-	if err := s.restore(); err != nil {
+	if err := svc.restore(); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if len(s.savedPlacements) != 0 {
-		t.Fatal("all records should be gone after a full restore")
-	}
-	if err := s.restore(); err == nil {
-		t.Fatal("restore with no records should say so")
+	if len(svc.savedPlacements) != 0 {
+		t.Fatal("all records must be gone after a full restore")
 	}
 }
 
-var errTestRestore = &testError{"restore failed"}
+func TestRestoreDropsRecordsWhoseIdentityDied(t *testing.T) {
+	svc := &SyncService{savedPlacements: map[uintptr]savedWindow{
+		201: {InstanceID: "gone", PID: 999, CreatedAt: 7, Placement: winmgr.Placement{ShowCmd: 1}},
+	}}
+	svc.verifySavedWindow = func(uintptr, savedWindow) bool { return false }
+	svc.setWindowPlacement = func(uintptr, winmgr.Placement) error {
+		t.Fatal("an unverifiable window must never be touched")
+		return nil
+	}
+	if err := svc.restore(); err == nil {
+		t.Fatal("a dead identity must be reported, not silently swallowed")
+	}
+	if len(svc.savedPlacements) != 0 {
+		t.Fatal("a dead-identity record must be dropped, not kept for a doomed retry")
+	}
+}
 
-type testError struct{ s string }
+func TestValidateSavedWindow(t *testing.T) {
+	instances, _ := testInstanceService(t)
+	svc := &SyncService{instances: instances}
+	if svc.defaultVerifySavedWindow(123, savedWindow{InstanceID: "ghost", PID: 10, CreatedAt: 5}) {
+		t.Fatal("unknown instance must not validate")
+	}
+	if svc.defaultVerifySavedWindow(123, savedWindow{}) {
+		t.Fatal("empty record must not validate")
+	}
+	bare := &SyncService{}
+	if bare.defaultVerifySavedWindow(123, savedWindow{InstanceID: "x", PID: 1}) {
+		t.Fatal("missing runtime must not validate")
+	}
+}
 
-func (e *testError) Error() string { return e.s }
+// State queries, failed starts and stops racing each other
+// must never touch the followers map unsynchronized (run
+// under -race in CI).
+func TestConcurrentStateQueriesDuringStartStop(t *testing.T) {
+	svc, _ := testInstanceService(t)
+	syncSvc := NewSyncService(svc)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_, _ = syncSvc.GetSyncState("")
+				_, _ = syncSvc.StopSync("")
+			}
+		}()
+	}
+	for j := 0; j < 20; j++ {
+		// Fails fast (instances are not running) while the
+		// readers above hammer the state path.
+		_, _ = syncSvc.StartSync("", "ghost-master", []string{"ghost-follower"})
+	}
+	wg.Wait()
+}

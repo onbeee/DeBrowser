@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/onbeee/DeBrowser/internal/capture"
 	"github.com/onbeee/DeBrowser/internal/cdp"
 	"github.com/onbeee/DeBrowser/internal/logging"
 	"github.com/onbeee/DeBrowser/internal/winmgr"
@@ -38,22 +37,40 @@ type SyncService struct {
 
 	// Window arrangement state, usable with or without a
 	// session. savedPlacements keeps each arranged window's
-	// original placement until it has been restored.
+	// original placement — together with the identity it was
+	// captured from — until it has been restored.
 	savedMu         sync.Mutex
-	savedPlacements map[uintptr]winmgr.Placement
+	savedPlacements map[uintptr]savedWindow
 
 	// setWindowPlacement is indirect for tests.
 	setWindowPlacement func(hwnd uintptr, p winmgr.Placement) error
+	// verifySavedWindow re-validates a saved window's identity
+	// before restore (indirect for tests).
+	verifySavedWindow func(hwnd uintptr, rec savedWindow) bool
+}
+
+// savedWindow is one window's pre-arrange placement PLUS the
+// identity it was captured from. A bare HWND is never trusted
+// at restore time: Windows may recycle handles, so restore
+// re-verifies the instance, PID, process creation time and
+// the window's current owner before touching anything.
+type savedWindow struct {
+	InstanceID string
+	PID        int
+	CreatedAt  int64
+	Placement  winmgr.Placement
 }
 
 // NewSyncService builds the service on top of the instance
 // runtime (the only source of process identity and CDP ports).
 func NewSyncService(instances *InstanceService) *SyncService {
-	return &SyncService{
+	s := &SyncService{
 		instances:          instances,
-		savedPlacements:    map[uintptr]winmgr.Placement{},
+		savedPlacements:    map[uintptr]savedWindow{},
 		setWindowPlacement: winmgr.SetPlacement,
 	}
+	s.verifySavedWindow = s.defaultVerifySavedWindow
+	return s
 }
 
 // Sync phases (the session state machine):
@@ -87,9 +104,6 @@ type SyncStateView struct {
 	MasterName   string                `json:"masterName"`
 	ManualStop   bool                  `json:"-"`
 	Participants []SyncParticipantView `json:"participants"`
-	// NativeUIObserved reports whether the native-UI hook
-	// observer is active this session (observation only).
-	NativeUIObserved bool `json:"nativeUiObserved"`
 	// MirrorActive reports whether master window mirroring is
 	// running this session.
 	MirrorActive bool `json:"mirrorActive"`
@@ -152,7 +166,6 @@ type syncSession struct {
 	systemPauses map[string]bool
 	tornDown     bool
 	failReason   string
-	nativeUISeen bool
 
 	masterClient *cdp.Client
 	masterTrack  *pageTracker
@@ -161,13 +174,6 @@ type syncSession struct {
 	followersMu sync.RWMutex
 	followers   map[string]*followerWorker
 	order       []string
-
-	hook   capture.HookObserver
-	hookOn bool
-
-	// lastPageAt stamps the most recent page-side event, for
-	// hook echo classification.
-	lastPageAt time.Time
 
 	// failedFollowers remembers start-time and runtime
 	// failure reasons by follower ID (nil worker entries in
@@ -232,8 +238,7 @@ func (sess *syncSession) setSystemPause(reason string, on bool) {
 	}
 	if now {
 		sess.forEachFollower(func(w *followerWorker) {
-			w.clearPending()
-			w.releaseInputs(context.Background())
+			w.requestPurgeAndRelease()
 		})
 	} else {
 		// Resuming from a system pause: re-confirm the active
@@ -242,17 +247,34 @@ func (sess *syncSession) setSystemPause(reason string, on bool) {
 	}
 }
 
-func (sess *syncSession) forEachFollower(fn func(*followerWorker)) {
+// followersSnapshot copies the follower map under its lock;
+// callers then work on the copy without holding the lock
+// during CDP or window operations.
+func (sess *syncSession) followersSnapshot() map[string]*followerWorker {
 	sess.followersMu.RLock()
-	ws := make([]*followerWorker, 0, len(sess.followers))
-	for _, w := range sess.followers {
-		if w != nil {
-			ws = append(ws, w)
-		}
+	defer sess.followersMu.RUnlock()
+	out := make(map[string]*followerWorker, len(sess.followers))
+	for id, w := range sess.followers {
+		out[id] = w
 	}
-	sess.followersMu.RUnlock()
-	for _, w := range ws {
-		fn(w)
+	return out
+}
+
+// addFollower is the only writer of the followers map.
+func (sess *syncSession) addFollower(id string, w *followerWorker) {
+	sess.followersMu.Lock()
+	defer sess.followersMu.Unlock()
+	if _, dup := sess.followers[id]; !dup && w != nil {
+		sess.order = append(sess.order, id)
+	}
+	sess.followers[id] = w
+}
+
+func (sess *syncSession) forEachFollower(fn func(*followerWorker)) {
+	for _, w := range sess.followersSnapshot() {
+		if w != nil {
+			fn(w)
+		}
 	}
 }
 
@@ -320,7 +342,7 @@ func (sess *syncSession) refreshActive() {
 		}
 		w.enqueue(PageEvent{Kind: "targetactivated", Source: active})
 	})
-	sess.refreshViewports(active)
+	go sess.refreshViewports(active)
 }
 
 func (sess *syncSession) refreshViewports(masterTarget string) {
@@ -471,26 +493,17 @@ func (s *SyncService) start(masterID string, followerIDs []string) (SyncStateVie
 	for _, fid := range followers {
 		w, reason := s.startFollower(sess, fid, active, activeURL)
 		if w == nil {
-			sess.followers[fid] = nil // remembered as failed below
+			sess.addFollower(fid, nil) // remembered as failed below
 			sess.noteFollowerFailed(fid, reason)
 			continue
 		}
-		sess.followers[fid] = w
-		sess.order = append(sess.order, fid)
+		sess.addFollower(fid, w)
 		started++
 	}
 	if started == 0 {
 		return fail(fmt.Errorf("没有跟随实例能够开始同步"))
 	}
 	sess.refreshViewports(active)
-
-	// Native-UI observation (best effort; its absence only
-	// limits native-UI awareness, never page sync).
-	sess.hook = capture.NewHookObserver()
-	if herr := sess.hook.Start(masterInfo.PID); herr == nil {
-		sess.hookOn = true
-		go s.hookLoop(sess)
-	}
 
 	// Identity watchdog + window mirroring.
 	go s.watchdog(sess)
@@ -540,11 +553,17 @@ func (s *SyncService) startFollower(sess *syncSession, followerID, activeMasterT
 		return nil, "创建对应标签失败"
 	}
 	w.pairWith(activeMasterTarget, ft)
-	// Follower dialogs are accepted automatically so a mirrored
-	// alert can never wedge this follower's dispatch (the
-	// master's own dialog pauses the session instead).
+	// A JavaScript dialog on a follower is never answered
+	// automatically (the user might cancel on the master
+	// while a follower accepted — the operations would
+	// diverge). It pauses the session like a master dialog;
+	// when it closes, target state is re-confirmed through
+	// the normal activation refresh before dispatch resumes.
 	client.On("Page.javascriptDialogOpening", func(ev cdp.Event) {
-		_, _ = client.Call(context.Background(), ev.SessionID, "Page.handleJavaScriptDialog", map[string]any{"accept": true})
+		sess.setSystemPause("dialog-follower", true)
+	})
+	client.On("Page.javascriptDialogClosed", func(ev cdp.Event) {
+		sess.setSystemPause("dialog-follower", false)
 	})
 	w.start(sess.ctx)
 	return w, ""
@@ -601,10 +620,7 @@ func (s *SyncService) PauseSync(operationID string) (SyncStateView, error) {
 	sess.manualPaused = true
 	sess.mu.Unlock()
 	sess.forEachFollower(func(w *followerWorker) {
-		if w != nil {
-			w.clearPending()
-			w.releaseInputs(context.Background())
-		}
+		w.requestPurgeAndRelease()
 	})
 	finishOp(op, nil)
 	return s.state(), nil
@@ -685,18 +701,10 @@ func (s *SyncService) teardown(sess *syncSession, reason string) {
 	sess.failReason = reason
 	sess.mu.Unlock()
 
-	if sess.hook != nil {
-		sess.hook.Stop()
-	}
-	// Release any pressed inputs before the connections go
-	// away, so no follower can be left with a stuck key.
+	// Each worker's close first releases its pressed inputs
+	// through its own serial dispatcher, then stops it.
 	sess.forEachFollower(func(w *followerWorker) {
-		w.releaseInputs(context.Background())
-	})
-	sess.forEachFollower(func(w *followerWorker) {
-		if w != nil {
-			w.close()
-		}
+		w.close()
 	})
 	if sess.masterClient != nil {
 		sess.masterClient.Close()
@@ -726,24 +734,24 @@ func (s *SyncService) state() SyncStateView {
 		return SyncStateView{Phase: "已停止", Participants: []SyncParticipantView{}}
 	}
 	view := SyncStateView{
-		Phase:            sess.phaseLabel(),
-		MasterID:         sess.masterID,
-		MasterName:       names[sess.masterID],
-		NativeUIObserved: sess.hookOn,
-		MirrorActive:     sess.masterHWND != 0,
-		Participants:     []SyncParticipantView{},
+		Phase:        sess.phaseLabel(),
+		MasterID:     sess.masterID,
+		MasterName:   names[sess.masterID],
+		MirrorActive: sess.masterHWND != 0,
+		Participants: []SyncParticipantView{},
 	}
 	view.Participants = append(view.Participants, SyncParticipantView{
 		InstanceID: sess.masterID, Name: names[sess.masterID], Role: "master", Status: "同步中",
 	})
-	ids := make([]string, 0, len(sess.followers))
-	for id := range sess.followers {
+	snapshot := sess.followersSnapshot()
+	ids := make([]string, 0, len(snapshot))
+	for id := range snapshot {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
 		p := SyncParticipantView{InstanceID: id, Name: names[id], Role: "follower", Status: "同步中"}
-		if w := sess.followers[id]; w == nil || w.isFailed() {
+		if w := snapshot[id]; w == nil || w.isFailed() {
 			p.Status = "失败"
 			p.Reason = sess.failedReason(id)
 		} else if sess.phaseLabel() == "已暂停" {
@@ -756,13 +764,14 @@ func (s *SyncService) state() SyncStateView {
 
 func (sess *syncSession) failedReason(id string) string {
 	sess.mu.Lock()
-	defer sess.mu.Unlock()
 	if sess.failedFollowers != nil {
 		if r := sess.failedFollowers[id]; r != "" {
+			sess.mu.Unlock()
 			return r
 		}
 	}
-	if w := sess.followers[id]; w != nil {
+	sess.mu.Unlock()
+	if w := sess.followerByID(id); w != nil {
 		return w.failureReason()
 	}
 	return "同步失败"

@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/onbeee/DeBrowser/internal/capture"
 	"github.com/onbeee/DeBrowser/internal/cdp"
-	"github.com/onbeee/DeBrowser/internal/winmgr"
 )
 
 // wireMaster installs the master connection's session-level
@@ -74,10 +72,10 @@ func (s *SyncService) wireMaster(sess *syncSession) {
 	// A JavaScript dialog on the master pauses dispatch until
 	// it closes, so no mirrored action can land behind it.
 	client.On("Page.javascriptDialogOpening", func(ev cdp.Event) {
-		sess.setSystemPause("dialog", true)
+		sess.setSystemPause("dialog-master", true)
 	})
 	client.On("Page.javascriptDialogClosed", func(ev cdp.Event) {
-		sess.setSystemPause("dialog", false)
+		sess.setSystemPause("dialog-master", false)
 	})
 
 	go func() {
@@ -171,42 +169,7 @@ func (s *SyncService) onMasterEvent(sess *syncSession, targetID string, ev PageE
 	if targetID != active {
 		return // only the confirmed active page is a source
 	}
-	sess.notePageActivity()
 	sess.dispatch(ev)
-}
-
-// notePageActivity stamps the last page-side activity so the
-// hook classifier can recognize hook copies of page events.
-func (sess *syncSession) notePageActivity() {
-	sess.mu.Lock()
-	sess.lastPageAt = time.Now()
-	sess.mu.Unlock()
-}
-
-// hookLoop consumes native-UI hook observations for the
-// master process. Page-zone echoes are discarded (the page
-// script owns them); native-UI observations are only NOTED —
-// their effects reach followers through CDP confirmations
-// (e.g. a committed navigation), never through simulated
-// input.
-func (s *SyncService) hookLoop(sess *syncSession) {
-	events := sess.hook.Events()
-	for {
-		select {
-		case <-sess.ctx.Done():
-			return
-		case ev := <-events:
-			sess.mu.Lock()
-			echo := time.Since(sess.lastPageAt) < 150*time.Millisecond
-			sess.mu.Unlock()
-			zone := capture.Classify(ev, sess.master.PID, winmgr.WindowOwnerPID, echo)
-			if zone == capture.ZoneNativeUI {
-				sess.mu.Lock()
-				sess.nativeUISeen = true
-				sess.mu.Unlock()
-			}
-		}
-	}
 }
 
 // watchdog re-verifies participant identities: the master

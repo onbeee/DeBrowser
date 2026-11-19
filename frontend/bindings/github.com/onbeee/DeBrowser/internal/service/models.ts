@@ -341,12 +341,6 @@ export interface SyncStateView {
     "participants": SyncParticipantView[] | null;
 
     /**
-     * NativeUIObserved reports whether the native-UI hook
-     * observer is active this session (observation only).
-     */
-    "nativeUiObserved": boolean;
-
-    /**
      * MirrorActive reports whether master window mirroring is
      * running this session.
      */

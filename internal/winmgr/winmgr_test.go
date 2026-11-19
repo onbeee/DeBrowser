@@ -87,3 +87,25 @@ func TestPlacementCarriesFullWindowState(t *testing.T) {
 		t.Fatal("different ShowCmd must compare unequal")
 	}
 }
+
+func TestPickMainWindow(t *testing.T) {
+	chrome := WindowInfo{HWND: 11, ClassName: "Chrome_WidgetWin_1"}
+	other := WindowInfo{HWND: 22, ClassName: "SomeOtherClass"}
+	chrome2 := WindowInfo{HWND: 33, ClassName: "Chrome_WidgetWin_1"}
+
+	if hwnd, err := PickMainWindow([]WindowInfo{other, chrome}); err != nil || hwnd != 11 {
+		t.Fatalf("one chromium window among others = %d, %v", hwnd, err)
+	}
+	if hwnd, err := PickMainWindow([]WindowInfo{other}); err != nil || hwnd != 22 {
+		t.Fatalf("single candidate = %d, %v", hwnd, err)
+	}
+	if _, err := PickMainWindow([]WindowInfo{chrome, chrome2}); err == nil {
+		t.Fatal("two chromium windows are ambiguous and must be rejected")
+	}
+	if _, err := PickMainWindow([]WindowInfo{other, {HWND: 44, ClassName: "Another"}}); err == nil {
+		t.Fatal("multiple non-chromium candidates are ambiguous")
+	}
+	if _, err := PickMainWindow(nil); err == nil {
+		t.Fatal("no windows must error")
+	}
+}

@@ -64,21 +64,20 @@ test("ordinary keys are reported with modifiers", () => {
   assert.equal(reported[0].key, "A");
 });
 
-test("dead keys and the paste shortcut are not reported as keys", () => {
+test("dead keys are not reported as keys", () => {
   const { reported, fire } = loadScript();
   fire("keydown", keyEv({ key: "Dead", code: "Quote" }));
-  fire("keydown", keyEv({ key: "v", code: "KeyV", ctrlKey: true }));
-  fire("keydown", keyEv({ key: "Insert", code: "Insert", shiftKey: true }));
   assert.equal(reported.length, 0);
 });
 
-test("paste arrives as a single insertfrompaste increment", () => {
+test("the script never reads any clipboard; Ctrl+V is an ordinary key event", () => {
+  assert.ok(!goSource.includes("clipboardData"), "script must not touch clipboardData");
+  assert.ok(!goSource.includes("insertfrompaste"), "no paste text events exist");
   const { reported, fire } = loadScript();
-  fire("paste", { clipboardData: { getData: () => "粘贴文本" } });
-  assert.deepEqual(
-    reported.map((r) => [r.kind, r.text]),
-    [["insertfrompaste", "粘贴文本"]],
-  );
+  fire("keydown", keyEv({ key: "v", code: "KeyV", ctrlKey: true }));
+  fire("keyup", keyEv({ key: "v", code: "KeyV", ctrlKey: true }));
+  assert.deepEqual(reported.map((e) => e.kind), ["keydown", "keyup"],
+    "paste shortcut travels as plain keys; the follower page's own clipboard decides");
 });
 
 test("input increments and composition results are reported; composing input is not", () => {

@@ -175,7 +175,7 @@ func (t *pageTracker) Attach(ctx context.Context, targetID string) error {
 	return err
 }
 
-func (t *pageTracker) attach(ctx context.Context, targetID string) error {
+func (t *pageTracker) attach(ctx context.Context, targetID string) (err error) {
 	raw, err := t.client.Call(ctx, "", "Target.attachToTarget", map[string]any{
 		"targetId": targetID, "flatten": true,
 	})
@@ -192,6 +192,22 @@ func (t *pageTracker) attach(ctx context.Context, targetID string) error {
 	t.mu.Lock()
 	t.sessions[targetID] = sid
 	t.mu.Unlock()
+	// Any failure from here on must give the session back:
+	// detach it and drop the bookkeeping, so a half-attached
+	// target never lingers.
+	defer func() {
+		if err != nil {
+			dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, _ = t.client.Call(dctx, "", "Target.detachFromTarget", map[string]any{"sessionId": sid})
+			dcancel()
+			t.mu.Lock()
+			delete(t.sessions, targetID)
+			delete(t.mainFrames, targetID)
+			delete(t.contexts, targetID)
+			delete(t.ready, targetID)
+			t.mu.Unlock()
+		}
+	}()
 
 	if _, err := t.client.Call(ctx, sid, "Page.enable", nil); err != nil {
 		return err
@@ -229,7 +245,14 @@ func (t *pageTracker) attach(ctx context.Context, targetID string) error {
 	t.ready[targetID] = true
 	t.mu.Unlock()
 	if t.master {
-		t.installInExistingWorld(ctx, targetID, sid)
+		// The observer MUST be live in the already-loaded
+		// document: without an event source the session
+		// would report success while syncing nothing, so a
+		// failure here fails the attach (and with it, for
+		// the master, the whole StartSync).
+		if err := t.installInExistingWorld(ctx, targetID, sid); err != nil {
+			return fmt.Errorf("在主实例页面安装观察脚本失败：%w", err)
+		}
 	}
 	if t.onReady != nil {
 		go t.onReady(targetID)
@@ -241,31 +264,34 @@ func (t *pageTracker) attach(ctx context.Context, targetID string) error {
 // isolated world of the page that already exists (the script
 // registered for new documents does not run in documents that
 // predate the attach).
-func (t *pageTracker) installInExistingWorld(ctx context.Context, targetID, sid string) {
+func (t *pageTracker) installInExistingWorld(ctx context.Context, targetID, sid string) error {
 	t.mu.Lock()
 	frameID := t.mainFrames[targetID]
 	t.mu.Unlock()
 	if frameID == "" {
-		return
+		return fmt.Errorf("页面主框架未知")
 	}
 	raw, err := t.client.Call(ctx, sid, "Page.createIsolatedWorld", map[string]any{
 		"frameId": frameID, "worldName": "debrowser-sync", "grantUniveralAccess": false,
 	})
 	if err != nil {
-		return
+		return err
 	}
 	var world struct {
 		ExecutionContextID int `json:"executionContextId"`
 	}
 	if err := json.Unmarshal(raw, &world); err != nil || world.ExecutionContextID == 0 {
-		return
+		return fmt.Errorf("创建页面隔离执行环境失败")
 	}
 	t.mu.Lock()
 	t.contexts[targetID] = world.ExecutionContextID
 	t.mu.Unlock()
-	_, _ = t.client.Call(ctx, sid, "Runtime.evaluate", map[string]any{
+	if _, err := t.client.Call(ctx, sid, "Runtime.evaluate", map[string]any{
 		"expression": capture.Script, "contextId": world.ExecutionContextID,
-	})
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (t *pageTracker) onContextCreated(ev cdp.Event) {
@@ -310,13 +336,19 @@ func (t *pageTracker) onContextCreated(ev cdp.Event) {
 	if sid == "" {
 		return
 	}
-	// Binding must be (re)issued inside the new context.
-	_, _ = t.client.Call(context.Background(), sid, "Runtime.addBinding", map[string]any{
-		"name": capture.BindingName, "executionContextId": p.Context.ID,
-	})
-	_, _ = t.client.Call(context.Background(), sid, "Runtime.evaluate", map[string]any{
-		"expression": capture.Script, "contextId": p.Context.ID,
-	})
+	// Binding must be (re)issued inside the new context. The
+	// CDP calls run off the event dispatcher so event order
+	// for input is never delayed by them.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = t.client.Call(ctx, sid, "Runtime.addBinding", map[string]any{
+			"name": capture.BindingName, "executionContextId": p.Context.ID,
+		})
+		_, _ = t.client.Call(ctx, sid, "Runtime.evaluate", map[string]any{
+			"expression": capture.Script, "contextId": p.Context.ID,
+		})
+	}()
 }
 
 func (t *pageTracker) onFrameNavigated(ev cdp.Event) {

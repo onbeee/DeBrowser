@@ -31,16 +31,6 @@ type PageEvent struct {
 	Source string `json:"-"`
 }
 
-// IsPasteShortcut reports whether a key event is the paste
-// shortcut, whose text must arrive exactly once — as the
-// paste increment — never additionally as keystrokes.
-func (e PageEvent) IsPasteShortcut() bool {
-	if (e.Ctrl || e.Meta) && e.Code == "KeyV" {
-		return true
-	}
-	return e.Shift && e.Code == "Insert"
-}
-
 // IsKeyRelease reports keyup events (critical: never dropped).
 func (e PageEvent) IsKeyRelease() bool { return e.Kind == "keyup" }
 
@@ -52,7 +42,7 @@ func (e PageEvent) IsPointerRelease() bool { return e.Kind == "pointerup" }
 // flow (text, navigation, target lifecycle).
 func (e PageEvent) IsCritical() bool {
 	switch e.Kind {
-	case "keyup", "pointerup", "input", "insertfrompaste", "compositionend",
+	case "keyup", "pointerup", "input", "compositionend",
 		"navigate", "reload", "historyback", "historyforward",
 		"targetcreated", "targetclosed", "targetactivated":
 		return true

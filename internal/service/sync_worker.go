@@ -9,32 +9,127 @@ import (
 	"github.com/onbeee/DeBrowser/internal/cdp"
 )
 
+// syncQueue is one follower's bounded event queue with tail
+// coalescing: a pointer move replaces a still-queued tail move
+// for the same source target, and a wheel event merges its
+// deltas into a still-queued tail wheel for the same source
+// (direction and order preserved, latest position kept).
+// Critical events are never silently dropped: when one cannot
+// be queued, push reports overflow and the worker fails.
+type syncQueue struct {
+	mu     sync.Mutex
+	items  []PageEvent
+	cap    int
+	notify chan struct{}
+}
+
+func newSyncQueue(capacity int) *syncQueue {
+	return &syncQueue{cap: capacity, notify: make(chan struct{}, 1)}
+}
+
+func (q *syncQueue) signal() {
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+// push queues one event; overflow=true means a CRITICAL event
+// could not be queued and the follower must fail.
+func (q *syncQueue) push(ev PageEvent) (overflow bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if n := len(q.items); n > 0 {
+		last := &q.items[n-1]
+		if ev.Kind == "pointermove" && last.Kind == "pointermove" && last.Source == ev.Source {
+			*last = ev
+			return false
+		}
+		if ev.Kind == "wheel" && last.Kind == "wheel" && last.Source == ev.Source {
+			last.DeltaX += ev.DeltaX
+			last.DeltaY += ev.DeltaY
+			last.X, last.Y = ev.X, ev.Y
+			return false
+		}
+	}
+	if len(q.items) >= q.cap {
+		return ev.IsCritical()
+	}
+	q.items = append(q.items, ev)
+	q.signal()
+	return false
+}
+
+// pop removes the head event, waiting briefly for one to
+// arrive. ok=false means "nothing right now".
+func (q *syncQueue) pop(wait time.Duration) (PageEvent, bool) {
+	q.mu.Lock()
+	if len(q.items) > 0 {
+		ev := q.items[0]
+		q.items = q.items[1:]
+		q.mu.Unlock()
+		return ev, true
+	}
+	q.mu.Unlock()
+	select {
+	case <-q.notify:
+	case <-time.After(wait):
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return PageEvent{}, false
+	}
+	ev := q.items[0]
+	q.items = q.items[1:]
+	return ev, true
+}
+
+func (q *syncQueue) clear() {
+	q.mu.Lock()
+	q.items = nil
+	q.mu.Unlock()
+}
+
+func (q *syncQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
+// targetInputs is the pressed-input state of ONE follower
+// target: releases must go to the very target that received
+// the presses, never to an arbitrary mapped target.
+type targetInputs struct {
+	keys    map[string]bool
+	buttons int
+}
+
 // followerWorker owns one follower instance's side of a sync
 // session: its CDP connection, its page tracker, the
-// master→follower target mapping, a bounded event queue and a
-// single serial dispatch goroutine. A failure here never
-// touches other followers: it marks this worker failed,
-// releases any pressed inputs and tears down only itself.
+// master→follower target mapping, a bounded coalescing queue
+// and a single serial dispatch goroutine. ALL CDP input —
+// regular dispatch and input releases alike — is issued by
+// that one goroutine, so a release can never race a press.
+// A failure here never touches other followers.
 type followerWorker struct {
 	id     string
 	client *cdp.Client
 	track  *pageTracker
 
-	queue chan PageEvent
-	done  chan struct{}
+	queue    *syncQueue
+	control  chan struct{} // input-release requests (buffered 1)
+	stopCh   chan struct{}
+	loopDone chan struct{}
+	started  bool
 
-	mu      sync.Mutex
-	failed  bool
-	failMsg string
-	// mapping: master target -> follower target
-	mapping map[string]string
-	// creating: in-flight target creations, single-flight per
-	// (master target) for THIS follower
+	mu       sync.Mutex
+	failed   bool
+	failMsg  string
+	mapping  map[string]string
 	creating map[string]*targetCreation
-	// pressed input state, for release on pause/failure/stop
-	keysDown    map[string]bool
-	buttonsDown int
-	// viewport sizes for coordinate scaling (CSS pixels)
+	inputs   map[string]*targetInputs // follower target -> pressed state
+
 	masterVP   [2]float64
 	followerVP [2]float64
 	vpKnown    bool
@@ -52,11 +147,13 @@ func newFollowerWorker(id string, client *cdp.Client, onFail func(id, reason str
 	w := &followerWorker{
 		id:       id,
 		client:   client,
-		queue:    make(chan PageEvent, 256),
-		done:     make(chan struct{}),
+		queue:    newSyncQueue(256),
+		control:  make(chan struct{}, 1),
+		stopCh:   make(chan struct{}),
+		loopDone: make(chan struct{}),
 		mapping:  map[string]string{},
 		creating: map[string]*targetCreation{},
-		keysDown: map[string]bool{},
+		inputs:   map[string]*targetInputs{},
 		onFail:   onFail,
 	}
 	w.track = newPageTracker(client, false, nil, nil)
@@ -64,6 +161,7 @@ func newFollowerWorker(id string, client *cdp.Client, onFail func(id, reason str
 }
 
 func (w *followerWorker) start(ctx context.Context) {
+	w.started = true
 	go w.dispatchLoop(ctx)
 	go func() {
 		<-w.client.Done()
@@ -83,8 +181,9 @@ func (w *followerWorker) failureReason() string {
 	return w.failMsg
 }
 
-// markFailed fails ONLY this follower: inputs are released,
-// the queue is drained and the dispatch loop ends.
+// markFailed fails ONLY this follower. It never issues CDP
+// itself: the release of pressed inputs is requested through
+// the control channel and executed by the dispatch goroutine.
 func (w *followerWorker) markFailed(reason string) {
 	w.mu.Lock()
 	if w.failed {
@@ -94,62 +193,45 @@ func (w *followerWorker) markFailed(reason string) {
 	w.failed = true
 	w.failMsg = reason
 	w.mu.Unlock()
-	w.releaseInputs(context.Background())
-	close(w.done)
+	w.requestRelease()
 	if w.onFail != nil {
 		w.onFail(w.id, reason)
 	}
 }
 
-// enqueue offers an event to the bounded queue. Pointer moves
-// coalesce with a queued tail move; wheel events merge deltas
-// into a queued tail wheel at the same position. Critical
-// events are never silently dropped: if one cannot be queued,
-// the follower fails instead.
+// requestRelease asks the dispatch goroutine to release every
+// pressed input on every target. Non-blocking.
+func (w *followerWorker) requestRelease() {
+	select {
+	case w.control <- struct{}{}:
+	default:
+	}
+}
+
+// requestPurgeAndRelease drops all queued events and releases
+// pressed inputs (pause semantics: nothing is replayed later).
+func (w *followerWorker) requestPurgeAndRelease() {
+	w.queue.clear()
+	w.requestRelease()
+}
+
+// clearPending drops queued events without releasing inputs.
+func (w *followerWorker) clearPending() { w.queue.clear() }
+
+// enqueue offers an event to the bounded queue. A critical
+// event that cannot be queued fails the follower instead of
+// being silently dropped.
 func (w *followerWorker) enqueue(ev PageEvent) bool {
 	if w.isFailed() {
 		return false
 	}
-	if ev.Kind == "pointermove" {
-		select {
-		case w.queue <- ev:
-			return true
-		default:
-		}
-		// Queue full: a move may be dropped ONLY if a later
-		// move will supersede it; try once more after a tail
-		// drain of pending moves.
-		select {
-		case w.queue <- ev:
-			return true
-		default:
-			return false // non-critical: dropping a move is safe
-		}
-	}
-	select {
-	case w.queue <- ev:
-		return true
-	default:
-	}
-	if ev.IsCritical() {
+	if w.queue.push(ev) {
 		w.markFailed("同步事件队列已满，无法保证操作顺序")
 		return false
 	}
-	return false
+	return true
 }
 
-// clearPending drops queued non-dispatched events (pause).
-func (w *followerWorker) clearPending() {
-	for {
-		select {
-		case <-w.queue:
-		default:
-			return
-		}
-	}
-}
-
-// mappedTarget returns the follower target for a master target.
 func (w *followerWorker) mappedTarget(masterTarget string) (string, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -157,14 +239,12 @@ func (w *followerWorker) mappedTarget(masterTarget string) (string, bool) {
 	return t, ok
 }
 
-// setMapping records a verified mapping (after WaitReady).
 func (w *followerWorker) setMapping(masterTarget, followerTarget string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.mapping[masterTarget] = followerTarget
 }
 
-// dropMapping removes mappings pointing at a destroyed target.
 func (w *followerWorker) dropMapping(masterTarget string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -175,15 +255,13 @@ func (w *followerWorker) dropMapping(masterTarget string) {
 // master target, creating it exactly once even under
 // concurrent triggers: callers share the in-flight creation's
 // outcome. The mapping is recorded only after the new page is
-// attached and ready.
+// attached and ready; a creation that fails midway closes the
+// half-created target so no stray tab is left behind.
 func (w *followerWorker) ensureTarget(ctx context.Context, masterTarget, url string) (string, error) {
 	if t, ok := w.mappedTarget(masterTarget); ok {
 		return t, nil
 	}
 	w.mu.Lock()
-	if w.creating == nil {
-		w.creating = map[string]*targetCreation{}
-	}
 	if c, ok := w.creating[masterTarget]; ok {
 		w.mu.Unlock()
 		select {
@@ -220,22 +298,28 @@ func (w *followerWorker) createTarget(ctx context.Context, url string) (string, 
 	actx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := w.track.Attach(actx, targetID); err != nil {
+		// The target exists but could not be taken over:
+		// close it rather than leaving a stray tab behind.
+		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, _ = w.client.Call(cctx, "", "Target.closeTarget", map[string]any{"targetId": targetID})
+		ccancel()
 		return "", err
 	}
 	if err := w.track.WaitReady(actx, targetID); err != nil {
+		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, _ = w.client.Call(cctx, "", "Target.closeTarget", map[string]any{"targetId": targetID})
+		ccancel()
 		return "", err
 	}
 	return targetID, nil
 }
 
-// pairWith records the mapping after a successful ensureTarget
-// for the given master target.
 func (w *followerWorker) pairWith(masterTarget, followerTarget string) {
 	w.setMapping(masterTarget, followerTarget)
 }
 
-// sessionFor returns the attached session of the follower
-// target mapped from a master target.
+// sessionFor returns the follower target and session mapped
+// from a master target.
 func (w *followerWorker) sessionFor(masterTarget string) (string, string, bool) {
 	ft, ok := w.mappedTarget(masterTarget)
 	if !ok {
@@ -245,8 +329,6 @@ func (w *followerWorker) sessionFor(masterTarget string) (string, string, bool) 
 	return ft, sid, ok
 }
 
-// setViewports records both sides' CSS viewport sizes for
-// coordinate scaling.
 func (w *followerWorker) setViewports(masterW, masterH, followerW, followerH float64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -264,17 +346,38 @@ func (w *followerWorker) scale(x, y float64) (float64, float64) {
 	return x * w.followerVP[0] / w.masterVP[0], y * w.followerVP[1] / w.masterVP[1]
 }
 
-// dispatchLoop is the follower's single serial dispatcher.
+// dispatchLoop is the follower's single serial dispatcher and
+// the ONLY goroutine that issues input commands for this
+// follower. Release requests (control channel) are handled
+// between events, so they can never race a dispatch.
 func (w *followerWorker) dispatchLoop(ctx context.Context) {
+	defer close(w.loopDone)
 	for {
 		select {
-		case <-w.done:
+		case <-w.stopCh:
 			return
 		case <-ctx.Done():
 			return
-		case ev := <-w.queue:
-			w.dispatch(ctx, ev)
+		case <-w.control:
+			w.releaseAllInputs(ctx)
+			continue
+		default:
 		}
+		ev, ok := w.queue.pop(50 * time.Millisecond)
+		if !ok {
+			continue
+		}
+		// A release request that arrived while waiting takes
+		// priority over further queued events.
+		select {
+		case <-w.control:
+			w.releaseAllInputs(ctx)
+			if w.isFailed() {
+				continue
+			}
+		default:
+		}
+		w.dispatch(ctx, ev)
 	}
 }
 
@@ -297,6 +400,9 @@ func (w *followerWorker) dispatch(ctx context.Context, ev PageEvent) {
 		w.pairWith(ev.Source, ft)
 	case "targetclosed":
 		if ft, ok := w.mappedTarget(ev.Source); ok {
+			// Release this target's pressed inputs BEFORE
+			// closing it, while its session still exists.
+			w.releaseTargetInputs(cctx, ft)
 			_, _ = w.client.Call(cctx, "", "Target.closeTarget", map[string]any{"targetId": ft})
 			w.dropMapping(ev.Source)
 			w.track.Forget(ft)
@@ -352,8 +458,21 @@ func (w *followerWorker) navigateHistory(ctx context.Context, ev PageEvent) {
 	})
 }
 
+// inputsFor returns (creating if needed) the pressed-state
+// record of one follower target.
+func (w *followerWorker) inputsFor(ft string) *targetInputs {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st, ok := w.inputs[ft]
+	if !ok {
+		st = &targetInputs{keys: map[string]bool{}}
+		w.inputs[ft] = st
+	}
+	return st
+}
+
 func (w *followerWorker) dispatchInput(ctx context.Context, ev PageEvent) {
-	_, sid, ok := w.sessionFor(ev.Source)
+	ft, sid, ok := w.sessionFor(ev.Source)
 	if !ok {
 		return
 	}
@@ -376,13 +495,15 @@ func (w *followerWorker) dispatchInput(ctx context.Context, ev PageEvent) {
 			params["clickCount"] = 1
 		}
 		_, _ = w.client.Call(ctx, sid, "Input.dispatchMouseEvent", params)
-		w.mu.Lock()
 		if ev.Kind == "pointerdown" {
-			w.buttonsDown |= 1 << uint(max(0, ev.Button))
+			w.inputsFor(ft).buttons |= 1 << uint(max(0, ev.Button))
 		} else if ev.Kind == "pointerup" {
-			w.buttonsDown &^= 1 << uint(max(0, ev.Button))
+			w.mu.Lock()
+			if st := w.inputs[ft]; st != nil {
+				st.buttons &^= 1 << uint(max(0, ev.Button))
+			}
+			w.mu.Unlock()
 		}
-		w.mu.Unlock()
 	case "wheel":
 		x, y := w.scale(ev.X, ev.Y)
 		_, _ = w.client.Call(ctx, sid, "Input.dispatchMouseEvent", map[string]any{
@@ -391,9 +512,6 @@ func (w *followerWorker) dispatchInput(ctx context.Context, ev PageEvent) {
 			"modifiers": ev.Modifiers(),
 		})
 	case "keydown", "keyup":
-		if ev.IsPasteShortcut() {
-			return // text arrives once, as the paste increment
-		}
 		typ := "keyDown"
 		if ev.Kind == "keyup" {
 			typ = "keyUp"
@@ -408,57 +526,51 @@ func (w *followerWorker) dispatchInput(ctx context.Context, ev PageEvent) {
 			params["autoRepeat"] = true
 		}
 		// No text payload on key events by design: characters
-		// arrive exactly once via input increments.
+		// arrive exactly once via input increments. Paste
+		// shortcuts are ordinary key events here — DeBrowser
+		// never reads any clipboard; the follower page's own
+		// clipboard decides what a paste inserts.
 		_, _ = w.client.Call(ctx, sid, "Input.dispatchKeyEvent", params)
-		w.mu.Lock()
 		if ev.Kind == "keydown" {
-			w.keysDown[ev.Code] = true
+			w.inputsFor(ft).keys[ev.Code] = true
 		} else {
-			delete(w.keysDown, ev.Code)
+			w.mu.Lock()
+			if st := w.inputs[ft]; st != nil {
+				delete(st.keys, ev.Code)
+			}
+			w.mu.Unlock()
 		}
-		w.mu.Unlock()
-	case "input", "insertfrompaste", "compositionend":
+	case "input", "compositionend":
 		if ev.Text != "" {
 			_, _ = w.client.Call(ctx, sid, "Input.insertText", map[string]any{"text": ev.Text})
 		}
 	}
 }
 
-// releaseInputs dispatches releases for everything this worker
-// believes is pressed, then clears the belief. Used on pause,
-// failure and stop so a follower can never be left with a
-// stuck key or button.
-func (w *followerWorker) releaseInputs(ctx context.Context) {
+// releaseTargetInputs dispatches releases for everything
+// pressed on ONE follower target, then clears its record.
+// Runs only on the dispatch goroutine.
+func (w *followerWorker) releaseTargetInputs(ctx context.Context, ft string) {
 	w.mu.Lock()
-	keys := make([]string, 0, len(w.keysDown))
-	for code := range w.keysDown {
-		keys = append(keys, code)
-	}
-	buttons := w.buttonsDown
-	w.keysDown = map[string]bool{}
-	w.buttonsDown = 0
-	masterTarget := ""
-	for mt := range w.mapping {
-		masterTarget = mt
-		break
-	}
+	st := w.inputs[ft]
+	delete(w.inputs, ft)
 	w.mu.Unlock()
-	if masterTarget == "" {
+	if st == nil || (len(st.keys) == 0 && st.buttons == 0) {
 		return
 	}
-	_, sid, ok := w.sessionFor(masterTarget)
+	sid, ok := w.track.Session(ft)
 	if !ok {
-		return
+		return // target already gone: nothing can receive releases
 	}
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	for _, code := range keys {
+	for code := range st.keys {
 		_, _ = w.client.Call(cctx, sid, "Input.dispatchKeyEvent", map[string]any{
 			"type": "keyUp", "code": code, "windowsVirtualKeyCode": vkForCode(code),
 		})
 	}
 	for b := 0; b < 5; b++ {
-		if buttons&(1<<uint(b)) != 0 {
+		if st.buttons&(1<<uint(b)) != 0 {
 			_, _ = w.client.Call(cctx, sid, "Input.dispatchMouseEvent", map[string]any{
 				"type": "mouseReleased", "button": cdpMouseButton(b), "buttons": 0,
 			})
@@ -466,7 +578,23 @@ func (w *followerWorker) releaseInputs(ctx context.Context) {
 	}
 }
 
-// close tears down this follower's connection and bookkeeping.
+// releaseAllInputs releases every target's pressed inputs.
+// Runs only on the dispatch goroutine.
+func (w *followerWorker) releaseAllInputs(ctx context.Context) {
+	w.mu.Lock()
+	targets := make([]string, 0, len(w.inputs))
+	for ft := range w.inputs {
+		targets = append(targets, ft)
+	}
+	w.mu.Unlock()
+	for _, ft := range targets {
+		w.releaseTargetInputs(ctx, ft)
+	}
+}
+
+// close releases inputs (via the dispatch goroutine), stops
+// the loop and closes the connection. Safe on a worker that
+// was never started.
 func (w *followerWorker) close() {
 	w.mu.Lock()
 	if !w.failed {
@@ -474,10 +602,13 @@ func (w *followerWorker) close() {
 		w.failMsg = "同步已停止"
 	}
 	w.mu.Unlock()
-	select {
-	case <-w.done:
-	default:
-		close(w.done)
+	w.requestRelease()
+	if w.started {
+		close(w.stopCh)
+		select {
+		case <-w.loopDone:
+		case <-time.After(2 * time.Second):
+		}
 	}
 	w.client.Close()
 }
