@@ -39,7 +39,7 @@ export default function SyncDialog(props: {
       recordOperationFeedback(opId, true, action + "完成", "书签管理", action);
     } catch (e) {
       const message = errText(e);
-      notifyError(message, { operationId: opId });
+      notifyError(message, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, message, "书签管理", action);
     } finally {
       setBusy(false);
@@ -231,6 +231,7 @@ function SyncBookmarksTab(props: {
                   `新增书签 ${res.addedBookmarks} · 跳过 ${res.skippedBookmarks} · 失败 ${res.failedBookmarks}`,
                 items,
                 operationId: opId,
+                important: true,
               });
             })
           }
@@ -280,6 +281,7 @@ function SearchTab(props: {
       {
         detail: `处理 ${res.affectedNodes} 项 · 失败 ${res.failedNodes} 项`,
         operationId: opId,
+        important: true,
       },
     );
     setPicked(new Set());
@@ -288,7 +290,7 @@ function SearchTab(props: {
       const fresh = await BookmarkService.SearchInstanceBookmarks(newOperationId(), query, kind);
       setSearch(fresh);
     } catch {
-      notifyWarning(`${verb}已完成，但列表刷新失败，请重新搜索。`);
+      notifyWarning(`${verb}已完成，但列表刷新失败，请重新搜索。`, { important: true });
     }
   };
 

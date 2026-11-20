@@ -102,7 +102,7 @@ function notifyBatchResult(
     (failed.length > 0 ? `，失败 ${failed.length} 个` : "");
   const kind =
     failed.length === 0 ? "success" : okNames.length === 0 && skipped.length === 0 ? "error" : "warning";
-  notify(kind, summary, { items });
+  notify(kind, summary, { items, important: true });
 }
 
 interface BatchCreateState {
@@ -303,7 +303,7 @@ export default function InstancesPage() {
           profileAction,
           profileName,
         });
-        notifySuccess(`实例已更新：${form.name}`, { operationId: opId });
+        notifySuccess(`实例已更新：${form.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已更新：${form.name}`, "浏览器实例", action);
       } else {
         const created = await InstanceService.CreateInstance(opId, {
@@ -312,7 +312,7 @@ export default function InstancesPage() {
           profileMode: form.profileMode,
           profileName: form.profileMode === "default" ? "" : form.profileName,
         });
-        notifySuccess(`实例已创建：${created.name}`, { operationId: opId });
+        notifySuccess(`实例已创建：${created.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
       }
       setForm(null);
@@ -320,7 +320,7 @@ export default function InstancesPage() {
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      notifyError(`保存实例失败：${message}`, { operationId: opId });
+      notifyError(`保存实例失败：${message}`, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, `保存实例失败：${message}`, "浏览器实例", action);
     } finally {
       setBusy(false);
@@ -334,16 +334,16 @@ export default function InstancesPage() {
     try {
       if (kind === "start") {
         await InstanceService.StartInstance(opId, inst.id);
-        notifySuccess(`实例已启动：${inst.name}`, { operationId: opId });
+        notifySuccess(`实例已启动：${inst.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已启动：${inst.name}`, "浏览器实例", action);
       } else {
         await InstanceService.StopInstance(opId, inst.id);
-        notifySuccess(`实例已关闭：${inst.name}`, { operationId: opId });
+        notifySuccess(`实例已关闭：${inst.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已关闭：${inst.name}`, "浏览器实例", action);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      notifyError(`${kind === "start" ? "启动" : "关闭"}实例失败：${message}`, { operationId: opId });
+      notifyError(`${kind === "start" ? "启动" : "关闭"}实例失败：${message}`, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, message, "浏览器实例", action);
     } finally {
       setActingId(null);
@@ -359,18 +359,18 @@ export default function InstancesPage() {
     try {
       if (pendingDelete.withProfile) {
         await InstanceService.DeleteInstanceAndProfile(opId, pendingDelete.instance.id);
-        notifySuccess(`实例及其实例文件已删除：${pendingDelete.instance.name}`, { operationId: opId });
+        notifySuccess(`实例及其实例文件已删除：${pendingDelete.instance.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例及其实例文件已删除：${pendingDelete.instance.name}`, "浏览器实例", action);
       } else {
         await InstanceService.DeleteInstance(opId, pendingDelete.instance.id);
-        notifySuccess(`实例已删除（实例文件保留）：${pendingDelete.instance.name}`, { operationId: opId });
+        notifySuccess(`实例已删除（实例文件保留）：${pendingDelete.instance.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已删除（实例文件保留）：${pendingDelete.instance.name}`, "浏览器实例", action);
       }
       setPendingDelete(null);
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      notifyError(`删除实例失败：${message}`, { operationId: opId });
+      notifyError(`删除实例失败：${message}`, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, `删除实例失败：${message}`, "浏览器实例", action);
     } finally {
       setBusy(false);

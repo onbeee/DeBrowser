@@ -56,13 +56,13 @@ export default function KernelsPage() {
     try {
       const feedback = await fn(opId);
       if (feedback) {
-        notifySuccess(feedback, { operationId: opId });
+        notifySuccess(feedback, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, feedback, "浏览器内核", action);
       }
     } catch (e) {
       const message = errText(e);
       if (message !== PICKER_CANCELLED) {
-        notifyError(message, { operationId: opId });
+        notifyError(message, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, message, "浏览器内核", action);
       }
     } finally {

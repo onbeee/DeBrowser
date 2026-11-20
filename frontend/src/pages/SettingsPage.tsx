@@ -36,12 +36,12 @@ export default function SettingsPage() {
     const opId = newOperationId();
     AppService.SaveTheme(opId, next)
       .then(() => {
-        notifySuccess(`主题已保存：${label}`, { operationId: opId });
+        notifySuccess(`主题已保存：${label}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `主题已切换并保存：${next}`, "设置", "settings.update_theme");
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        notifyError(`保存主题失败：${message}`, { operationId: opId });
+        notifyError(`保存主题失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `保存主题失败：${message}`, "设置", "settings.update_theme");
       });
   };

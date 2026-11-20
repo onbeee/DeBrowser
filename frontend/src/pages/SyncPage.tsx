@@ -99,11 +99,11 @@ export default function SyncPage() {
     try {
       await fn(op);
       recordOperationFeedback(op, true, okMessage, "sync", action);
-      notifySuccess(okMessage, { operationId: op });
+      notifySuccess(okMessage, { operationId: op, important: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       recordOperationFeedback(op, false, message, "sync", action);
-      notifyError(message, { operationId: op });
+      notifyError(message, { operationId: op, important: true });
     } finally {
       setBusy(false);
       void refresh();

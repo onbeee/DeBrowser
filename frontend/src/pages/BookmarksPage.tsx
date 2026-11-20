@@ -103,10 +103,11 @@ export default function BookmarksPage() {
       } else {
         notifyError(
           "有 " + notStoppedCount(gates) + " 个浏览器实例的状态无法确认停止，无法打开书签同步。请先在浏览器实例页面处理后再试。",
+          { important: true },
         );
       }
     } catch (err) {
-      notifyError("检查浏览器实例状态失败：" + errText(err));
+      notifyError("检查浏览器实例状态失败：" + errText(err), { important: true });
     } finally {
       setBusy(null);
     }
@@ -137,11 +138,12 @@ export default function BookmarksPage() {
         setSyncGate("idle");
         notifyError(
           "仍有 " + notStoppedCount(gates) + " 个浏览器实例未能关闭或无法确认停止，无法打开书签同步。",
+          { important: true },
         );
       }
     } catch (err) {
       setSyncGate("idle");
-      notifyError("关闭浏览器实例失败：" + errText(err));
+      notifyError("关闭浏览器实例失败：" + errText(err), { important: true });
     } finally {
       closingRef.current = false;
     }
@@ -183,12 +185,12 @@ export default function BookmarksPage() {
     try {
       const feedback = await fn(opId);
       if (feedback) {
-        notifySuccess(feedback, { operationId: opId });
+        notifySuccess(feedback, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, feedback, "书签管理", action);
       }
     } catch (e) {
       const message = errText(e);
-      notifyError(message, { operationId: opId });
+      notifyError(message, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, message, "书签管理", action);
     } finally {
       setBusy(null);
@@ -275,7 +277,7 @@ export default function BookmarksPage() {
       // 时只提示刷新失败，绝不误报为删除失败。
       setSelected(new Set());
       setDeleteArmed(false);
-      const ok = await reload(() => notifyWarning("删除已完成，但列表刷新失败，请重新搜索。"));
+      const ok = await reload(() => notifyWarning("删除已完成，但列表刷新失败，请重新搜索。", { important: true }));
       return ok ? "已删除 " + count + " 项" : "";
     });
   };

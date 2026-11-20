@@ -69,17 +69,19 @@ function RecordRow({ record }: { record: AppNotification }) {
 
 /**
  * 通知台：从窗口右侧滑出的覆盖式面板，不改变页面布局与
- * 滚动位置，关闭后页面状态不变。展示最近 50 条通知记录，
- * 与浮动提示内容一致，可展开逐项结果，可一键清空。
+ * 滚动位置，关闭后页面状态不变。全面显示最近 80 条通知
+ * （最新在前），与浮窗共用同一套通知数据，可展开逐项
+ * 结果，可一键清空。通知只存在于内存中，不做持久化；
+ * 浮窗的消失或关闭不影响这里的通知。
  */
 export default function NotificationCenter() {
   const open = useNotificationStore((s) => s.centerOpen);
   const setCenterOpen = useNotificationStore((s) => s.setCenterOpen);
-  const records = useNotificationStore((s) => s.records);
+  const notifications = useNotificationStore((s) => s.notifications);
   const clearAll = useNotificationStore((s) => s.clearAll);
 
   if (!open) return null;
-  const ordered = [...records].reverse();
+  const ordered = [...notifications].reverse();
 
   return (
     <div className="fixed inset-0 z-50">
@@ -90,7 +92,7 @@ export default function NotificationCenter() {
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
-              disabled={records.length === 0}
+              disabled={notifications.length === 0}
               onClick={clearAll}
               className="flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:opacity-40"
             >

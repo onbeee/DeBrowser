@@ -1,71 +1,92 @@
 import { create } from "zustand";
 import {
   pushNotification,
+  pushToast,
   type AppNotification,
-  type NotificationInput,
   type NotificationKind,
-} from "../lib/notifications";
+  type NotifyInput,
+} from "../lib/notifications.ts";
 
-/**
- * 全局通知状态：全软件唯一通知入口。记录保存在内存中，
- * 最多 50 条，不落库、不持久化；页面切换、弹窗关闭都不
- * 丢失。浮动提示与通知台读取同一份记录。
- */
+// 全局通知状态：一套通知数据，两种展示层级。
+//
+// - notifications 是唯一的通知列表，通知台据此全面显示
+//   最近 80 条（仅内存，不持久化）。
+// - toasts 是当前浮窗展示列表，保存重点通知的同一实体
+//   引用，最多 3 条、先进先出；浮窗的关闭（自动或手动）
+//   只从 toasts 移除，不影响 notifications。
+// 业务页面只调用 notify 发布一次，不分别维护两份数据。
+
 interface NotificationState {
-  records: AppNotification[];
-  closedToastIds: ReadonlySet<number>;
+  notifications: AppNotification[];
+  toasts: AppNotification[];
   centerOpen: boolean;
-  notify: (input: NotificationInput) => void;
-  closeToast: (id: number) => void;
-  setCenterOpen: (open: boolean) => void;
+  notify: (input: NotifyInput) => void;
+  dismissToast: (id: number) => void;
   clearAll: () => void;
+  setCenterOpen: (open: boolean) => void;
 }
 
 let nextId = 1;
 
-export const useNotificationStore = create<NotificationState>((set) => ({
-  records: [],
-  closedToastIds: new Set<number>(),
+export const useNotificationStore = create<NotificationState>()((set) => ({
+  notifications: [],
+  toasts: [],
   centerOpen: false,
+
   notify: (input) =>
     set((state) => {
-      const records = pushNotification(state.records, input, nextId++, Date.now());
-      // 记录被上限淘汰时，同步清掉已失效的关闭标记，
-      // 避免 closedToastIds 随运行时间无限积累。
-      if (state.closedToastIds.size === 0) return { records };
-      const aliveIds = new Set(records.map((r) => r.id));
-      const closedToastIds = new Set(
-        [...state.closedToastIds].filter((id) => aliveIds.has(id)),
-      );
-      return { records, closedToastIds };
+      const notifications = pushNotification(state.notifications, input, nextId++, Date.now());
+      const created = notifications[notifications.length - 1];
+      // 重点通知在进入通知台的同时触发浮窗（同一实体）。
+      const toasts = created.important ? pushToast(state.toasts, created) : state.toasts;
+      return { notifications, toasts };
     }),
-  closeToast: (id) =>
-    set((state) => {
-      const next = new Set(state.closedToastIds);
-      next.add(id);
-      return { closedToastIds: next };
-    }),
+
+  // 只移除浮窗展示，不删除通知台中的通知。
+  dismissToast: (id) =>
+    set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
+
+  clearAll: () => set({ notifications: [], toasts: [] }),
+
   setCenterOpen: (open) => set({ centerOpen: open }),
-  clearAll: () => set({ records: [], closedToastIds: new Set<number>() }),
 }));
 
-/** 页面与业务代码的统一调用入口。 */
-export function notify(kind: NotificationKind, summary: string, extra?: Partial<NotificationInput>): void {
-  useNotificationStore.getState().notify({ kind, summary, ...extra });
+interface NotifyOptions {
+  detail?: string;
+  items?: NotifyInput["items"];
+  operationId?: string;
+  /** 重点通知须在调用点显式标记；缺省只进入通知台。 */
+  important?: boolean;
 }
 
-export function notifySuccess(summary: string, extra?: Partial<NotificationInput>): void {
-  notify("success", summary, extra);
+/** 业务调用点发布通知的统一入口（只发布一次）。 */
+export function notify(kind: NotificationKind, summary: string, opts?: NotifyOptions): void {
+  useNotificationStore.getState().notify({
+    kind,
+    summary,
+    detail: opts?.detail,
+    items: opts?.items,
+    operationId: opts?.operationId,
+    important: opts?.important,
+  });
 }
 
-export function notifyInfo(summary: string, extra?: Partial<NotificationInput>): void {
-  notify("info", summary, extra);
+function publish(kind: NotificationKind, summary: string, opts?: NotifyOptions): void {
+  notify(kind, summary, opts);
 }
 
-export function notifyWarning(summary: string, extra?: Partial<NotificationInput>): void {
-  notify("warning", summary, extra);
+export function notifySuccess(summary: string, opts?: NotifyOptions): void {
+  publish("success", summary, opts);
 }
 
-export function notifyError(summary: string, extra?: Partial<NotificationInput>): void {
-  notify("error", summary, extra);
+export function notifyInfo(summary: string, opts?: NotifyOptions): void {
+  publish("info", summary, opts);
+}
+
+export function notifyWarning(summary: string, opts?: NotifyOptions): void {
+  publish("warning", summary, opts);
+}
+
+export function notifyError(summary: string, opts?: NotifyOptions): void {
+  publish("error", summary, opts);
 }

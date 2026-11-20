@@ -121,7 +121,7 @@ export default function DataManagementPage() {
           recordOperationFeedback(opId, true, "已取消导出。", "数据管理", "logs.export");
         } else {
           const msg = `${label}导出完成：${res.path}`;
-          notifySuccess(msg, { operationId: opId });
+          notifySuccess(msg, { operationId: opId, important: true });
           setExportDialog(null);
           recordOperationFeedback(opId, true, msg, "数据管理", "logs.export");
           refresh();
@@ -167,7 +167,7 @@ export default function DataManagementPage() {
     DiagnosticsService.SetLogCapacity(opId, bytes)
       .then(() => {
         const msg = `日志容量已设置为 ${formatCapacity(bytes)}。`;
-        notifySuccess(msg, { operationId: opId });
+        notifySuccess(msg, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, msg, "数据管理", "logs.set_capacity");
         setCapacityDialog(false);
         refresh();

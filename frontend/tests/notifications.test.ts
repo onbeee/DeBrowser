@@ -1,127 +1,163 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-// @ts-ignore plain TS module import for node --test
+// @ts-ignore plain TS module imports for node --test
 import {
   MAX_NOTIFICATIONS,
   MAX_VISIBLE_TOASTS,
   TOAST_DURATION_MS,
   itemCounts,
-  nextToastExpiry,
   pushNotification,
-  toastAlive,
-  visibleToasts,
+  pushToast,
   type AppNotification,
 } from "../src/lib/notifications.ts";
+// @ts-ignore plain TS module import for node --test
+import { useNotificationStore } from "../src/stores/useNotificationStore.ts";
 
-function rec(id: number, kind: AppNotification["kind"], createdAt: number): AppNotification {
-  return { id, kind, summary: `n${id}`, createdAt };
+function rec(id: number, summary = `n${id}`): AppNotification {
+  return { id, kind: "info", summary, important: false, createdAt: id * 1000 };
 }
 
-test("toast duration is a unified 3 seconds for every kind", () => {
-  assert.equal(TOAST_DURATION_MS, 3000);
-  const t0 = 1_000_000;
-  for (const kind of ["info", "success", "warning", "error"] as const) {
-    assert.equal(toastAlive(rec(1, kind, t0), t0 + 2999), true);
-    assert.equal(toastAlive(rec(1, kind, t0), t0 + 3000), false);
-  }
-});
+function state() {
+  return useNotificationStore.getState();
+}
 
-test("push appends and evicts the oldest beyond the record cap", () => {
+function reset() {
+  state().clearAll();
+}
+
+// ---------- 通知台（lib 层） ----------
+
+test("center list caps at 80 and evicts the oldest on the 81st", () => {
+  assert.equal(MAX_NOTIFICATIONS, 80);
   let list: AppNotification[] = [];
-  for (let i = 1; i <= MAX_NOTIFICATIONS + 5; i++) {
+  for (let i = 1; i <= MAX_NOTIFICATIONS + 1; i++) {
     list = pushNotification(list, { kind: "info", summary: `n${i}` }, i, i * 1000);
   }
   assert.equal(list.length, MAX_NOTIFICATIONS);
-  assert.equal(list[0].id, 6);
-  assert.equal(list[list.length - 1].id, MAX_NOTIFICATIONS + 5);
+  assert.equal(list[0].id, 2);
+  assert.equal(list[list.length - 1].id, MAX_NOTIFICATIONS + 1);
 });
 
-test("push does not mutate the input list", () => {
-  const before = [rec(1, "info", 0)];
-  const after = pushNotification(before, { kind: "success", summary: "x" }, 2, 1000);
+test("push appends in time order (newest last) and does not mutate input", () => {
+  const before = [rec(1)];
+  const after = pushNotification(before, { kind: "success", summary: "x" }, 2, 2000);
   assert.equal(before.length, 1);
-  assert.equal(after.length, 2);
-});
-
-test("two toasts keep independent lifetimes", () => {
-  const t0 = 1_000_000;
-  const list = [rec(1, "success", t0), rec(2, "success", t0 + 1000)];
-  // At t0+3000 the first has expired, the second still has 1s left.
   assert.deepEqual(
-    visibleToasts(list, new Set(), t0 + 3000).map((r) => r.id),
-    [2],
-  );
-  assert.deepEqual(
-    visibleToasts(list, new Set(), t0 + 3999).map((r) => r.id),
-    [2],
-  );
-  assert.deepEqual(visibleToasts(list, new Set(), t0 + 4000), []);
-});
-
-test("FIFO: the 4th toast immediately displaces the 1st, the 5th the 2nd", () => {
-  // Spec timeline (seconds): A@0, B@1, C@2, D@2.5 -> B,C,D; E@3.5 -> C,D,E.
-  const t0 = 1_000_000;
-  const mk = (id: number, atSec: number) => rec(id, "info", t0 + atSec * 1000);
-  const abc = [mk(1, 0), mk(2, 1), mk(3, 2)];
-  assert.deepEqual(
-    visibleToasts(abc, new Set(), t0 + 2000).map((r) => r.id),
-    [3, 2, 1],
-  );
-  const abcd = [...abc, mk(4, 2.5)];
-  // A is displaced at once even though it has only been shown 2.5s.
-  assert.deepEqual(
-    visibleToasts(abcd, new Set(), t0 + 2500).map((r) => r.id),
-    [4, 3, 2],
-  );
-  const abcde = [...abcd, mk(5, 3.5)];
-  assert.deepEqual(
-    visibleToasts(abcde, new Set(), t0 + 3500).map((r) => r.id),
-    [5, 4, 3],
+    after.map((r) => r.id),
+    [1, 2],
   );
 });
 
-test("a displaced toast never comes back when a newer one is closed", () => {
-  const t0 = 1_000_000;
-  const list = [rec(1, "info", t0), rec(2, "info", t0), rec(3, "info", t0), rec(4, "info", t0)];
-  // 4th arrival displaced #1; closing #4 must not resurrect #1.
-  assert.deepEqual(
-    visibleToasts(list, new Set([4]), t0 + 100).map((r) => r.id),
-    [3, 2],
-  );
-  // Manual close removes only that toast; the records stay in the list.
-  assert.deepEqual(
-    visibleToasts(list, new Set([3]), t0 + 100).map((r) => r.id),
-    [4, 2],
-  );
-  assert.equal(list.length, 4);
+test("important flag defaults to false and is preserved when set", () => {
+  const plain = pushNotification([], { kind: "info", summary: "a" }, 1, 0);
+  assert.equal(plain[0].important, false);
+  const marked = pushNotification([], { kind: "info", summary: "b", important: true }, 2, 0);
+  assert.equal(marked[0].important, true);
 });
 
-test("visible toasts are capped at MAX_VISIBLE_TOASTS, newest first", () => {
-  const t0 = 1_000_000;
-  const list = [1, 2, 3, 4, 5].map((i) => rec(i, "error", t0 + i));
-  const vis = visibleToasts(list, new Set(), t0 + 100);
-  assert.equal(vis.length, MAX_VISIBLE_TOASTS);
+// ---------- 浮窗展示列表（lib 层） ----------
+
+test("toast list is FIFO capped at 3: the 4th displaces the 1st", () => {
+  assert.equal(MAX_VISIBLE_TOASTS, 3);
+  let toasts: AppNotification[] = [];
+  for (let i = 1; i <= 4; i++) toasts = pushToast(toasts, rec(i));
   assert.deepEqual(
-    vis.map((r) => r.id),
-    [5, 4, 3],
+    toasts.map((t) => t.id),
+    [2, 3, 4],
+  );
+  toasts = pushToast(toasts, rec(5));
+  assert.deepEqual(
+    toasts.map((t) => t.id),
+    [3, 4, 5],
   );
 });
 
-test("nextToastExpiry returns the earliest live expiry or null", () => {
-  const t0 = 1_000_000;
-  const list = [
-    rec(1, "error", t0), // expires t0+3000
-    rec(2, "info", t0 + 1000), // expires t0+4000
-    rec(3, "success", t0), // closed below
-  ];
-  assert.equal(nextToastExpiry(list, new Set([3]), t0 + 500), t0 + 3000);
-  // Everything closed -> no timer should be kept.
-  assert.equal(nextToastExpiry(list, new Set([1, 2, 3]), t0 + 500), null);
-  // Everything expired -> null.
-  assert.equal(nextToastExpiry(list, new Set(), t0 + 9000), null);
-  // Empty list -> null.
-  assert.equal(nextToastExpiry([], new Set(), t0), null);
+test("toast duration constant is a unified 3 seconds", () => {
+  assert.equal(TOAST_DURATION_MS, 3000);
 });
+
+// ---------- 统一发布（store 层） ----------
+
+test("a plain notification enters the center only, never the toasts", () => {
+  reset();
+  state().notify({ kind: "info", summary: "普通通知" });
+  assert.equal(state().notifications.length, 1);
+  assert.equal(state().toasts.length, 0);
+});
+
+test("an important notification is ONE entity shown in both center and toasts", () => {
+  reset();
+  state().notify({ kind: "success", summary: "重点通知", important: true });
+  assert.equal(state().notifications.length, 1);
+  assert.equal(state().toasts.length, 1);
+  // Same object reference: not a second, duplicated entity.
+  assert.equal(state().toasts[0], state().notifications[0]);
+  assert.equal(state().toasts[0].id, state().notifications[0].id);
+});
+
+test("the newest notification is last in the list (center renders it first)", () => {
+  reset();
+  state().notify({ kind: "info", summary: "第一条" });
+  state().notify({ kind: "info", summary: "第二条" });
+  const list = state().notifications;
+  assert.equal(list[list.length - 1].summary, "第二条");
+});
+
+test("store keeps at most 80 notifications, evicting the earliest", () => {
+  reset();
+  for (let i = 0; i < MAX_NOTIFICATIONS + 1; i++) {
+    state().notify({ kind: "info", summary: `批量 ${i}` });
+  }
+  const list = state().notifications;
+  assert.equal(list.length, MAX_NOTIFICATIONS);
+  assert.equal(list[0].summary, "批量 1");
+});
+
+test("dismissing a toast never deletes the center notification", () => {
+  reset();
+  state().notify({ kind: "error", summary: "重点失败", important: true });
+  const id = state().notifications[0].id;
+  state().dismissToast(id);
+  assert.equal(state().toasts.length, 0);
+  assert.equal(state().notifications.length, 1);
+  assert.equal(state().notifications[0].id, id);
+});
+
+test("manual dismiss removes only that toast; same-text toasts are unaffected", () => {
+  reset();
+  state().notify({ kind: "success", summary: "相同文本", important: true });
+  state().notify({ kind: "success", summary: "相同文本", important: true });
+  const [first, second] = state().toasts;
+  state().dismissToast(first.id);
+  assert.deepEqual(
+    state().toasts.map((t) => t.id),
+    [second.id],
+  );
+  assert.equal(state().notifications.length, 2);
+});
+
+test("a displaced toast never comes back when a newer toast is dismissed", () => {
+  reset();
+  for (let i = 0; i < 4; i++) {
+    state().notify({ kind: "info", summary: `重点 ${i}`, important: true });
+  }
+  // 4 important toasts: the 1st was displaced by the 4th.
+  assert.equal(state().toasts.length, 3);
+  const newest = state().toasts[state().toasts.length - 1];
+  state().dismissToast(newest.id);
+  assert.equal(state().toasts.length, 2);
+  assert.equal(state().notifications.length, 4);
+});
+
+test("clearAll empties both the center list and the toasts", () => {
+  reset();
+  state().notify({ kind: "info", summary: "x", important: true });
+  state().clearAll();
+  assert.equal(state().notifications.length, 0);
+  assert.equal(state().toasts.length, 0);
+});
+
+// ---------- 逐项计数 ----------
 
 test("itemCounts tallies per-item results", () => {
   assert.deepEqual(
