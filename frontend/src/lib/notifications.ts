@@ -37,13 +37,8 @@ export interface NotificationInput {
   operationId?: string;
 }
 
-/** 各类型浮动提示的默认显示时长（毫秒），全局统一，页面不得自设。 */
-export const NOTIFICATION_DURATIONS: Record<NotificationKind, number> = {
-  info: 3000,
-  success: 4000,
-  warning: 6000,
-  error: 8000,
-};
+/** 浮动提示的统一显示时长（毫秒）：不分类型，全部 3 秒。 */
+export const TOAST_DURATION_MS = 3000;
 
 /** 浮动提示同时显示的上限。 */
 export const MAX_VISIBLE_TOASTS = 3;
@@ -73,30 +68,42 @@ export function pushNotification(
   return next.length > MAX_NOTIFICATIONS ? next.slice(next.length - MAX_NOTIFICATIONS) : next;
 }
 
-/** 一条记录的浮动提示是否仍在显示期内。 */
+/** 一条记录的浮动提示是否仍在显示期内（从显示时起 3 秒）。 */
 export function toastAlive(record: AppNotification, now: number): boolean {
-  return now - record.createdAt < NOTIFICATION_DURATIONS[record.kind];
+  return now - record.createdAt < TOAST_DURATION_MS;
 }
 
 /**
- * 当前应显示的浮动提示：未过期、未被手动关闭的记录中，
- * 取最新 MAX_VISIBLE_TOASTS 条，最新在前。超出的记录不
- * 丢失，可在通知台查看；较早的提示过期后，较新的仍在
- * 显示期内的记录按此规则继续占据可见位置。
+ * 浮窗窗口（先进先出）：按到达顺序维护最多 MAX_VISIBLE_TOASTS
+ * 条——新通知到来且窗口已满时，最早的一条立即被顶掉，不等
+ * 其 3 秒结束；被顶掉、被手动关闭或已过期的通知不会因为
+ * 其他通知消失而重新出现。窗口只决定浮窗展示，记录本身
+ * 仍保留在通知台列表中。
  */
+function toastWindow(list: readonly AppNotification[]): AppNotification[] {
+  const window: AppNotification[] = [];
+  for (const record of list) {
+    window.push(record);
+    if (window.length > MAX_VISIBLE_TOASTS) window.shift();
+  }
+  return window;
+}
+
+/** 当前应显示的浮动提示：窗口内未过期、未手动关闭的记录，最新在前。 */
 export function visibleToasts(
   list: readonly AppNotification[],
   closedToastIds: ReadonlySet<number>,
   now: number,
 ): AppNotification[] {
-  const alive = list.filter((r) => !closedToastIds.has(r.id) && toastAlive(r, now));
-  return alive.slice(-MAX_VISIBLE_TOASTS).reverse();
+  return toastWindow(list)
+    .filter((r) => !closedToastIds.has(r.id) && toastAlive(r, now))
+    .reverse();
 }
 
 /**
- * 下一条浮动提示的到期时间（毫秒时间戳）：取全部未关闭、
- * 未过期记录中最早的到期时刻；没有这样的记录时返回 null
- * （此时不应保留任何定时器）。
+ * 下一条浮动提示的到期时间（毫秒时间戳）：取当前浮窗窗口
+ * 内未关闭、未过期记录中最早的到期时刻；没有这样的记录时
+ * 返回 null（此时不应保留任何定时器）。
  */
 export function nextToastExpiry(
   list: readonly AppNotification[],
@@ -104,9 +111,9 @@ export function nextToastExpiry(
   now: number,
 ): number | null {
   let next: number | null = null;
-  for (const record of list) {
+  for (const record of toastWindow(list)) {
     if (closedToastIds.has(record.id) || !toastAlive(record, now)) continue;
-    const expiry = record.createdAt + NOTIFICATION_DURATIONS[record.kind];
+    const expiry = record.createdAt + TOAST_DURATION_MS;
     if (next === null || expiry < next) next = expiry;
   }
   return next;

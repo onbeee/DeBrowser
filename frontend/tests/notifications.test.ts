@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   MAX_NOTIFICATIONS,
   MAX_VISIBLE_TOASTS,
-  NOTIFICATION_DURATIONS,
+  TOAST_DURATION_MS,
   itemCounts,
   nextToastExpiry,
   pushNotification,
@@ -17,11 +17,13 @@ function rec(id: number, kind: AppNotification["kind"], createdAt: number): AppN
   return { id, kind, summary: `n${id}`, createdAt };
 }
 
-test("durations are unified per kind", () => {
-  assert.equal(NOTIFICATION_DURATIONS.info, 3000);
-  assert.equal(NOTIFICATION_DURATIONS.success, 4000);
-  assert.equal(NOTIFICATION_DURATIONS.warning, 6000);
-  assert.equal(NOTIFICATION_DURATIONS.error, 8000);
+test("toast duration is a unified 3 seconds for every kind", () => {
+  assert.equal(TOAST_DURATION_MS, 3000);
+  const t0 = 1_000_000;
+  for (const kind of ["info", "success", "warning", "error"] as const) {
+    assert.equal(toastAlive(rec(1, kind, t0), t0 + 2999), true);
+    assert.equal(toastAlive(rec(1, kind, t0), t0 + 3000), false);
+  }
 });
 
 test("push appends and evicts the oldest beyond the record cap", () => {
@@ -41,18 +43,60 @@ test("push does not mutate the input list", () => {
   assert.equal(after.length, 2);
 });
 
-test("toast lifetime follows the per-kind duration", () => {
+test("two toasts keep independent lifetimes", () => {
   const t0 = 1_000_000;
-  assert.equal(toastAlive(rec(1, "info", t0), t0 + 2999), true);
-  assert.equal(toastAlive(rec(1, "info", t0), t0 + 3000), false);
-  assert.equal(toastAlive(rec(2, "success", t0), t0 + 3999), true);
-  assert.equal(toastAlive(rec(2, "success", t0), t0 + 4000), false);
-  assert.equal(toastAlive(rec(3, "warning", t0), t0 + 5999), true);
-  assert.equal(toastAlive(rec(4, "error", t0), t0 + 7999), true);
-  assert.equal(toastAlive(rec(4, "error", t0), t0 + 8000), false);
+  const list = [rec(1, "success", t0), rec(2, "success", t0 + 1000)];
+  // At t0+3000 the first has expired, the second still has 1s left.
+  assert.deepEqual(
+    visibleToasts(list, new Set(), t0 + 3000).map((r) => r.id),
+    [2],
+  );
+  assert.deepEqual(
+    visibleToasts(list, new Set(), t0 + 3999).map((r) => r.id),
+    [2],
+  );
+  assert.deepEqual(visibleToasts(list, new Set(), t0 + 4000), []);
 });
 
-test("visible toasts are capped at 3, newest first", () => {
+test("FIFO: the 4th toast immediately displaces the 1st, the 5th the 2nd", () => {
+  // Spec timeline (seconds): A@0, B@1, C@2, D@2.5 -> B,C,D; E@3.5 -> C,D,E.
+  const t0 = 1_000_000;
+  const mk = (id: number, atSec: number) => rec(id, "info", t0 + atSec * 1000);
+  const abc = [mk(1, 0), mk(2, 1), mk(3, 2)];
+  assert.deepEqual(
+    visibleToasts(abc, new Set(), t0 + 2000).map((r) => r.id),
+    [3, 2, 1],
+  );
+  const abcd = [...abc, mk(4, 2.5)];
+  // A is displaced at once even though it has only been shown 2.5s.
+  assert.deepEqual(
+    visibleToasts(abcd, new Set(), t0 + 2500).map((r) => r.id),
+    [4, 3, 2],
+  );
+  const abcde = [...abcd, mk(5, 3.5)];
+  assert.deepEqual(
+    visibleToasts(abcde, new Set(), t0 + 3500).map((r) => r.id),
+    [5, 4, 3],
+  );
+});
+
+test("a displaced toast never comes back when a newer one is closed", () => {
+  const t0 = 1_000_000;
+  const list = [rec(1, "info", t0), rec(2, "info", t0), rec(3, "info", t0), rec(4, "info", t0)];
+  // 4th arrival displaced #1; closing #4 must not resurrect #1.
+  assert.deepEqual(
+    visibleToasts(list, new Set([4]), t0 + 100).map((r) => r.id),
+    [3, 2],
+  );
+  // Manual close removes only that toast; the records stay in the list.
+  assert.deepEqual(
+    visibleToasts(list, new Set([3]), t0 + 100).map((r) => r.id),
+    [4, 2],
+  );
+  assert.equal(list.length, 4);
+});
+
+test("visible toasts are capped at MAX_VISIBLE_TOASTS, newest first", () => {
   const t0 = 1_000_000;
   const list = [1, 2, 3, 4, 5].map((i) => rec(i, "error", t0 + i));
   const vis = visibleToasts(list, new Set(), t0 + 100);
@@ -63,22 +107,20 @@ test("visible toasts are capped at 3, newest first", () => {
   );
 });
 
-test("closed and expired toasts are excluded; overflow stays in records only", () => {
+test("nextToastExpiry returns the earliest live expiry or null", () => {
   const t0 = 1_000_000;
   const list = [
-    rec(1, "info", t0), // expired by t0+5000 (info = 3s)
-    rec(2, "error", t0),
-    rec(3, "error", t0),
-    rec(4, "error", t0),
-    rec(5, "error", t0),
+    rec(1, "error", t0), // expires t0+3000
+    rec(2, "info", t0 + 1000), // expires t0+4000
+    rec(3, "success", t0), // closed below
   ];
-  const vis = visibleToasts(list, new Set([5]), t0 + 5000);
-  assert.deepEqual(
-    vis.map((r) => r.id),
-    [4, 3, 2],
-  );
-  // The overflowed/expired records are NOT deleted from the list.
-  assert.equal(list.length, 5);
+  assert.equal(nextToastExpiry(list, new Set([3]), t0 + 500), t0 + 3000);
+  // Everything closed -> no timer should be kept.
+  assert.equal(nextToastExpiry(list, new Set([1, 2, 3]), t0 + 500), null);
+  // Everything expired -> null.
+  assert.equal(nextToastExpiry(list, new Set(), t0 + 9000), null);
+  // Empty list -> null.
+  assert.equal(nextToastExpiry([], new Set(), t0), null);
 });
 
 test("itemCounts tallies per-item results", () => {
@@ -92,20 +134,4 @@ test("itemCounts tallies per-item results", () => {
     { success: 2, failed: 1, skipped: 1 },
   );
   assert.deepEqual(itemCounts([]), { success: 0, failed: 0, skipped: 0 });
-});
-
-test("nextToastExpiry returns the earliest live expiry or null", () => {
-  const t0 = 1_000_000;
-  const list = [
-    rec(1, "error", t0), // expires t0+8000
-    rec(2, "info", t0 + 1000), // expires t0+4000
-    rec(3, "success", t0), // closed below
-  ];
-  assert.equal(nextToastExpiry(list, new Set([3]), t0 + 500), t0 + 4000);
-  // Everything closed -> no timer should be kept.
-  assert.equal(nextToastExpiry(list, new Set([1, 2, 3]), t0 + 500), null);
-  // Everything expired -> null.
-  assert.equal(nextToastExpiry(list, new Set(), t0 + 9000), null);
-  // Empty list -> null.
-  assert.equal(nextToastExpiry([], new Set(), t0), null);
 });
