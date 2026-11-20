@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -104,6 +105,13 @@ var watchSettleHook func(instanceID string)
 type procWatch struct {
 	proc runner.Process
 	done chan struct{}
+	// cdpPort is the loopback Chrome DevTools Protocol port
+	// assigned by the launch flow for this process (Stage 10).
+	// Zero means the process has no DeBrowser-assigned CDP port
+	// (allocation failed at launch, or the process was re-adopted
+	// after a DeBrowser restart): such instances run normally
+	// but cannot join synchronization.
+	cdpPort int
 	// exited is set under rtMu by the watcher the moment it
 	// observes the exit, before any cleanup: a start operation
 	// that sees it knows the process is gone and must not
@@ -611,6 +619,17 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	s.rtMu.Unlock()
 
 	args := []string{"--user-data-dir=" + launchDir}
+	// Stage 10: every launch asks the browser to open a
+	// debugging port bound to loopback only, so the instance
+	// CAN join multi-instance synchronization. Allocation or
+	// browser support failure must never fail the launch itself:
+	// the instance then simply runs without sync capability.
+	cdpPort := allocateCDPPort()
+	if cdpPort > 0 {
+		args = append(args,
+			"--remote-debugging-address=127.0.0.1",
+			"--remote-debugging-port="+strconv.Itoa(cdpPort))
+	}
 	if strings.TrimSpace(inst.StartURL) != "" {
 		args = append(args, strings.TrimSpace(inst.StartURL))
 	}
@@ -640,7 +659,7 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	// so an exit at any point of the remaining start sequence is
 	// observed exactly once and can never be overwritten by the
 	// start flow persisting a running state for a dead process.
-	w := &procWatch{proc: proc, done: make(chan struct{})}
+	w := &procWatch{proc: proc, done: make(chan struct{}), cdpPort: cdpPort}
 	s.rtMu.Lock()
 	s.procs[id] = w
 	s.rtMu.Unlock()
@@ -858,4 +877,98 @@ func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
 	// running — never a premature "stopped".
 	op.Step("关闭浏览器", logging.StatusFailed, nil)
 	return fmt.Errorf("关闭未完成：浏览器未能正常退出，实例仍在运行")
+}
+
+// allocateCDPPort reserves an ephemeral TCP port on the
+// loopback interface and releases it for the browser to bind.
+// The small race between release and the browser's bind is
+// inherent to port hand-off; a lost race makes the browser run
+// without a debugging endpoint, which synchronization detects
+// and reports — it never breaks the launch.
+func allocateCDPPort() int {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0
+	}
+	defer ln.Close()
+	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
+		return addr.Port
+	}
+	return 0
+}
+
+// SyncRuntimeInfo is the verified runtime identity of one
+// instance for the synchronization module (Stage 10). It is the
+// ONLY channel through which sync learns about processes: sync
+// never scans for processes or ports itself.
+type SyncRuntimeInfo struct {
+	InstanceID string
+	Running    bool
+	// Verified is true when a tracked process exists and its
+	// recorded identity is complete.
+	Verified        bool
+	PID             int
+	ProcessCreateAt int64
+	ExecutablePath  string
+	UserDataDir     string // absolute profile directory
+	CDPPort         int    // 0 = no DeBrowser-assigned CDP port
+}
+
+// SyncRuntimeInfo returns the instance's current runtime
+// identity, re-verifying the tracked process against the
+// persisted runtime record. ok=false means the instance does
+// not exist. A process whose identity cannot be fully verified
+// reports Verified=false and must not join synchronization.
+func (s *InstanceService) SyncRuntimeInfo(id string) (SyncRuntimeInfo, bool) {
+	c, cancel := ctx()
+	defer cancel()
+	inst, err := s.store.GetInstance(c, id)
+	if err != nil {
+		return SyncRuntimeInfo{}, false
+	}
+	info := SyncRuntimeInfo{InstanceID: id}
+	if s.effectiveStatus(inst) != model.StatusRunning {
+		return info, true
+	}
+	s.rtMu.Lock()
+	w := s.procs[id]
+	s.rtMu.Unlock()
+	if w == nil || w.proc == nil {
+		// Running per the record but not tracked by this
+		// process (e.g. re-adopted bookkeeping without a live
+		// watch): identity is not verifiable here.
+		return info, true
+	}
+	rt, err := s.store.GetInstanceRuntime(c, id)
+	if err != nil || rt.ProcessCreatedAt == 0 {
+		return info, true
+	}
+	if w.proc.PID() != rt.PID || w.proc.CreatedAt() != rt.ProcessCreatedAt {
+		return info, true
+	}
+	info.Running = true
+	info.Verified = true
+	info.PID = rt.PID
+	info.ProcessCreateAt = rt.ProcessCreatedAt
+	info.ExecutablePath = rt.ExecutablePath
+	info.UserDataDir = filepath.Join(s.layout.Data, filepath.FromSlash(inst.UserDataDir))
+	info.CDPPort = w.cdpPort
+	return info, true
+}
+
+// VerifySyncIdentity re-checks that the process identified by a
+// previously obtained SyncRuntimeInfo is still the tracked
+// process of the instance (PID + creation time + executable
+// path). Used before window operations and on session resume.
+func (s *InstanceService) VerifySyncIdentity(info SyncRuntimeInfo) bool {
+	if !info.Verified || info.PID <= 0 {
+		return false
+	}
+	s.rtMu.Lock()
+	w := s.procs[info.InstanceID]
+	s.rtMu.Unlock()
+	if w == nil || w.proc == nil {
+		return false
+	}
+	return w.proc.PID() == info.PID && w.proc.CreatedAt() == info.ProcessCreateAt
 }
