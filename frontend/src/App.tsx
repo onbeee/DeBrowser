@@ -21,11 +21,11 @@ import { recordPageNavigation } from "./lib/operations";
 export default function App() {
   const page = useAppStore((state) => state.page);
   const setStatus = useAppStore((state) => state.setStatus);
-  const setStatusError = useAppStore((state) => state.setStatusError);
   const setTheme = useAppStore((state) => state.setTheme);
 
-  // 静默加载一次后端状态（供系统设置与数据管理页面显示）；
-  // 界面没有底部固定状态栏，连接异常由各页面就地提示。
+  // 加载一次后端状态（供系统设置与数据管理页面显示）。
+  // 只在挂载时调用一次；读取失败通过全局通知显示真实原因，
+  // 不会重复弹出（后续状态更新走 app:status 事件推送）。
   const refreshStatus = useCallback(() => {
     AppService.GetStatus()
       .then((status) => {
@@ -33,9 +33,9 @@ export default function App() {
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        setStatusError(message);
+        notifyError(`读取应用状态失败：${message}`);
       });
-  }, [setStatus, setStatusError]);
+  }, [setStatus]);
 
   useEffect(() => {
     refreshStatus();

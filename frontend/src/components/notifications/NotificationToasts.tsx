@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import {
   itemCounts,
+  nextToastExpiry,
   visibleToasts,
   type AppNotification,
   type NotificationKind,
@@ -36,12 +37,15 @@ export default function NotificationToasts() {
   const setCenterOpen = useNotificationStore((s) => s.setCenterOpen);
   const [now, setNow] = useState(() => Date.now());
 
-  // 定时刷新以让到期提示自动消失（仅在有记录时运行）。
+  // 只按下一条提示的到期时刻安排一次性定时器：没有未过期
+  // 的提示时不保留定时器；新通知进入、手动关闭或记录清空
+  // 都会通过依赖变化重新计算。
   useEffect(() => {
-    if (records.length === 0) return;
-    const t = setInterval(() => setNow(Date.now()), 400);
-    return () => clearInterval(t);
-  }, [records.length]);
+    const expiry = nextToastExpiry(records, closedToastIds, now);
+    if (expiry === null) return;
+    const t = setTimeout(() => setNow(Date.now()), Math.max(0, expiry - now) + 20);
+    return () => clearTimeout(t);
+  }, [records, closedToastIds, now]);
 
   const toasts = visibleToasts(records, closedToastIds, now);
   if (toasts.length === 0) return null;

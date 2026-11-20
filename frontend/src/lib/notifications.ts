@@ -93,6 +93,25 @@ export function visibleToasts(
   return alive.slice(-MAX_VISIBLE_TOASTS).reverse();
 }
 
+/**
+ * 下一条浮动提示的到期时间（毫秒时间戳）：取全部未关闭、
+ * 未过期记录中最早的到期时刻；没有这样的记录时返回 null
+ * （此时不应保留任何定时器）。
+ */
+export function nextToastExpiry(
+  list: readonly AppNotification[],
+  closedToastIds: ReadonlySet<number>,
+  now: number,
+): number | null {
+  let next: number | null = null;
+  for (const record of list) {
+    if (closedToastIds.has(record.id) || !toastAlive(record, now)) continue;
+    const expiry = record.createdAt + NOTIFICATION_DURATIONS[record.kind];
+    if (next === null || expiry < next) next = expiry;
+  }
+  return next;
+}
+
 /** 逐项结果的汇总计数（供浮动提示与通知台共用文案）。 */
 export function itemCounts(items: readonly NotificationItem[]): {
   success: number;

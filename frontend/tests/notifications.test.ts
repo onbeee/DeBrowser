@@ -6,6 +6,7 @@ import {
   MAX_VISIBLE_TOASTS,
   NOTIFICATION_DURATIONS,
   itemCounts,
+  nextToastExpiry,
   pushNotification,
   toastAlive,
   visibleToasts,
@@ -91,4 +92,20 @@ test("itemCounts tallies per-item results", () => {
     { success: 2, failed: 1, skipped: 1 },
   );
   assert.deepEqual(itemCounts([]), { success: 0, failed: 0, skipped: 0 });
+});
+
+test("nextToastExpiry returns the earliest live expiry or null", () => {
+  const t0 = 1_000_000;
+  const list = [
+    rec(1, "error", t0), // expires t0+8000
+    rec(2, "info", t0 + 1000), // expires t0+4000
+    rec(3, "success", t0), // closed below
+  ];
+  assert.equal(nextToastExpiry(list, new Set([3]), t0 + 500), t0 + 4000);
+  // Everything closed -> no timer should be kept.
+  assert.equal(nextToastExpiry(list, new Set([1, 2, 3]), t0 + 500), null);
+  // Everything expired -> null.
+  assert.equal(nextToastExpiry(list, new Set(), t0 + 9000), null);
+  // Empty list -> null.
+  assert.equal(nextToastExpiry([], new Set(), t0), null);
 });

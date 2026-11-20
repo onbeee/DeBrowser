@@ -28,9 +28,17 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   closedToastIds: new Set<number>(),
   centerOpen: false,
   notify: (input) =>
-    set((state) => ({
-      records: pushNotification(state.records, input, nextId++, Date.now()),
-    })),
+    set((state) => {
+      const records = pushNotification(state.records, input, nextId++, Date.now());
+      // 记录被上限淘汰时，同步清掉已失效的关闭标记，
+      // 避免 closedToastIds 随运行时间无限积累。
+      if (state.closedToastIds.size === 0) return { records };
+      const aliveIds = new Set(records.map((r) => r.id));
+      const closedToastIds = new Set(
+        [...state.closedToastIds].filter((id) => aliveIds.has(id)),
+      );
+      return { records, closedToastIds };
+    }),
   closeToast: (id) =>
     set((state) => {
       const next = new Set(state.closedToastIds);

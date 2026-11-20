@@ -71,6 +71,8 @@ export default function SyncPage() {
 
   useEffect(() => {
     void refresh();
+    // 显示器列表只在页面挂载时读取一次（不是轮询）；
+    // 加载失败时通过全局通知显示真实原因，不静默吞掉。
     SyncService.ListSyncMonitors(newOperationId())
       .then((ms) => {
         const list = ms ?? [];
@@ -78,7 +80,10 @@ export default function SyncPage() {
         const primary = list.find((m) => m.primary);
         if (primary) setMonitorId(primary.id);
       })
-      .catch(() => {});
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        notifyError(`加载显示器列表失败：${message}`);
+      });
     const t = setInterval(() => void refresh(), 2500);
     return () => clearInterval(t);
   }, [refresh]);
