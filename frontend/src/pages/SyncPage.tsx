@@ -30,6 +30,9 @@ export default function SyncPage() {
   // 防止连续点击造成重复请求；请求结束（成功或失败）后恢复。
   const [busy, setBusy] = useState(false);
   const refreshFailedRef = useRef(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const hasStateRef = useRef(false);
+  const [monitorsError, setMonitorsError] = useState<string | null>(null);
   const selectionRef = useRef<SyncSelection>({ masterId: "", followerIds: [] });
   const [selection, setSelectionState] = useState<SyncSelection>(selectionRef.current);
   const setSelection = (next: SyncSelection) => {
@@ -49,6 +52,8 @@ export default function SyncPage() {
       const list = cands ?? [];
       setCandidates(list);
       setState(st);
+      hasStateRef.current = true;
+      setStatusError(null);
       refreshFailedRef.current = false;
       setSelection(
         refreshSelection(
@@ -60,33 +65,42 @@ export default function SyncPage() {
       );
     } catch (err) {
       // 状态读取失败时保留上次已知状态；只在首次失败时提示
-      // 一次，避免轮询期间反复弹出相同错误。
+      // 一次，避免轮询期间反复弹出相同错误。从未成功读取
+      // 时保留失败原因，页面显示读取失败而非伪造的停止状态。
+      const message = err instanceof Error ? err.message : String(err);
+      if (!hasStateRef.current) setStatusError(message);
       if (!refreshFailedRef.current) {
         refreshFailedRef.current = true;
-        const message = err instanceof Error ? err.message : String(err);
         notifyError(`同步状态读取失败：${message}`);
       }
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-    // 显示器列表只在页面挂载时读取一次（不是轮询）；
-    // 加载失败时通过全局通知显示真实原因，不静默吞掉。
+  // 显示器列表只在页面挂载时读取一次（不是轮询）；
+  // 加载失败时通过全局通知显示真实原因，不静默吞掉，
+  // 并保留失败原因供页面区分读取失败与真实空列表。
+  const loadMonitors = useCallback(() => {
     SyncService.ListSyncMonitors(newOperationId())
       .then((ms) => {
         const list = ms ?? [];
         setMonitors(list);
+        setMonitorsError(null);
         const primary = list.find((m) => m.primary);
         if (primary) setMonitorId(primary.id);
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
+        setMonitorsError(message);
         notifyError(`加载显示器列表失败：${message}`);
       });
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    loadMonitors();
     const t = setInterval(() => void refresh(), 2500);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, loadMonitors]);
 
   const run = async (
     action: string,
@@ -127,9 +141,25 @@ export default function SyncPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-6 py-5">
       <div className="flex items-center gap-3">
         <span className="rounded-full bg-(--hover-bg) px-2.5 py-0.5 text-xs text-(--text-dim)">
-          {state?.phase ?? "已停止"}
+          {state ? state.phase : statusError ? "读取失败" : "加载中"}
         </span>
       </div>
+
+      {state === null && statusError && (
+        <div className="flex items-center gap-2 rounded-xl border border-(--border) bg-(--panel-bg) px-4 py-3">
+          <p className="flex-1 text-sm text-(--danger)">同步状态读取失败：{statusError}</p>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            className="shrink-0 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+          >
+            重新加载
+          </button>
+        </div>
+      )}
+      {state === null && !statusError && (
+        <p className="text-sm text-(--text-faint)">正在加载同步状态…</p>
+      )}
 
       <section className="rounded-xl border border-(--border) bg-(--panel-bg) p-4">
         <div className="mb-3 flex items-center justify-between">
@@ -223,7 +253,7 @@ export default function SyncPage() {
                 </tr>
               );
             })}
-            {candidates.length === 0 && (
+            {candidates.length === 0 && state !== null && (
               <tr>
                 <td colSpan={5} className="py-3 text-(--text-faint)">
                   尚无浏览器实例。请先在「浏览器实例」中创建并启动实例。
@@ -250,6 +280,18 @@ export default function SyncPage() {
               </option>
             ))}
           </select>
+          {monitorsError && monitors.length === 0 && (
+            <>
+              <span className="text-sm text-(--danger)">显示器列表读取失败：{monitorsError}</span>
+              <button
+                type="button"
+                onClick={loadMonitors}
+                className="rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+              >
+                重新加载
+              </button>
+            </>
+          )}
           <button
             className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
             disabled={busy || arrangeIds.length === 0}

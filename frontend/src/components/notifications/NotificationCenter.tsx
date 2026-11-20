@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Trash2, X } from "lucide-react";
-import type { AppNotification } from "../../lib/notifications";
+import { formatNotificationTime, type AppNotification } from "../../lib/notifications";
 import { useNotificationStore } from "../../stores/useNotificationStore";
 import { NotificationKindIcon } from "./NotificationToasts";
 
@@ -20,9 +20,16 @@ function RecordRow({ record }: { record: AppNotification }) {
           <NotificationKindIcon kind={record.kind} size={15} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-sm leading-snug text-(--text-main)">{record.summary}</p>
+          <p className="text-sm leading-snug text-(--text-main)">
+            {record.summary}
+            {record.important && (
+              <span className="ml-2 inline-block rounded border border-(--border) bg-(--hover-bg) px-1 py-px align-middle text-[10px] leading-tight text-(--accent)">
+                重点
+              </span>
+            )}
+          </p>
           <p className="mt-0.5 text-xs text-(--text-faint)">
-            {new Date(record.createdAt).toLocaleTimeString("zh-CN")}
+            {formatNotificationTime(record.createdAt, Date.now())}
           </p>
           {record.detail && (
             <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-(--text-dim)">

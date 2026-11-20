@@ -31,6 +31,7 @@ export default function SettingsPage() {
   const setTheme = useAppStore((state) => state.setTheme);
 
   const changeTheme = (next: Theme) => {
+    const previous = theme;
     setTheme(next); // 即时生效
     const label = THEME_OPTIONS.find((o) => o.value === next)?.label ?? next;
     const opId = newOperationId();
@@ -40,6 +41,10 @@ export default function SettingsPage() {
         recordOperationFeedback(opId, true, `主题已切换并保存：${next}`, "设置", "settings.update_theme");
       })
       .catch((err: unknown) => {
+        // 保存失败必须回滚到切换前的主题：界面不得显示
+        // 一个实际没有保存成功的主题（否则重启后会恢复
+        // 旧主题，造成状态不一致）。
+        setTheme(previous);
         const message = err instanceof Error ? err.message : String(err);
         notifyError(`保存主题失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `保存主题失败：${message}`, "设置", "settings.update_theme");

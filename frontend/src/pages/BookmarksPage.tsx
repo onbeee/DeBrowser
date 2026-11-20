@@ -149,6 +149,9 @@ export default function BookmarksPage() {
     }
   };
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadedRef = useRef(false);
+
   // reload 刷新资源库与实例列表。失败时默认发一条刷新失败
   // 警告；调用方需要区分语义时（首次加载、删除后刷新）传入
   // onFail 自定义提示。返回是否成功。
@@ -160,9 +163,12 @@ export default function BookmarksPage() {
       ]);
       setNodes(lib ?? []);
       setInstances(inst ?? []);
+      loadedRef.current = true;
+      setLoadError(null);
       return true;
     } catch (e) {
       const message = errText(e);
+      if (!loadedRef.current) setLoadError(message);
       if (onFail) onFail(message);
       else notifyWarning("列表刷新失败，请重新搜索。");
       return false;
@@ -272,13 +278,13 @@ export default function BookmarksPage() {
   const doDelete = async () => {
     await run("delete", "删除书签资源", async (opId) => {
       const count = await BookmarkService.DeleteLibraryNodes(opId, [...selected]);
-      // 删除成功：清空选择、退出确认状态、保留原搜索条件
-      // 重新查询。刷新失败与删除结果分开处理——删除已完成
-      // 时只提示刷新失败，绝不误报为删除失败。
+      // 删除成功即为最终结果：清空选择、退出确认状态，
+      // 随后保留原搜索条件重新查询。刷新失败只单独提示
+      // （仅通知台），不影响删除成功的通知与日志记录。
       setSelected(new Set());
       setDeleteArmed(false);
-      const ok = await reload(() => notifyWarning("删除已完成，但列表刷新失败，请重新搜索。", { important: true }));
-      return ok ? "已删除 " + count + " 项" : "";
+      await reload(() => notifyWarning("删除已完成，但列表刷新失败，请重新搜索。"));
+      return "已删除 " + count + " 项";
     });
   };
 
@@ -370,6 +376,17 @@ export default function BookmarksPage() {
               <p className="flex items-center gap-2 px-3 py-4 text-sm text-(--text-faint)">
                 <Loader2 size={14} className="animate-spin" /> 正在加载…
               </p>
+            ) : loadError && nodes.length === 0 ? (
+              <div className="px-3 py-4">
+                <p className="text-sm text-(--danger)">书签加载失败：{loadError}</p>
+                <button
+                  type="button"
+                  className="mt-2 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+                  onClick={() => void reload((message) => notifyError("加载书签失败：" + message))}
+                >
+                  重新加载
+                </button>
+              </div>
             ) : rows.length === 0 ? (
               <p className="px-3 py-4 text-sm text-(--text-faint)">
                 {nodes.length === 0 ? "资源库为空，点击「新建」添加书签或文件夹。" : "没有匹配的书签。"}

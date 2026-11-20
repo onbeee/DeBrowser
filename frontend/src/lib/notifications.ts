@@ -93,6 +93,21 @@ export function pushToast(
   return next.length > MAX_VISIBLE_TOASTS ? next.slice(next.length - MAX_VISIBLE_TOASTS) : next;
 }
 
+/**
+ * 通知时间显示（本地时间）：当天只显示时分秒，跨日期时
+ * 带上年月日，便于长时间运行后区分通知属于哪一天。
+ */
+export function formatNotificationTime(createdAt: number, now: number): string {
+  const d = new Date(createdAt);
+  const n = new Date(now);
+  const time = d.toLocaleTimeString("zh-CN", { hour12: false });
+  const sameDay =
+    d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  if (sameDay) return time;
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return `${date} ${time}`;
+}
+
 /** 逐项结果的汇总计数（供浮窗与通知台共用文案）。 */
 export function itemCounts(items: readonly NotificationItem[]): {
   success: number;

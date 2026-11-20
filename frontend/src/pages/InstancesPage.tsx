@@ -18,6 +18,7 @@ import {
 import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
 import { notify, notifyError, notifySuccess } from "../stores/useNotificationStore";
+import { classifyCounts } from "../lib/operationResult";
 import type { NotificationItem } from "../lib/notifications";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 import {
@@ -100,9 +101,8 @@ function notifyBatchResult(
     `${title}：成功 ${okNames.length} 个` +
     (skipped.length > 0 ? `，跳过 ${skipped.length} 个` : "") +
     (failed.length > 0 ? `，失败 ${failed.length} 个` : "");
-  const kind =
-    failed.length === 0 ? "success" : okNames.length === 0 && skipped.length === 0 ? "error" : "warning";
-  notify(kind, summary, { items, important: true });
+  const kind = classifyCounts(okNames.length, failed.length, skipped.length);
+  if (kind !== null) notify(kind, summary, { items, important: true });
 }
 
 interface BatchCreateState {
@@ -140,6 +140,7 @@ const BATCH_OP_ACTION: Record<BatchAction, string> = {
 export default function InstancesPage() {
   const setPage = useAppStore((state) => state.setPage);
   const [instances, setInstances] = useState<Instance[]>([]);
+  const [instancesError, setInstancesError] = useState<string | null>(null);
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   // browsersLoaded is true only after ListBrowsers has succeeded.
   // While it is false (still loading, or the load failed), saving
@@ -192,8 +193,13 @@ export default function InstancesPage() {
     try {
       const list = await InstanceService.ListInstances();
       setInstances(list ?? []);
+      setInstancesError(null);
     } catch (err) {
+      // 读取失败与真实空列表严格区分：保留失败原因供页面
+      // 显示加载失败状态（不伪装成暂无实例），同时发一条
+      // 通知台错误。已有列表时不清空。
       const message = err instanceof Error ? err.message : String(err);
+      setInstancesError(message);
       notifyError(`加载实例列表失败：${message}`);
     } finally {
       setLoading(false);
@@ -652,6 +658,17 @@ export default function InstancesPage() {
       <div className="mt-5 min-h-0 flex-1 overflow-y-auto rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (
           <p className="px-4 py-10 text-center text-sm text-(--text-faint)">加载中…</p>
+        ) : instancesError && instances.length === 0 ? (
+          <div className="flex flex-col items-center px-4 py-12 text-center">
+            <p className="text-sm text-(--danger)">实例列表加载失败：{instancesError}</p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="mt-3 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+            >
+              重新加载
+            </button>
+          </div>
         ) : instances.length === 0 ? (
           <div className="flex flex-col items-center px-4 py-12 text-center">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-(--hover-bg) text-(--text-faint)">

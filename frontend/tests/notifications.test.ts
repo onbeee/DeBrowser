@@ -5,6 +5,7 @@ import {
   MAX_NOTIFICATIONS,
   MAX_VISIBLE_TOASTS,
   TOAST_DURATION_MS,
+  formatNotificationTime,
   itemCounts,
   pushNotification,
   pushToast,
@@ -170,4 +171,12 @@ test("itemCounts tallies per-item results", () => {
     { success: 2, failed: 1, skipped: 1 },
   );
   assert.deepEqual(itemCounts([]), { success: 0, failed: 0, skipped: 0 });
+});
+
+test("notification time: same day shows time only, other days include the date", () => {
+  const created = new Date(2026, 0, 14, 23, 5, 7).getTime();
+  const sameDay = new Date(2026, 0, 14, 23, 59, 59).getTime();
+  const nextDay = new Date(2026, 0, 15, 0, 0, 1).getTime();
+  assert.match(formatNotificationTime(created, sameDay), /^\d{2}:\d{2}:\d{2}$/);
+  assert.match(formatNotificationTime(created, nextDay), /^2026-01-14 \d{2}:\d{2}:\d{2}$/);
 });

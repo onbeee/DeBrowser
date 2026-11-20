@@ -57,6 +57,7 @@ function formatUptime(totalSeconds: number): string {
 export default function DataManagementPage() {
   const status = useAppStore((state) => state.status);
   const [view, setView] = useState<DiagnosticsView | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   // 记录导出对话框（类别 + 动态日期范围）。
   const [exportDialog, setExportDialog] = useState<RecordCategory | null>(null);
@@ -75,9 +76,14 @@ export default function DataManagementPage() {
     DiagnosticsService.GetDiagnostics()
       .then((v) => {
         setView(v);
+        setLoadError(null);
       })
       .catch((err: unknown) => {
-        notifyError(`无法读取数据管理信息：${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        // 首次读取失败保留原因供页面显示失败状态（不一直
+        // 显示加载中）；已有数据时保留旧数据不清空。
+        setLoadError((prev) => prev ?? message);
+        notifyError(`无法读取数据管理信息：${message}`);
       });
   }, []);
 
@@ -116,9 +122,9 @@ export default function DataManagementPage() {
     DiagnosticsService.ExportRecords(opId, category, exportStart, exportEnd)
       .then((res: ExportResult) => {
         if (res.cancelled) {
-          // 用户主动取消保存对话框：静默关闭，不提示。
+          // 用户主动取消保存对话框：静默关闭，不通知、
+          // 不记录成功或失败的操作反馈。
           setExportDialog(null);
-          recordOperationFeedback(opId, true, "已取消导出。", "数据管理", "logs.export");
         } else {
           const msg = `${label}导出完成：${res.path}`;
           notifySuccess(msg, { operationId: opId, important: true });
@@ -129,7 +135,7 @@ export default function DataManagementPage() {
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        setDialogError(`导出失败：${message}`);
+        notifyError(`导出失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `导出失败：${message}`, "数据管理", "logs.export");
       })
       .finally(() => setExporting(false));
@@ -174,7 +180,7 @@ export default function DataManagementPage() {
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        setCapError(`设置失败：${message}`);
+        notifyError(`设置失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `设置失败：${message}`, "数据管理", "logs.set_capacity");
       })
       .finally(() => setCapSaving(false));
@@ -201,6 +207,23 @@ export default function DataManagementPage() {
     const names = fileNamesFor(key);
     return names.length > 0 ? names.join("\n") : "暂无文件";
   };
+
+  if (view === null && loadError) {
+    return (
+      <div className="mx-auto max-w-4xl p-8">
+        <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-6 text-center">
+          <p className="text-sm text-(--danger)">无法读取数据管理信息：{loadError}</p>
+          <button
+            type="button"
+            onClick={refresh}
+            className="mt-3 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+          >
+            重新加载
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-8">

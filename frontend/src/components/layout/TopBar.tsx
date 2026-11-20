@@ -5,7 +5,7 @@ import { useNotificationStore } from "../../stores/useNotificationStore";
 
 // 顶栏是页面标题的唯一所有者：只显示当前一级页面的名称，
 // 右侧是全局「通知台」入口。页面内容中不再重复主标题；
-// 连接与数据库异常由各页面在真正发生时就地提示。
+// 操作结果与异常通过全局通知系统统一反馈（通知台全面显示，重点结果同时浮窗提醒）。
 export default function TopBar() {
   const page = useAppStore((state) => state.page);
   const setCenterOpen = useNotificationStore((state) => state.setCenterOpen);
