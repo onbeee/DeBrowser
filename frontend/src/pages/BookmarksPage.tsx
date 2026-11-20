@@ -18,13 +18,13 @@ import {
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { BookmarkNode } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import { notifyError, notifySuccess, notifyWarning } from "../stores/useNotificationStore";
 import {
   buildTree,
   folderOptions,
   searchVisibleIds,
   notStoppedCount,
   selectionScope,
-  libraryCounts,
   siblingIds,
   syncEntryDecision,
   visibleRows,
@@ -49,8 +49,6 @@ export default function BookmarksPage() {
   const [instances, setInstances] = useState<BookmarkInstanceInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -62,7 +60,7 @@ export default function BookmarksPage() {
 
   const [createTab, setCreateTab] = useState<DialogTab | null>(null);
   const [editNode, setEditNode] = useState<BookmarkNode | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteArmed, setDeleteArmed] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   // 同步入口状态：idle 无窗口；confirm 显示「关闭实例」确认窗口；
   // closing 正在关闭全部运行中实例并等待确认停止。
@@ -94,8 +92,6 @@ export default function BookmarksPage() {
   // 打开同步弹窗；存在运行中实例时先弹确认窗口；只有状态无法
   // 确认的实例时关闭也无济于事，直接提示。
   const handleSyncClick = async () => {
-    setError(null);
-    setNotice(null);
     setBusy("sync-check");
     try {
       const gates = await collectBookmarkGates();
@@ -105,12 +101,12 @@ export default function BookmarksPage() {
       } else if (decision === "confirm") {
         setSyncGate("confirm");
       } else {
-        setError(
+        notifyError(
           "有 " + notStoppedCount(gates) + " 个浏览器实例的状态无法确认停止，无法打开书签同步。请先在浏览器实例页面处理后再试。",
         );
       }
     } catch (err) {
-      setError("检查浏览器实例状态失败：" + errText(err));
+      notifyError("检查浏览器实例状态失败：" + errText(err));
     } finally {
       setBusy(null);
     }
@@ -139,19 +135,22 @@ export default function BookmarksPage() {
         void reload();
       } else {
         setSyncGate("idle");
-        setError(
+        notifyError(
           "仍有 " + notStoppedCount(gates) + " 个浏览器实例未能关闭或无法确认停止，无法打开书签同步。",
         );
       }
     } catch (err) {
       setSyncGate("idle");
-      setError("关闭浏览器实例失败：" + errText(err));
+      notifyError("关闭浏览器实例失败：" + errText(err));
     } finally {
       closingRef.current = false;
     }
   };
 
-  const reload = useCallback(async () => {
+  // reload 刷新资源库与实例列表。失败时默认发一条刷新失败
+  // 警告；调用方需要区分语义时（首次加载、删除后刷新）传入
+  // onFail 自定义提示。返回是否成功。
+  const reload = useCallback(async (onFail?: (message: string) => void): Promise<boolean> => {
     try {
       const [lib, inst] = await Promise.all([
         BookmarkService.ListLibrary(),
@@ -159,16 +158,19 @@ export default function BookmarksPage() {
       ]);
       setNodes(lib ?? []);
       setInstances(inst ?? []);
-      setError(null);
+      return true;
     } catch (e) {
-      setError(errText(e));
+      const message = errText(e);
+      if (onFail) onFail(message);
+      else notifyWarning("列表刷新失败，请重新搜索。");
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void reload();
+    void reload((message) => notifyError("加载书签失败：" + message));
   }, [reload]);
 
   const run = async (
@@ -177,18 +179,16 @@ export default function BookmarksPage() {
     fn: (opId: string) => Promise<string | void>,
   ) => {
     setBusy(key);
-    setError(null);
-    setNotice(null);
     const opId = newOperationId();
     try {
       const feedback = await fn(opId);
       if (feedback) {
-        setNotice(feedback);
+        notifySuccess(feedback, { operationId: opId });
         recordOperationFeedback(opId, true, feedback, "书签管理", action);
       }
     } catch (e) {
       const message = errText(e);
-      setError(message);
+      notifyError(message, { operationId: opId });
       recordOperationFeedback(opId, false, message, "书签管理", action);
     } finally {
       setBusy(null);
@@ -202,7 +202,6 @@ export default function BookmarksPage() {
     return searchSet ? all.filter((r) => searchSet.has(r.node.id)) : all;
   }, [tree, collapsed, searchSet]);
   const scope = useMemo(() => selectionScope(nodes, selected), [nodes, selected]);
-  const counts = useMemo(() => libraryCounts(nodes), [nodes]);
   const folders = useMemo(() => folderOptions(nodes), [nodes]);
 
   const filteredInstances = useMemo(() => {
@@ -211,6 +210,9 @@ export default function BookmarksPage() {
   }, [instances, instQuery]);
 
   const toggleSelect = (id: string) => {
+    // 选择变化后退出删除确认状态，避免确认的集合与实际
+    // 执行删除的集合不一致。
+    setDeleteArmed(false);
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -266,12 +268,15 @@ export default function BookmarksPage() {
   };
 
   const doDelete = async () => {
-    setConfirmDelete(false);
     await run("delete", "删除书签资源", async (opId) => {
       const count = await BookmarkService.DeleteLibraryNodes(opId, [...selected]);
+      // 删除成功：清空选择、退出确认状态、保留原搜索条件
+      // 重新查询。刷新失败与删除结果分开处理——删除已完成
+      // 时只提示刷新失败，绝不误报为删除失败。
       setSelected(new Set());
-      await reload();
-      return "已删除 " + count + " 项";
+      setDeleteArmed(false);
+      const ok = await reload(() => notifyWarning("删除已完成，但列表刷新失败，请重新搜索。"));
+      return ok ? "已删除 " + count + " 项" : "";
     });
   };
 
@@ -298,14 +303,38 @@ export default function BookmarksPage() {
         >
           <Pencil size={15} /> 编辑
         </button>
-        <button
-          type="button"
-          className="flex items-center gap-1 rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm text-(--text-main) disabled:opacity-50"
-          disabled={busy !== null || selected.size === 0}
-          onClick={() => setConfirmDelete(true)}
-        >
-          <Trash2 size={15} /> 删除{selected.size > 0 ? "（" + selected.size + "）" : ""}
-        </button>
+        {!deleteArmed ? (
+          <button
+            type="button"
+            className="flex items-center gap-1 rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm text-(--text-main) disabled:opacity-50"
+            disabled={busy !== null || selected.size === 0}
+            onClick={() => setDeleteArmed(true)}
+          >
+            <Trash2 size={15} /> 删除所选
+          </button>
+        ) : (
+          <>
+            {scope.folders > 0 && (
+              <span className="text-xs text-(--danger)">所选包含文件夹，其内容将一并删除</span>
+            )}
+            <button
+              type="button"
+              className="flex items-center gap-1 rounded-md bg-(--danger) px-3 py-1.5 text-sm text-white disabled:opacity-50"
+              disabled={busy !== null}
+              onClick={() => void doDelete()}
+            >
+              确定删除
+            </button>
+            <button
+              type="button"
+              className="flex items-center gap-1 rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm text-(--text-main) disabled:opacity-50"
+              disabled={busy !== null}
+              onClick={() => setDeleteArmed(false)}
+            >
+              取消
+            </button>
+          </>
+        )}
         <button
           type="button"
           className="flex items-center gap-1 rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm text-(--text-main) disabled:opacity-50"
@@ -319,19 +348,11 @@ export default function BookmarksPage() {
         </span>
       </div>
 
-      {error && (
-        <div className="rounded-md bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">{error}</div>
-      )}
-      {notice && (
-        <div className="rounded-md bg-(--accent-soft) px-3 py-2 text-sm text-(--ok)">{notice}</div>
-      )}
-
       {/* 主体：左右两区独立滚动 */}
       <div className="flex min-h-0 flex-1 gap-3">
         <section className="flex min-w-0 flex-1 flex-col rounded-lg border border-(--border) bg-(--panel-bg)">
           <header className="flex items-center gap-2 border-b border-(--border) px-3 py-2">
             <h3 className="text-sm font-semibold">书签列表</h3>
-            <span className="text-xs text-(--text-faint)">书签 {counts.bookmarks} 个 · 文件夹 {counts.folders} 个</span>
             <label className="ml-auto flex items-center gap-1 rounded-md bg-(--hover-bg) px-2 py-1">
               <Search size={13} className="text-(--text-faint)" />
               <input
@@ -469,35 +490,6 @@ export default function BookmarksPage() {
             });
           }}
         />
-      )}
-
-      {confirmDelete && (
-        <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-lg bg-(--panel-bg) p-4 shadow-xl">
-            <h3 className="text-base font-semibold">确认删除</h3>
-            <p className="mt-2 text-sm text-(--text-dim)">
-              将删除所选 {scope.total} 项（书签 {scope.bookmarks} 个、文件夹 {scope.folders} 个）
-              {scope.folders > 0 ? "。所选文件夹中的书签和子文件夹也会一并删除" : ""}
-              。此操作只删除资源库内容，不会删除任何实例中的书签，且无法撤销。
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md bg-(--hover-bg) px-3 py-1.5 text-sm"
-                onClick={() => setConfirmDelete(false)}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                className="rounded-md bg-(--danger) px-3 py-1.5 text-sm text-white"
-                onClick={() => void doDelete()}
-              >
-                删除
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {syncGate !== "idle" && (

@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, AppWindow, CheckCircle2, FolderOpen, Loader2, Plus, Trash2 } from "lucide-react";
+import { AppWindow, FolderOpen, Loader2, Plus, Trash2 } from "lucide-react";
 import {
   BrowserService,
   type BrowserView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
+import { notifyError, notifySuccess } from "../stores/useNotificationStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+// 用户在系统文件选择器中取消选择时，后端以「未选择文件」
+// 返回。这不是错误：静默结束，不显示任何提示。
+const PICKER_CANCELLED = "未选择文件";
 
 // 浏览器内核页面：布局与「浏览器实例」页面一致（顶部说明 +
 // 主按钮、下方统一列表）。登记的内核供创建浏览器实例时选择。
@@ -20,17 +25,14 @@ export default function KernelsPage() {
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
       const list = await BrowserService.ListBrowsers();
       setBrowsers(list ?? []);
-      setError(null);
     } catch (e) {
-      setError(errText(e));
+      notifyError(`加载内核列表失败：${errText(e)}`);
     } finally {
       setLoading(false);
     }
@@ -43,25 +45,24 @@ export default function KernelsPage() {
   // run executes one user operation: it generates the operation
   // ID the backend records under, passes it to the operation, and
   // afterwards records the exact feedback shown to the user under
-  // the same ID.
+  // the same ID. Results go to the global notification system.
   const run = async (
     key: string,
     action: string,
     fn: (opId: string) => Promise<string | void>,
   ) => {
     setBusy(key);
-    setError(null);
-    setNotice(null);
     const opId = newOperationId();
     try {
       const feedback = await fn(opId);
-      if (action && feedback) {
+      if (feedback) {
+        notifySuccess(feedback, { operationId: opId });
         recordOperationFeedback(opId, true, feedback, "浏览器内核", action);
       }
     } catch (e) {
       const message = errText(e);
-      setError(message);
-      if (action) {
+      if (message !== PICKER_CANCELLED) {
+        notifyError(message, { operationId: opId });
         recordOperationFeedback(opId, false, message, "浏览器内核", action);
       }
     } finally {
@@ -72,29 +73,23 @@ export default function KernelsPage() {
   const addManual = () =>
     run("add-manual", "browser.add_manual", async (opId) => {
       const added = await BrowserService.AddBrowserManually(opId);
-      const msg = `已添加浏览器：${added.name}`;
-      setNotice(msg);
       await reload();
-      return msg;
+      return `已添加浏览器：${added.name}`;
     });
 
   const reselectPath = (b: BrowserView) =>
     run(`reselect-${b.id}`, "browser.update_path", async (opId) => {
       const v = await BrowserService.UpdateBrowserPath(opId, b.id);
-      const msg = `已更新路径：${v.name}`;
-      setNotice(msg);
       await reload();
-      return msg;
+      return `已更新路径：${v.name}`;
     });
 
   const removeRegistration = (b: BrowserView) =>
     run(`remove-${b.id}`, "browser.remove_registration", async (opId) => {
       await BrowserService.RemoveBrowserRegistration(opId, b.id);
       setConfirmRemove(null);
-      const msg = `已移除登记：${b.name}（浏览器本身未被删除或修改）`;
-      setNotice(msg);
       await reload();
-      return msg;
+      return `已移除登记：${b.name}（浏览器本身未被删除或修改）`;
     });
 
   const btnSecondary =
@@ -116,22 +111,6 @@ export default function KernelsPage() {
           添加内核
         </button>
       </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="mt-4 flex items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)"
-        >
-          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-      {notice && (
-        <div className="mt-4 flex items-start gap-2 rounded-lg border border-(--border) bg-(--accent-soft) px-3 py-2 text-sm text-(--text-main)">
-          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-(--ok)" />
-          <span>{notice}</span>
-        </div>
-      )}
 
       <div className="mt-5 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (

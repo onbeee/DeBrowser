@@ -7,6 +7,7 @@ import {
   type LogExportInfo,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { useAppStore } from "../stores/useAppStore";
+import { notifyError, notifySuccess } from "../stores/useNotificationStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 type RecordCategory = "all" | "operation" | "error" | "runtime";
@@ -54,12 +55,9 @@ function formatUptime(totalSeconds: number): string {
  * 或诊断导出区域。
  */
 export default function DataManagementPage() {
-  const log = useAppStore((state) => state.log);
   const status = useAppStore((state) => state.status);
   const [view, setView] = useState<DiagnosticsView | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [exportNote, setExportNote] = useState<string | null>(null);
   // 记录导出对话框（类别 + 动态日期范围）。
   const [exportDialog, setExportDialog] = useState<RecordCategory | null>(null);
   const [exportInfo, setExportInfo] = useState<LogExportInfo | null>(null);
@@ -77,10 +75,9 @@ export default function DataManagementPage() {
     DiagnosticsService.GetDiagnostics()
       .then((v) => {
         setView(v);
-        setError(null);
       })
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
+        notifyError(`无法读取数据管理信息：${err instanceof Error ? err.message : String(err)}`);
       });
   }, []);
 
@@ -119,13 +116,13 @@ export default function DataManagementPage() {
     DiagnosticsService.ExportRecords(opId, category, exportStart, exportEnd)
       .then((res: ExportResult) => {
         if (res.cancelled) {
-          setExportNote("已取消导出。");
+          // 用户主动取消保存对话框：静默关闭，不提示。
+          setExportDialog(null);
           recordOperationFeedback(opId, true, "已取消导出。", "数据管理", "logs.export");
         } else {
           const msg = `${label}导出完成：${res.path}`;
-          setExportNote(msg);
+          notifySuccess(msg, { operationId: opId });
           setExportDialog(null);
-          log("info", msg);
           recordOperationFeedback(opId, true, msg, "数据管理", "logs.export");
           refresh();
         }
@@ -136,7 +133,7 @@ export default function DataManagementPage() {
         recordOperationFeedback(opId, false, `导出失败：${message}`, "数据管理", "logs.export");
       })
       .finally(() => setExporting(false));
-  }, [exportDialog, exportStart, exportEnd, log, refresh]);
+  }, [exportDialog, exportStart, exportEnd, refresh]);
 
   const openCapacityDialog = useCallback(() => {
     setCapError(null);
@@ -170,7 +167,7 @@ export default function DataManagementPage() {
     DiagnosticsService.SetLogCapacity(opId, bytes)
       .then(() => {
         const msg = `日志容量已设置为 ${formatCapacity(bytes)}。`;
-        setExportNote(msg);
+        notifySuccess(msg, { operationId: opId });
         recordOperationFeedback(opId, true, msg, "数据管理", "logs.set_capacity");
         setCapacityDialog(false);
         refresh();
@@ -205,12 +202,8 @@ export default function DataManagementPage() {
     return names.length > 0 ? names.join("\n") : "暂无文件";
   };
 
-  return (    <div className="mx-auto max-w-4xl space-y-6 p-8">
-      {error && (
-        <div className="rounded-lg border border-(--danger-border) bg-(--danger-bg) px-4 py-3 text-sm text-(--danger)">
-          无法读取数据管理信息：{error}
-        </div>
-      )}
+  return (
+    <div className="mx-auto max-w-4xl space-y-6 p-8">
 
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">
         <h3 className="text-[15px] font-semibold">数据概览</h3>
@@ -259,7 +252,7 @@ export default function DataManagementPage() {
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">
         <h3 className="text-[15px] font-semibold">日志</h3>
         <p className="mt-1 text-xs leading-relaxed text-(--text-faint)">
-          全部记录由操作记录、错误记录与运行记录三类汇总，保存在同一日志目录中，程序运行期间自动记录，无需手动开启。超出容量时自动清理最早的记录。
+          包含操作、错误与运行三类记录，超出容量时自动清理最早记录。
         </p>
         <div className="mt-2 divide-y divide-(--border) text-sm">
           {RECORD_ROWS.map((row) => (
@@ -307,7 +300,6 @@ export default function DataManagementPage() {
         {(view?.categories ?? []).some((c) => c.cleanupErrors > 0) && (
           <div className="mt-2 text-xs text-(--danger)">部分日志清理曾失败，详情见运行日志。</div>
         )}
-        {exportNote && <div className="mt-2 text-sm text-(--text-dim)">{exportNote}</div>}
       </section>
 
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">

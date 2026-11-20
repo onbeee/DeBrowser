@@ -5,10 +5,11 @@ import {
   type ApplySearchResult,
   type BookmarkInstanceInfo,
   type BookmarkSearchResult,
-  type SyncBookmarksResult,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { BookmarkNode } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import { notify, notifyError, notifyWarning } from "../stores/useNotificationStore";
+import type { NotificationItem } from "../lib/notifications";
 import { buildTree, visibleRows } from "./bookmarksLogic";
 
 function errText(err: unknown): string {
@@ -29,18 +30,16 @@ export default function SyncDialog(props: {
 }) {
   const [tab, setTab] = useState<SyncTab>("bookmarks");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const run = async (action: string, fn: (opId: string) => Promise<void>) => {
     setBusy(true);
-    setError(null);
     const opId = newOperationId();
     try {
       await fn(opId);
       recordOperationFeedback(opId, true, action + "完成", "书签管理", action);
     } catch (e) {
       const message = errText(e);
-      setError(message);
+      notifyError(message, { operationId: opId });
       recordOperationFeedback(opId, false, message, "书签管理", action);
     } finally {
       setBusy(false);
@@ -76,9 +75,6 @@ export default function SyncDialog(props: {
             <X size={17} />
           </button>
         </div>
-        {error && (
-          <div className="mt-3 rounded-md bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">{error}</div>
-        )}
         <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
           {tab === "bookmarks" && (
             <SyncBookmarksTab nodes={props.nodes} instances={props.instances} busy={busy} run={run} />
@@ -101,7 +97,6 @@ function SyncBookmarksTab(props: {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [instSelected, setInstSelected] = useState<ReadonlySet<string>>(new Set());
   const [instQuery, setInstQuery] = useState("");
-  const [result, setResult] = useState<SyncBookmarksResult | null>(null);
 
   const tree = useMemo(() => buildTree(props.nodes), [props.nodes]);
   const rows = useMemo(() => visibleRows(tree, collapsed), [tree, collapsed]);
@@ -224,30 +219,25 @@ function SyncBookmarksTab(props: {
           onClick={() =>
             void props.run("同步书签", async (opId) => {
               const res = await BookmarkService.SyncBookmarks(opId, [...selected], [...instSelected]);
-              setResult(res);
+              const items: NotificationItem[] = (res.instances ?? []).map((i) => ({
+                name: i.instanceName,
+                status:
+                  i.status === "success" ? "success" : i.status === "skipped" ? "skipped" : "failed",
+                reason: i.reason || undefined,
+              }));
+              notify(res.failedInstances > 0 ? "warning" : "success", "书签同步完成", {
+                detail:
+                  `成功 ${res.successInstances} 个实例 · 失败 ${res.failedInstances} · 跳过 ${res.skippedInstances}；` +
+                  `新增书签 ${res.addedBookmarks} · 跳过 ${res.skippedBookmarks} · 失败 ${res.failedBookmarks}`,
+                items,
+                operationId: opId,
+              });
             })
           }
         >
           {props.busy ? <Loader2 size={14} className="animate-spin" /> : "开始同步"}
         </button>
-        {result && (
-          <span className="text-sm text-(--text-dim)">
-            成功 {result.successInstances} 个实例 · 失败 {result.failedInstances} · 跳过 {result.skippedInstances}；
-            新增书签 {result.addedBookmarks} · 跳过 {result.skippedBookmarks} · 失败 {result.failedBookmarks}
-          </span>
-        )}
       </div>
-      {result && (result.instances ?? []).some((i) => i.status !== "success") && (
-        <ul className="flex flex-col gap-1 text-xs text-(--text-dim)">
-          {(result.instances ?? [])
-            .filter((i) => i.status !== "success")
-            .map((i) => (
-              <li key={i.instanceId}>
-                {i.instanceName}：{i.status === "skipped" ? "已跳过" : "失败"} — {i.reason}
-              </li>
-            ))}
-        </ul>
-      )}
     </div>
   );
 }
@@ -264,16 +254,43 @@ function SearchTab(props: {
   const [newName, setNewName] = useState("");
   const [newUrl, setNewUrl] = useState("");
   const [armDelete, setArmDelete] = useState(false);
-  const [applied, setApplied] = useState<ApplySearchResult | null>(null);
 
   const doSearch = () =>
     void props.run("搜索实例书签", async (opId) => {
       const res = await BookmarkService.SearchInstanceBookmarks(opId, query, kind);
       setSearch(res);
       setPicked(new Set());
-      setApplied(null);
       setArmDelete(false);
     });
+
+  // 编辑/删除执行后：用原搜索条件重新查询，结果列表立即
+  // 反映最新状态（已删除项消失、改名项显示新名称），并清
+  // 空选择。刷新失败与操作结果分开提示，不误报操作失败。
+  // 汇总数字全部来自后端返回，不展示实例名称（聚合规则）。
+  const applyAndRefresh = async (
+    action: string,
+    opId: string,
+    apply: () => Promise<ApplySearchResult>,
+  ) => {
+    const res = await apply();
+    const verb = props.mode === "delete" ? "删除" : "修改";
+    notify(
+      res.failedInstances > 0 || res.failedNodes > 0 ? "warning" : "success",
+      `${verb}完成：处理 ${res.updatedInstances} 个实例 · 失败 ${res.failedInstances} · 跳过 ${res.skippedInstances}`,
+      {
+        detail: `处理 ${res.affectedNodes} 项 · 失败 ${res.failedNodes} 项`,
+        operationId: opId,
+      },
+    );
+    setPicked(new Set());
+    setArmDelete(false);
+    try {
+      const fresh = await BookmarkService.SearchInstanceBookmarks(newOperationId(), query, kind);
+      setSearch(fresh);
+    } catch {
+      notifyWarning(`${verb}已完成，但列表刷新失败，请重新搜索。`);
+    }
+  };
 
   const pickedGroups = (search?.groups ?? []).filter((g) => picked.has(g.key));
   const impactedInstances = pickedGroups.reduce((max, g) => Math.max(max, g.instanceCount), 0);
@@ -393,8 +410,9 @@ function SearchTab(props: {
               disabled={props.busy || (newName.trim() === "" && (kind === "folder" || newUrl.trim() === ""))}
               onClick={() =>
                 void props.run("同步编辑", async (opId) => {
-                  const res = await BookmarkService.ApplySearchEdit(opId, search.token, [...picked], newName, newUrl);
-                  setApplied(res);
+                  await applyAndRefresh("同步编辑", opId, () =>
+                    BookmarkService.ApplySearchEdit(opId, search.token, [...picked], newName, newUrl),
+                  );
                 })
               }
             >
@@ -412,7 +430,7 @@ function SearchTab(props: {
               disabled={props.busy}
               onClick={() => setArmDelete(true)}
             >
-              删除所选 {picked.size} 项…
+              删除所选
             </button>
           ) : (
             <>
@@ -425,9 +443,9 @@ function SearchTab(props: {
                 disabled={props.busy}
                 onClick={() =>
                   void props.run("同步删除", async (opId) => {
-                    const res = await BookmarkService.ApplySearchDelete(opId, search.token, [...picked]);
-                    setApplied(res);
-                    setArmDelete(false);
+                    await applyAndRefresh("同步删除", opId, () =>
+                      BookmarkService.ApplySearchDelete(opId, search.token, [...picked]),
+                    );
                   })
                 }
               >
@@ -443,12 +461,6 @@ function SearchTab(props: {
             </>
           )}
         </div>
-      )}
-      {applied && (
-        <p className="text-sm text-(--text-dim)">
-          已处理 {applied.updatedInstances} 个实例 · 失败 {applied.failedInstances} · 跳过 {applied.skippedInstances}；
-          处理 {applied.affectedNodes} 项 · 失败 {applied.failedNodes} 项。
-        </p>
       )}
     </div>
   );
