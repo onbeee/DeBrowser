@@ -139,6 +139,7 @@ type Client struct {
 	events   chan Event
 	done     chan struct{}
 	doneOnce sync.Once
+	drained  chan struct{}
 }
 
 // eventQueueSize bounds one connection's pending event queue.
@@ -165,6 +166,7 @@ func Dial(ctx context.Context, wsURL string) (*Client, error) {
 		handlers: map[string][]EventHandler{},
 		events:   make(chan Event, eventQueueSize),
 		done:     make(chan struct{}),
+		drained:  make(chan struct{}),
 	}
 	go c.readLoop()
 	go c.dispatchLoop()
@@ -173,6 +175,13 @@ func Dial(ctx context.Context, wsURL string) (*Client, error) {
 
 // Done is closed when the connection ends for any reason.
 func (c *Client) Done() <-chan struct{} { return c.done }
+
+// EventsDrained is closed when the event dispatcher has
+// delivered every event it received and exited. A waiter
+// that reacts to Done can wait for this first to know that
+// no already-received event is still in flight — e.g. a
+// final Target.targetDestroyed that raced the disconnect.
+func (c *Client) EventsDrained() <-chan struct{} { return c.drained }
 
 // On registers a handler for one event method. Handlers run
 // sequentially on the connection's single dispatcher
@@ -224,18 +233,46 @@ func (c *Client) readLoop() {
 // dispatchLoop is the connection's single event dispatcher:
 // handlers run sequentially, in receive order.
 func (c *Client) dispatchLoop() {
+	defer close(c.drained)
 	for {
 		select {
 		case <-c.done:
+			// The connection is over, but events the read
+			// loop already received must NOT be dropped:
+			// a Target.targetDestroyed delivered just
+			// before the browser exited is exactly the
+			// event the owner needs to mirror the final
+			// tab closure. No new events can arrive once
+			// done is closed by the read loop's shutdown,
+			// so drain what is queued, in order, then exit.
+			c.drainEvents()
 			return
 		case ev := <-c.events:
-			c.handlersMu.RLock()
-			hs := append([]EventHandler(nil), c.handlers[ev.Method]...)
-			c.handlersMu.RUnlock()
-			for _, h := range hs {
-				h(ev)
-			}
+			c.deliver(ev)
 		}
+	}
+}
+
+// drainEvents delivers every still-queued event in receive
+// order. Used when the connection has ended: the queue is
+// final at that point (the read loop has stopped).
+func (c *Client) drainEvents() {
+	for {
+		select {
+		case ev := <-c.events:
+			c.deliver(ev)
+		default:
+			return
+		}
+	}
+}
+
+func (c *Client) deliver(ev Event) {
+	c.handlersMu.RLock()
+	hs := append([]EventHandler(nil), c.handlers[ev.Method]...)
+	c.handlersMu.RUnlock()
+	for _, h := range hs {
+		h(ev)
 	}
 }
 

@@ -326,6 +326,84 @@ func TestEventsAreDispatchedInReceiveOrder(t *testing.T) {
 	}
 }
 
+// Events the read loop already received must still be
+// delivered when the connection dies immediately afterwards:
+// a browser closing its last tab sends targetDestroyed and
+// then exits, and dropping that final event would leave the
+// peer's tab open forever.
+func TestEventsQueuedBeforeDisconnectAreStillDelivered(t *testing.T) {
+	const n = 5
+	f := blastServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		time.Sleep(50 * time.Millisecond) // let the client register its handler
+		for i := 0; i < n; i++ {
+			_ = wsjson.Write(ctx, conn, map[string]any{
+				"method": "Seq.event",
+				"params": map[string]any{"seq": i},
+			})
+		}
+		_ = conn.CloseNow() // the "browser process" vanishes
+	})
+	ctx := context.Background()
+	wsURL, err := Discover(ctx, f.port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(ctx, wsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var mu sync.Mutex
+	seen := []int{}
+	client.On("Seq.event", func(ev Event) {
+		var p struct {
+			Seq int `json:"seq"`
+		}
+		_ = json.Unmarshal(ev.Params, &p)
+		mu.Lock()
+		seen = append(seen, p.Seq)
+		mu.Unlock()
+	})
+	select {
+	case <-client.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done not closed after the peer vanished")
+	}
+	// The dispatcher drains the queue before exiting, so by
+	// the time Done observers have had a brief moment, every
+	// received event has been delivered, in order.
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := len(seen)
+		mu.Unlock()
+		if got == n {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			t.Fatalf("delivered %d/%d events after disconnect; the final events were dropped", got, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	for i, v := range seen {
+		if v != i {
+			t.Fatalf("event %d delivered as seq %d: drain broke receive order", i, v)
+		}
+	}
+	mu.Unlock()
+	// Once every received event has been delivered, the
+	// dispatcher has exited and EventsDrained is closed —
+	// this is the signal session teardown waits for before
+	// closing follower workers.
+	select {
+	case <-client.EventsDrained():
+	case <-time.After(3 * time.Second):
+		t.Fatal("EventsDrained not closed after the drain completed")
+	}
+}
+
 func TestEventQueueOverflowClosesConnection(t *testing.T) {
 	f := blastServer(t, func(conn *websocket.Conn, ctx context.Context) {
 		time.Sleep(50 * time.Millisecond)

@@ -34,9 +34,39 @@ type fakeBrowserCDP struct {
 	fail        bool
 	// failEnable makes Page.enable fail (attach cleanup tests).
 	failEnable bool
+	// failCreateAt, when > 0, makes the Nth createTarget fail.
+	failCreateAt int64
+
+	// targets is the fake browser's pre-existing target list,
+	// returned by Target.getTargets.
+	targets []fakeTargetInfo
+
+	closedMu    sync.Mutex
+	closedIDs   []string
+	activatedMu sync.Mutex
+	activated   []string
 
 	callsMu sync.Mutex
 	calls   []recordedCall
+}
+
+// fakeTargetInfo is one pre-existing target of a fake browser.
+type fakeTargetInfo struct {
+	ID   string
+	Type string
+	URL  string
+}
+
+func (f *fakeBrowserCDP) closedTargetIDs() []string {
+	f.closedMu.Lock()
+	defer f.closedMu.Unlock()
+	return append([]string(nil), f.closedIDs...)
+}
+
+func (f *fakeBrowserCDP) activatedTargetIDs() []string {
+	f.activatedMu.Lock()
+	defer f.activatedMu.Unlock()
+	return append([]string(nil), f.activated...)
 }
 
 // recordedCall is one input command the fake received.
@@ -115,7 +145,23 @@ func newFakeBrowserCDP(t *testing.T) *fakeBrowserCDP {
 				reply(map[string]any{})
 			case "Target.closeTarget":
 				f.closes.Add(1)
+				var cp struct {
+					TargetID string `json:"targetId"`
+				}
+				_ = json.Unmarshal(msg.Params, &cp)
+				f.closedMu.Lock()
+				f.closedIDs = append(f.closedIDs, cp.TargetID)
+				f.closedMu.Unlock()
 				reply(map[string]any{"success": true})
+			case "Target.activateTarget":
+				var ap struct {
+					TargetID string `json:"targetId"`
+				}
+				_ = json.Unmarshal(msg.Params, &ap)
+				f.activatedMu.Lock()
+				f.activated = append(f.activated, ap.TargetID)
+				f.activatedMu.Unlock()
+				reply(map[string]any{})
 			case "Target.detachFromTarget":
 				f.detaches.Add(1)
 				reply(map[string]any{})
@@ -139,7 +185,7 @@ func newFakeBrowserCDP(t *testing.T) *fakeBrowserCDP {
 				if f.delay > 0 {
 					time.Sleep(f.delay)
 				}
-				if f.fail {
+				if f.fail || (f.failCreateAt > 0 && n == f.failCreateAt) {
 					_ = wsjson.Write(r.Context(), conn, map[string]any{
 						"id": msg.ID, "error": map[string]any{"code": -1, "message": "cannot create"},
 					})
@@ -159,7 +205,17 @@ func newFakeBrowserCDP(t *testing.T) *fakeBrowserCDP {
 			case "Page.getLayoutMetrics":
 				reply(map[string]any{"layoutViewport": map[string]any{"clientWidth": 1000, "clientHeight": 800}})
 			case "Target.getTargets":
-				reply(map[string]any{"targetInfos": []any{}})
+				infos := make([]any, 0, len(f.targets))
+				for _, tg := range f.targets {
+					typ := tg.Type
+					if typ == "" {
+						typ = "page"
+					}
+					infos = append(infos, map[string]any{
+						"targetId": tg.ID, "type": typ, "url": tg.URL,
+					})
+				}
+				reply(map[string]any{"targetInfos": infos})
 			default:
 				reply(map[string]any{})
 			}

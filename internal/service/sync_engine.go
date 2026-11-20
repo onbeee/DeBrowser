@@ -106,11 +106,24 @@ func (s *SyncService) wireMaster(sess *syncSession) {
 
 	go func() {
 		<-client.Done()
+		// Wait until the connection's dispatcher has
+		// delivered every event it received before the
+		// disconnect — including a final targetDestroyed
+		// for the last tab — so those closures are queued
+		// on the followers BEFORE teardown closes any
+		// worker. Each worker then drains its queued
+		// closures on close, so a destruction that raced
+		// the disconnect is still mirrored. If the master
+		// process itself is confirmed gone,
+		// teardownMasterGone additionally closes every
+		// mapped counterpart whose destruction event
+		// never arrived at all.
+		<-client.EventsDrained()
 		sess.mu.Lock()
 		down := !sess.tornDown
 		sess.mu.Unlock()
 		if down {
-			s.teardown(sess, "主实例的调试连接已断开")
+			s.teardownMasterGone(sess, "主实例的调试连接已断开")
 		}
 	}()
 }
@@ -209,7 +222,7 @@ func (s *SyncService) watchdog(sess *syncSession) {
 			return
 		case <-tick.C:
 			if !s.instances.VerifySyncIdentity(sess.master) {
-				s.teardown(sess, "主实例已退出或身份无法确认")
+				s.teardownMasterGone(sess, "主实例已退出或身份无法确认")
 				return
 			}
 			sess.forEachFollower(func(w *followerWorker) {

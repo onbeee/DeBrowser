@@ -123,6 +123,7 @@ type followerWorker struct {
 	stopCh   chan struct{}
 	loopDone chan struct{}
 	started  bool
+	stopOnce sync.Once
 
 	mu       sync.Mutex
 	failed   bool
@@ -238,6 +239,18 @@ func (w *followerWorker) mappedTarget(masterTarget string) (string, bool) {
 	defer w.mu.Unlock()
 	t, ok := w.mapping[masterTarget]
 	return t, ok
+}
+
+// mappedMasterTargets snapshots the master targets this
+// follower currently has counterparts for.
+func (w *followerWorker) mappedMasterTargets() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]string, 0, len(w.mapping))
+	for mt := range w.mapping {
+		out = append(out, mt)
+	}
+	return out
 }
 
 func (w *followerWorker) setMapping(masterTarget, followerTarget string) {
@@ -361,8 +374,10 @@ func (w *followerWorker) dispatchLoop(ctx context.Context) {
 	for {
 		select {
 		case <-w.stopCh:
+			w.drainPendingCloses()
 			return
 		case <-ctx.Done():
+			w.drainPendingCloses()
 			return
 		case <-w.control:
 			w.releaseAllInputs(ctx)
@@ -378,7 +393,7 @@ func (w *followerWorker) dispatchLoop(ctx context.Context) {
 		select {
 		case <-w.control:
 			w.releaseAllInputs(ctx)
-			if w.isFailed() {
+			if w.isFailed() && ev.Kind != "targetclosed" {
 				continue
 			}
 		default:
@@ -388,7 +403,13 @@ func (w *followerWorker) dispatchLoop(ctx context.Context) {
 }
 
 func (w *followerWorker) dispatch(ctx context.Context, ev PageEvent) {
-	if w.isFailed() {
+	// A failed or closing worker takes no new input — but a
+	// queued tab closure is still honored: it is the
+	// session's teardown bookkeeping, not input, and
+	// dropping it would leave a mapped tab behind on the
+	// follower (its closeTarget simply errors if this
+	// follower's own connection is already gone).
+	if w.isFailed() && ev.Kind != "targetclosed" {
 		return
 	}
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -405,14 +426,7 @@ func (w *followerWorker) dispatch(ctx context.Context, ev PageEvent) {
 		}
 		w.pairWith(ev.Source, ft)
 	case "targetclosed":
-		if ft, ok := w.mappedTarget(ev.Source); ok {
-			// Release this target's pressed inputs BEFORE
-			// closing it, while its session still exists.
-			w.releaseTargetInputs(cctx, ft)
-			_, _ = w.client.Call(cctx, "", "Target.closeTarget", map[string]any{"targetId": ft})
-			w.dropMapping(ev.Source)
-			w.track.Forget(ft)
-		}
+		w.closeMappedTarget(cctx, ev.Source)
 	case "targetactivated":
 		if ft, ok := w.mappedTarget(ev.Source); ok {
 			_, _ = w.client.Call(cctx, "", "Target.activateTarget", map[string]any{"targetId": ft})
@@ -430,6 +444,118 @@ func (w *followerWorker) dispatch(ctx context.Context, ev PageEvent) {
 	default:
 		w.dispatchInput(cctx, ev)
 	}
+}
+
+// closeMappedTarget closes the follower counterpart of one
+// master target: its pressed inputs are released FIRST, while
+// its session still exists, then the target is closed and the
+// mapping dropped. A master target with no mapping is a
+// no-op — which counterpart to close is never guessed from
+// order, URL or the active tab — so a duplicate destruction
+// event can never close the wrong tab.
+func (w *followerWorker) closeMappedTarget(ctx context.Context, masterTarget string) {
+	ft, ok := w.mappedTarget(masterTarget)
+	if !ok {
+		return
+	}
+	w.releaseTargetInputs(ctx, ft)
+	_, _ = w.client.Call(ctx, "", "Target.closeTarget", map[string]any{"targetId": ft})
+	w.dropMapping(masterTarget)
+	w.track.Forget(ft)
+}
+
+// drainPendingCloses runs on the dispatch goroutine as it
+// exits (session stop, or the master connection dying with
+// the session): tab closures that are already queued are
+// still executed — in queue order — instead of being
+// discarded with the loop, and every remaining pressed input
+// is released afterwards. Other queued events are NOT
+// replayed: stop semantics stay "nothing is replayed".
+// This is what lets the follower close its counterpart of
+// the master's LAST tab even when the master's CDP
+// connection drops immediately after the destruction event.
+func (w *followerWorker) drainPendingCloses() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		ev, ok := w.queue.pop(0)
+		if !ok {
+			break
+		}
+		if ev.Kind == "targetclosed" {
+			w.closeMappedTarget(ctx, ev.Source)
+		}
+	}
+	w.releaseAllInputs(ctx)
+}
+
+// initTargets establishes the initial one-to-one mapping for
+// ALL of the master's pre-existing page targets, before any
+// event dispatch begins. Counterparts are resolved by
+// planInitialMapping: the follower's own pre-existing tabs
+// are reused first (attached and confirmed ready before the
+// mapping is recorded), and a new tab is created only for a
+// master tab with no reusable counterpart. On failure every
+// tab THIS initialization created is closed again — reused
+// tabs are the user's own and are never closed — and no
+// mapping is left behind.
+func (w *followerWorker) initTargets(ctx context.Context, master []pageTargetInfo, activeMaster string) error {
+	follower, err := listPageTargets(ctx, w.client)
+	if err != nil {
+		return fmt.Errorf("读取跟随实例已有标签失败：%w", err)
+	}
+	pairs, toCreate, err := planInitialMapping(master, follower)
+	if err != nil {
+		return err
+	}
+	var created []string
+	cleanup := func(err error) error {
+		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer ccancel()
+		for _, ft := range created {
+			_, _ = w.client.Call(cctx, "", "Target.closeTarget", map[string]any{"targetId": ft})
+			w.track.Forget(ft)
+		}
+		w.mu.Lock()
+		w.mapping = map[string]string{}
+		w.mu.Unlock()
+		return err
+	}
+	// Reused counterparts, in the master's target order.
+	for _, mt := range master {
+		ft, ok := pairs[mt.ID]
+		if !ok {
+			continue
+		}
+		actx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := w.track.Attach(actx, ft)
+		if err == nil {
+			err = w.track.WaitReady(actx, ft)
+		}
+		cancel()
+		if err != nil {
+			return cleanup(fmt.Errorf("接入跟随实例已有标签失败：%w", err))
+		}
+		w.pairWith(mt.ID, ft)
+	}
+	// Master tabs without a reusable counterpart get exactly
+	// one newly created counterpart each.
+	for _, mt := range toCreate {
+		ft, err := w.ensureTarget(ctx, mt.ID, mt.URL)
+		if err != nil {
+			return cleanup(fmt.Errorf("创建对应标签失败：%w", err))
+		}
+		created = append(created, ft)
+		w.pairWith(mt.ID, ft)
+	}
+	// The follower shows the counterpart of the master's
+	// active tab.
+	if activeMaster != "" {
+		if ft, ok := w.mappedTarget(activeMaster); ok {
+			_, _ = w.client.Call(ctx, "", "Target.activateTarget", map[string]any{"targetId": ft})
+		}
+	}
+	return nil
 }
 
 func (w *followerWorker) navigateHistory(ctx context.Context, ev PageEvent) {
@@ -627,10 +753,14 @@ func (w *followerWorker) close() {
 	w.mu.Unlock()
 	w.requestRelease()
 	if w.started {
-		close(w.stopCh)
+		w.stopOnce.Do(func() { close(w.stopCh) })
 		select {
 		case <-w.loopDone:
-		case <-time.After(2 * time.Second):
+		// The loop drains queued tab closures before
+		// exiting (bounded by the drain's own 3s context);
+		// wait long enough for that drain to finish so the
+		// connection is not closed from under it.
+		case <-time.After(5 * time.Second):
 		}
 	}
 	w.client.Close()
