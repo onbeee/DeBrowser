@@ -28,6 +28,10 @@ func (s *SyncService) wireMaster(sess *syncSession) {
 			return
 		}
 		tid := p.TargetInfo.TargetID
+		// Record first: the URL at creation time is often
+		// still empty for a new tab. offerTarget below only
+		// creates follower tabs once the URL is known.
+		sess.noteTargetURL(tid, p.TargetInfo.URL)
 		go func() {
 			ctx, cancel := context.WithTimeout(sess.ctx, 10*time.Second)
 			defer cancel()
@@ -37,13 +41,34 @@ func (s *SyncService) wireMaster(sess *syncSession) {
 			if !sess.live() {
 				return
 			}
-			// A user-created tab becomes a follower tab exactly
-			// once: the worker's ensure path is single-flight
-			// and shared with the visibility path.
-			sess.forEachFollower(func(w *followerWorker) {
-				w.enqueue(PageEvent{Kind: "targetcreated", Source: tid, Text: p.TargetInfo.URL})
-			})
+			// A user-created tab becomes a follower tab
+			// exactly once: offerTarget is URL-gated and the
+			// worker's ensure path is single-flight, shared
+			// with the visibility path.
+			sess.offerTarget(tid)
 		}()
+	})
+
+	// A target's URL typically becomes final only AFTER
+	// creation (a new tab starts empty, then resolves to its
+	// real URL). That update is what releases the pending
+	// follower creation — no timers, no guessing.
+	client.On("Target.targetInfoChanged", func(ev cdp.Event) {
+		var p struct {
+			TargetInfo struct {
+				TargetID string `json:"targetId"`
+				Type     string `json:"type"`
+				URL      string `json:"url"`
+			} `json:"targetInfo"`
+		}
+		if err := json.Unmarshal(ev.Params, &p); err != nil || p.TargetInfo.Type != "page" {
+			return
+		}
+		wasKnown := sess.targetURL(p.TargetInfo.TargetID) != ""
+		sess.noteTargetURL(p.TargetInfo.TargetID, p.TargetInfo.URL)
+		if !wasKnown {
+			sess.offerTarget(p.TargetInfo.TargetID)
+		}
 	})
 
 	client.On("Target.targetDestroyed", func(ev cdp.Event) {
@@ -53,6 +78,7 @@ func (s *SyncService) wireMaster(sess *syncSession) {
 		if err := json.Unmarshal(ev.Params, &p); err != nil {
 			return
 		}
+		sess.forgetTargetURL(p.TargetID)
 		sess.forEachFollower(func(w *followerWorker) {
 			w.enqueue(PageEvent{Kind: "targetclosed", Source: p.TargetID})
 		})

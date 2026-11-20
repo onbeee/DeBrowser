@@ -184,6 +184,16 @@ type syncSession struct {
 	navMu   sync.Mutex
 	navSeen map[string]time.Time
 
+	// Master target URLs as last reported by
+	// Target.targetCreated / Target.targetInfoChanged
+	// (session memory only, never logged). A target whose
+	// URL is still empty is NOT yet offered to followers:
+	// the creation-instant URL of a new tab is transient,
+	// and materializing it produced permanent about:blank
+	// tabs on followers (real-machine finding).
+	targetMu   sync.Mutex
+	targetURLs map[string]string
+
 	// composition twin dedup
 	compMu      sync.Mutex
 	compPending bool
@@ -315,6 +325,49 @@ func (sess *syncSession) dispatch(ev PageEvent) {
 // refreshActive re-derives the active master target from page
 // visibility and, when it changed, points every follower at
 // the corresponding target.
+// noteTargetURL records a master target's latest known URL
+// from its lifecycle events.
+func (sess *syncSession) noteTargetURL(tid, url string) {
+	sess.targetMu.Lock()
+	defer sess.targetMu.Unlock()
+	if sess.targetURLs == nil {
+		sess.targetURLs = map[string]string{}
+	}
+	sess.targetURLs[tid] = url
+}
+
+// forgetTargetURL drops a destroyed target's record.
+func (sess *syncSession) forgetTargetURL(tid string) {
+	sess.targetMu.Lock()
+	defer sess.targetMu.Unlock()
+	delete(sess.targetURLs, tid)
+}
+
+// targetURL returns the last known URL ("" = not known yet).
+func (sess *syncSession) targetURL(tid string) string {
+	sess.targetMu.Lock()
+	defer sess.targetMu.Unlock()
+	return sess.targetURLs[tid]
+}
+
+// offerTarget asks every follower to create its counterpart
+// of a master target — but ONLY once the target's URL is
+// known. While the URL is still empty (the transient state
+// of a just-created tab), nothing is created; the later
+// Target.targetInfoChanged update offers it then. Followers
+// that already have the mapping ignore the offer (their
+// ensure path is single-flight and mapping-first), so
+// repeated offers never duplicate a tab.
+func (sess *syncSession) offerTarget(tid string) {
+	url := sess.targetURL(tid)
+	if url == "" {
+		return
+	}
+	sess.forEachFollower(func(w *followerWorker) {
+		w.enqueue(PageEvent{Kind: "targetcreated", Source: tid, Text: url})
+	})
+}
+
 func (sess *syncSession) refreshActive() {
 	if sess.masterTrack == nil {
 		return
@@ -334,12 +387,8 @@ func (sess *syncSession) refreshActive() {
 	if !changed {
 		return
 	}
-	url := sess.masterTrack.URL(active)
+	sess.offerTarget(active)
 	sess.forEachFollower(func(w *followerWorker) {
-		if _, ok := w.mappedTarget(active); !ok {
-			ev := PageEvent{Kind: "targetcreated", Source: active, Text: url}
-			w.enqueue(ev)
-		}
 		w.enqueue(PageEvent{Kind: "targetactivated", Source: active})
 	})
 	go sess.refreshViewports(active)
@@ -429,6 +478,7 @@ func (s *SyncService) start(masterID string, followerIDs []string) (SyncStateVie
 		systemPauses:  map[string]bool{},
 		followers:     map[string]*followerWorker{},
 		navSeen:       map[string]time.Time{},
+		targetURLs:    map[string]string{},
 		followerHWNDs: map[string]uintptr{},
 	}
 	s.sess = sess
@@ -547,12 +597,19 @@ func (s *SyncService) startFollower(sess *syncSession, followerID, activeMasterT
 		client.Close()
 		return nil, "发现标签失败"
 	}
-	ft, err := w.ensureTarget(ctx, activeMasterTarget, activeURL)
-	if err != nil {
-		client.Close()
-		return nil, "创建对应标签失败"
+	if activeURL != "" {
+		ft, err := w.ensureTarget(ctx, activeMasterTarget, activeURL)
+		if err != nil {
+			client.Close()
+			return nil, "创建对应标签失败"
+		}
+		w.pairWith(activeMasterTarget, ft)
 	}
-	w.pairWith(activeMasterTarget, ft)
+	// If the active target's URL is not known yet (a tab
+	// still being created), it is deliberately left unmapped
+	// here: offerTarget creates the counterpart when
+	// Target.targetInfoChanged reports the final URL —
+	// never a guessed about:blank.
 	// A JavaScript dialog on a follower is never answered
 	// automatically (the user might cancel on the master
 	// while a follower accepted — the operations would

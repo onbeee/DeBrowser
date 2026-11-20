@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -287,7 +288,12 @@ func (w *followerWorker) ensureTarget(ctx context.Context, masterTarget, url str
 
 func (w *followerWorker) createTarget(ctx context.Context, url string) (string, error) {
 	if url == "" {
-		url = "about:blank"
+		// Never materialize a creation-instant empty URL as
+		// a permanent about:blank tab: the session offers a
+		// target for creation only once its URL is known
+		// (Target.targetInfoChanged). An empty URL here is a
+		// programming error, reported — not guessed.
+		return "", fmt.Errorf("标签页地址尚未就绪")
 	}
 	targetID, err := w.client.CallString(ctx, "", "Target.createTarget", map[string]any{
 		"url": url, "background": true,
@@ -478,6 +484,17 @@ func (w *followerWorker) dispatchInput(ctx context.Context, ev PageEvent) {
 	}
 	switch ev.Kind {
 	case "pointermove", "pointerdown", "pointerup":
+		// The right button is never dispatched: its press
+		// would open the follower's own native context menu,
+		// which is browser UI — not a sync object — and no
+		// page event would ever dismiss it (the master's menu
+		// interaction happens in native UI and is not
+		// captured), leaving a stuck menu on the follower.
+		// Left/middle buttons, drags and wheels are
+		// unaffected.
+		if ev.Kind != "pointermove" && ev.Button == 2 {
+			return
+		}
 		x, y := w.scale(ev.X, ev.Y)
 		typ := "mouseMoved"
 		if ev.Kind == "pointerdown" {
@@ -512,6 +529,12 @@ func (w *followerWorker) dispatchInput(ctx context.Context, ev PageEvent) {
 			"modifiers": ev.Modifiers(),
 		})
 	case "keydown", "keyup":
+		// The dedicated menu key would open the follower's
+		// native context menu — same reasoning as the right
+		// mouse button above.
+		if ev.Code == "ContextMenu" {
+			return
+		}
 		typ := "keyDown"
 		if ev.Kind == "keyup" {
 			typ = "keyUp"

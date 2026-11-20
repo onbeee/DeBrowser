@@ -23,13 +23,15 @@ import (
 // workers use, counts Target.createTarget calls, and can
 // delay or fail creation on demand.
 type fakeBrowserCDP struct {
-	srv      *httptest.Server
-	port     int
-	creates  atomic.Int64
-	closes   atomic.Int64
-	detaches atomic.Int64
-	delay    time.Duration
-	fail     bool
+	srv         *httptest.Server
+	port        int
+	creates     atomic.Int64
+	createdMu   sync.Mutex
+	createdURLs []string
+	closes      atomic.Int64
+	detaches    atomic.Int64
+	delay       time.Duration
+	fail        bool
 	// failEnable makes Page.enable fail (attach cleanup tests).
 	failEnable bool
 
@@ -56,6 +58,15 @@ func (f *fakeBrowserCDP) record(method, sessionID string, params json.RawMessage
 	f.callsMu.Lock()
 	f.calls = append(f.calls, recordedCall{Method: method, SessionID: sessionID, Type: p.Type, Code: p.Code, Button: p.Button})
 	f.callsMu.Unlock()
+}
+
+func (f *fakeBrowserCDP) createdURL(i int) string {
+	f.createdMu.Lock()
+	defer f.createdMu.Unlock()
+	if i < 0 || i >= len(f.createdURLs) {
+		return "<none>"
+	}
+	return f.createdURLs[i]
 }
 
 func (f *fakeBrowserCDP) findCalls(method, sessionID, typ, code string) int {
@@ -118,6 +129,13 @@ func newFakeBrowserCDP(t *testing.T) *fakeBrowserCDP {
 				reply(map[string]any{})
 			case "Target.createTarget":
 				n := f.creates.Add(1)
+				var cp struct {
+					URL string `json:"url"`
+				}
+				_ = json.Unmarshal(msg.Params, &cp)
+				f.createdMu.Lock()
+				f.createdURLs = append(f.createdURLs, cp.URL)
+				f.createdMu.Unlock()
 				if f.delay > 0 {
 					time.Sleep(f.delay)
 				}
