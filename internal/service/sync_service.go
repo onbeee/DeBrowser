@@ -978,6 +978,19 @@ func (s *SyncService) teardown(sess *syncSession, reason string) {
 	sess.failReason = reason
 	sess.mu.Unlock()
 
+	// Wait out a window-mirror tick that already passed its
+	// live check: mirrorOnce holds winMu for its whole apply
+	// phase, so acquiring it here guarantees no mirror is
+	// still moving follower windows while the session is
+	// torn down — StopSync must not return with one last
+	// mirror application still in flight. A tick arriving
+	// after the tornDown mark fails its live check and
+	// returns immediately, so this never waits on future
+	// ticks. Lock order: no caller of teardown holds winMu,
+	// and mirrorOnce never calls teardown.
+	s.winMu.Lock()
+	s.winMu.Unlock()
+
 	// Each worker's close first releases its pressed inputs
 	// through its own serial dispatcher, then stops it.
 	sess.forEachFollower(func(w *followerWorker) {

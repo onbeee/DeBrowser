@@ -2,7 +2,9 @@ package service
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/onbeee/DeBrowser/internal/winmgr"
 )
@@ -264,5 +266,69 @@ func TestResumeSyncFailsWhenMasterIdentityGone(t *testing.T) {
 	}
 	if svc.current() != nil {
 		t.Fatal("the session must be torn down after a failed resume identity check")
+	}
+}
+
+// StopSync (via teardown) must not return while a mirror
+// tick that already passed its live check is still moving
+// windows: mirrorOnce holds winMu for its whole apply phase,
+// and teardown — after marking the session torn down —
+// acquires winMu to wait that tick out. A tick arriving
+// after the mark fails its live check, so the wait can never
+// extend to future ticks.
+func TestTeardownWaitsForInFlightMirror(t *testing.T) {
+	instances, _ := testInstanceService(t)
+	svc := NewSyncService(instances)
+	var geometryReads, rectWrites, placementWrites atomic.Int64
+	svc.getWindowGeometry = func(uintptr) (winmgr.Placement, winmgr.Rect, error) {
+		geometryReads.Add(1)
+		return winmgr.Placement{}, winmgr.Rect{}, nil
+	}
+	svc.setWindowRect = func(uintptr, winmgr.Rect) error {
+		rectWrites.Add(1)
+		return nil
+	}
+	svc.setWindowPlacement = func(uintptr, winmgr.Placement) error {
+		placementWrites.Add(1)
+		return nil
+	}
+	sess := &syncSession{
+		phase:        syncRunning,
+		systemPauses: map[string]bool{},
+		followers:    map[string]*followerWorker{},
+		masterHWND:   777,
+	}
+	svc.sess = sess
+
+	// A mirror tick in flight holds winMu (mirrorOnce holds
+	// it for the entire apply phase).
+	svc.winMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.teardown(sess, "")
+	}()
+	// Teardown cannot complete while the lock is held; the
+	// wait only gives a broken implementation room to slip.
+	select {
+	case <-done:
+		t.Fatal("teardown completed while a mirror operation was still in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+	// Releasing the mirror lets teardown finish.
+	svc.winMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown did not complete after the mirror operation finished")
+	}
+	if svc.current() != nil {
+		t.Fatal("teardown must clear the current session")
+	}
+	// After teardown, a mirror tick touches no window at all.
+	svc.mirrorOnce(sess)
+	if geometryReads.Load() != 0 || rectWrites.Load() != 0 || placementWrites.Load() != 0 {
+		t.Fatalf("mirrorOnce acted after teardown: reads=%d rects=%d placements=%d",
+			geometryReads.Load(), rectWrites.Load(), placementWrites.Load())
 	}
 }
