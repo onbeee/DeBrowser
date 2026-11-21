@@ -80,12 +80,16 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 
 // NodeInfo is one proxy node of a provider, as the node list UI
 // needs it. Delay is the node's most recent health-check delay in
-// milliseconds (0 when never measured).
+// milliseconds (0 when never measured). Checked reports whether
+// the core has health-checked the node at all (it has a check
+// history); Alive is only meaningful when Checked is true — an
+// unchecked node is neither healthy nor failed.
 type NodeInfo struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"`
-	Alive bool   `json:"alive"`
-	Delay int    `json:"delay"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Alive   bool   `json:"alive"`
+	Delay   int    `json:"delay"`
+	Checked bool   `json:"checked"`
 }
 
 // ProviderProxies lists the nodes one proxy-provider currently
@@ -112,7 +116,7 @@ func (c *Client) ProviderProxies(ctx context.Context, provider string) ([]NodeIn
 	}
 	out := make([]NodeInfo, 0, len(p.Proxies))
 	for _, n := range p.Proxies {
-		ni := NodeInfo{Name: n.Name, Type: n.Type, Alive: n.Alive}
+		ni := NodeInfo{Name: n.Name, Type: n.Type, Alive: n.Alive, Checked: len(n.History) > 0}
 		if len(n.History) > 0 {
 			ni.Delay = n.History[len(n.History)-1].Delay
 		}

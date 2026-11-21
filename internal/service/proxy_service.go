@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -69,6 +68,31 @@ type ProxyService struct {
 	manager  *mihomo.Manager
 	client   *mihomo.Client
 	secret   string
+
+	// refreshOverride and selectOverride, when set, replace the
+	// corresponding core calls. They are test seams only (nil in
+	// production): refresh and selection failures inside the
+	// running core cannot be provoked from outside it, and the
+	// rollback and error-propagation paths must still be
+	// exercised deterministically.
+	refreshOverride func(ctx context.Context, provider string) error
+	selectOverride  func(ctx context.Context, group, node string) error
+}
+
+// refreshProvider asks the core to re-fetch one proxy-provider.
+func (s *ProxyService) refreshProvider(ctx context.Context, provider string) error {
+	if s.refreshOverride != nil {
+		return s.refreshOverride(ctx, provider)
+	}
+	return s.client.RefreshProvider(ctx, provider)
+}
+
+// selectNode sets one instance group's current node in the core.
+func (s *ProxyService) selectNode(ctx context.Context, group, node string) error {
+	if s.selectOverride != nil {
+		return s.selectOverride(ctx, group, node)
+	}
+	return s.client.SelectNode(ctx, group, node)
 }
 
 const (
@@ -113,7 +137,8 @@ type NodeView struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
 	Alive      bool   `json:"alive"`
-	Delay      int    `json:"delay"` // ms; 0 = not measured
+	Delay      int    `json:"delay"`   // ms; 0 = not measured
+	Checked    bool   `json:"checked"` // the core has health-checked this node at least once
 }
 
 // NodeDelayView is one delay test result.
@@ -132,7 +157,7 @@ type BindingView struct {
 	SourceName    string `json:"sourceName"`
 	NodeName      string `json:"nodeName"`
 	Port          int    `json:"port"`
-	NodeState     string `json:"nodeState"`     // "ok" | "missing" | "unknown"
+	NodeState     string `json:"nodeState"`     // "ok" | "down" | "missing" | "unknown"
 	ListenerState string `json:"listenerState"` // "ok" | "down" | "unknown"
 }
 
@@ -292,7 +317,16 @@ func (s *ProxyService) StartCore(operationID string) error {
 		if err := s.manager.Start(ctx); err != nil {
 			return err
 		}
-		return s.applySelections(ctx)
+		if err := s.applySelections(ctx); err != nil {
+			// The process started but the recorded selections
+			// could not be applied: stop the core again, so a
+			// start that reports failure never leaves a core
+			// running (and no instance can end up on a node
+			// other than its recorded one).
+			_ = s.manager.Stop()
+			return fmt.Errorf("核心已启动但实例节点选择应用失败，已停止核心：%w", err)
+		}
+		return nil
 	}()
 	finishOp(op, err)
 	return err
@@ -436,8 +470,15 @@ func (s *ProxyService) buildConfigInput(ctx context.Context, state proxyConfigSt
 // currently exists is selected; a binding whose node is gone (or
 // whose provider cannot be read) is set to REJECT explicitly, so
 // the instance refuses traffic instead of silently falling back
-// to another node. Selection problems never fail the caller: the
-// binding stays recorded and the UI reports the node as missing.
+// to another node. The recorded bindings themselves are NEVER
+// changed here.
+//
+// A failed selection is an error, never a warning swallowed on
+// the way to a success report: the affected instance's group is
+// additionally forced to REJECT (best effort), so a selection
+// failure can never leave an instance running on a node other
+// than its recorded one, and the caller decides how to surface
+// the failure. Other instances' selections still proceed.
 func (s *ProxyService) applySelections(ctx context.Context) error {
 	bindings, err := s.store.ListBindings(ctx)
 	if err != nil {
@@ -451,6 +492,7 @@ func (s *ProxyService) applySelections(ctx context.Context) error {
 	for _, src := range sources {
 		providerBySource[src.ID] = src.ProviderName
 	}
+	var failed []string
 	for _, b := range bindings {
 		target := "REJECT"
 		if provider, ok := providerBySource[b.SourceID]; ok {
@@ -463,9 +505,22 @@ func (s *ProxyService) applySelections(ctx context.Context) error {
 				}
 			}
 		}
-		if err := s.client.SelectNode(ctx, mihomo.GroupName(b.InstanceID), target); err != nil {
-			s.log.Warn("apply proxy selection failed", "instance", b.InstanceID, "error", err)
+		if err := s.selectNode(ctx, mihomo.GroupName(b.InstanceID), target); err != nil {
+			if target != "REJECT" {
+				// Safety first: park the group on the explicit
+				// reject target so this instance cannot run on
+				// a wrong node, then report the failure.
+				_ = s.selectNode(ctx, mihomo.GroupName(b.InstanceID), "REJECT")
+			}
+			name := b.InstanceID
+			if inst, ierr := s.store.GetInstance(ctx, b.InstanceID); ierr == nil && inst.Name != "" {
+				name = inst.Name
+			}
+			failed = append(failed, name)
 		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("以下实例的节点选择应用失败，其流量已被拒绝（不会改用其他节点）：%s", strings.Join(failed, "、"))
 	}
 	return nil
 }
@@ -597,10 +652,18 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 			s.mu.Unlock()
 			return SourceView{}, fmt.Errorf("添加订阅失败，核心配置更新未生效，已回滚：%w", err)
 		}
-		// Ask the core to fetch the new provider now so node
-		// counts are real; a fetch failure keeps the (empty)
-		// provider and is reported by the source view.
-		_ = s.client.RefreshProvider(ctx, src.ProviderName)
+		// Ask the core to fetch the new provider now. A source
+		// only counts as added when the core actually loaded
+		// it: a refresh failure rolls the archive back (row,
+		// vault entry and the live configuration) instead of
+		// reporting success for a source that does not work.
+		if err := s.refreshProvider(ctx, src.ProviderName); err != nil {
+			_ = s.store.DeleteProxySource(ctx, id)
+			_, _ = s.vault.DeleteCompensating(ref)
+			_ = s.regenerate(ctx)
+			s.mu.Unlock()
+			return SourceView{}, fmt.Errorf("添加订阅失败，核心未能加载该订阅，已回滚：%w", err)
+		}
 	}
 	s.mu.Unlock()
 	s.vault.MarkCommitted(ref)
@@ -759,26 +822,46 @@ func (s *ProxyService) countFileNodes(ctx context.Context, bin string, data []by
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o640); err != nil {
 		return 0, fmt.Errorf("写入验证配置失败：%w", err)
 	}
-	cmd := exec.Command(bin, "-d", dir, "-f", cfgPath)
-	if err := cmd.Start(); err != nil {
+	logFile, err := os.Create(filepath.Join(dir, "validate.log"))
+	if err != nil {
+		return 0, fmt.Errorf("创建验证日志失败：%w", err)
+	}
+	defer logFile.Close()
+	// The throwaway core runs through the same child-process
+	// management as the production core (on Windows: the same
+	// kill-on-close Job Object), and it is ALWAYS terminated and
+	// reaped before this function returns — on success, on
+	// failure, on timeout and on context cancellation alike.
+	vctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	child, err := mihomo.StartProcess(bin, []string{"-d", dir, "-f", cfgPath}, dir, logFile)
+	if err != nil {
 		return 0, fmt.Errorf("启动验证核心失败：%w", err)
 	}
+	done := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(done)
+	}()
 	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = child.Kill()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
 	}()
 	client := mihomo.NewClient(proxyValidatePort, s.secret)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, err := client.Version(ctx); err == nil {
+		if _, err := client.Version(vctx); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
 			return 0, fmt.Errorf("验证核心未能启动，无法验证文件内容")
 		}
 		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
+		case <-vctx.Done():
+			return 0, vctx.Err()
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
@@ -786,7 +869,7 @@ func (s *ProxyService) countFileNodes(ctx context.Context, bin string, data []by
 	// briefly so a slow first parse is not misread as empty.
 	deadline = time.Now().Add(5 * time.Second)
 	for {
-		nodes, err := client.ProviderProxies(ctx, "candidate")
+		nodes, err := client.ProviderProxies(vctx, "candidate")
 		if err == nil && len(nodes) > 0 {
 			return len(nodes), nil
 		}
@@ -794,8 +877,8 @@ func (s *ProxyService) countFileNodes(ctx context.Context, bin string, data []by
 			return 0, nil
 		}
 		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
+		case <-vctx.Done():
+			return 0, vctx.Err()
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -828,7 +911,7 @@ func (s *ProxyService) RefreshSource(operationID string, id string) error {
 		if !s.coreRunning(ctx) {
 			return fmt.Errorf("代理核心未开启，无法更新订阅；请先在代理配置页面手动开启代理")
 		}
-		if err := s.client.RefreshProvider(ctx, src.ProviderName); err != nil {
+		if err := s.refreshProvider(ctx, src.ProviderName); err != nil {
 			return fmt.Errorf("订阅更新失败，已保留原有节点：%w", err)
 		}
 		return s.applySelections(ctx)
@@ -881,18 +964,39 @@ func (s *ProxyService) reimportFileSource(id string) (SourceView, error) {
 	if err := s.checkFileData(ctx, data); err != nil {
 		return SourceView{}, fmt.Errorf("新文件未通过核心验证，已保留原文件和原有节点：%w", err)
 	}
+	// Keep the previous content: if the running core refuses the
+	// new file at refresh time, the old file is restored and
+	// reloaded, so the disk copy and the running configuration
+	// never disagree.
+	oldData, _ := os.ReadFile(filepath.Join(s.sourcesDir(), src.FileName))
 	if err := s.writeSourceCopy(src.FileName, data); err != nil {
 		return SourceView{}, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.coreRunning(ctx) {
-		if err := s.client.RefreshProvider(ctx, src.ProviderName); err != nil {
-			s.mu.Unlock()
-			return SourceView{}, fmt.Errorf("新文件已通过验证并已替换，但核心刷新失败，核心仍在使用原有节点：%w", err)
+		if err := s.refreshProvider(ctx, src.ProviderName); err != nil {
+			var rollbackErr error
+			switch {
+			case oldData == nil:
+				rollbackErr = fmt.Errorf("原文件内容不可用")
+			default:
+				if werr := s.writeSourceCopy(src.FileName, oldData); werr != nil {
+					rollbackErr = werr
+				} else if rerr := s.refreshProvider(ctx, src.ProviderName); rerr != nil {
+					rollbackErr = rerr
+				}
+			}
+			if rollbackErr != nil {
+				return SourceView{}, fmt.Errorf("新文件刷新失败，且原文件恢复失败（刷新错误：%v；恢复错误：%v），请重新导入原文件", err, rollbackErr)
+			}
+			_ = s.applySelections(ctx)
+			return SourceView{}, fmt.Errorf("新文件刷新失败，已恢复原文件和原有节点：%w", err)
 		}
-		_ = s.applySelections(ctx)
+		if err := s.applySelections(ctx); err != nil {
+			return SourceView{}, err
+		}
 	}
-	s.mu.Unlock()
 	return s.sourceView(ctx, src), nil
 }
 
@@ -936,8 +1040,14 @@ func (s *ProxyService) DeleteSource(operationID string, id string) error {
 			return fmt.Errorf("核心配置更新失败，来源未删除：%w", err)
 		}
 		if err := s.store.DeleteProxySource(ctx, id); err != nil {
-			_ = s.regenerate(ctx) // restore the live configuration (best effort)
-			return fmt.Errorf("删除来源失败：%w", err)
+			// The runtime configuration was already switched to
+			// the proposed state; restore it so database and
+			// core agree again. A failed restore is reported,
+			// never hidden.
+			if rerr := s.regenerate(ctx); rerr != nil {
+				return fmt.Errorf("删除来源失败，且运行配置恢复失败（删除错误：%v；恢复错误：%v），请重启核心以恢复一致", err, rerr)
+			}
+			return fmt.Errorf("删除来源失败，运行配置已恢复：%w", err)
 		}
 		if src.Kind == model.ProxySourceKindFile && src.FileName != "" {
 			os.Remove(filepath.Join(s.sourcesDir(), src.FileName))
@@ -995,7 +1105,7 @@ func (s *ProxyService) ListNodes() ([]NodeView, error) {
 		for _, n := range nodes {
 			out = append(out, NodeView{
 				SourceID: src.ID, SourceName: src.Name,
-				Name: n.Name, Type: n.Type, Alive: n.Alive, Delay: n.Delay,
+				Name: n.Name, Type: n.Type, Alive: n.Alive, Delay: n.Delay, Checked: n.Checked,
 			})
 		}
 	}
@@ -1049,9 +1159,19 @@ func (s *ProxyService) testDelays() ([]NodeDelayView, error) {
 // Instance bindings
 // ---------------------------------------------------------------------------
 
-// nodeState reports whether a binding's node currently exists in
-// the core ("ok"), is gone ("missing"), or cannot be determined
-// because the core is stopped ("unknown").
+// nodeState derives a binding's node health display from the
+// core's own data — existence from the source's current node
+// list, health from the core's health-check history:
+//
+//   - "missing": the node is gone from its source (yellow);
+//   - "down": the node exists but its latest health check
+//     failed (red);
+//   - "ok": the node exists and its latest health check
+//     passed (green);
+//   - "unknown": not yet health-checked, or the core is
+//     stopped — never presented as healthy (neutral).
+//
+// The state is display-only; it never changes the binding.
 func (s *ProxyService) nodeState(ctx context.Context, b model.InstanceProxyBinding, providerName string) string {
 	if !s.coreRunning(ctx) {
 		return "unknown"
@@ -1062,7 +1182,13 @@ func (s *ProxyService) nodeState(ctx context.Context, b model.InstanceProxyBindi
 	}
 	for _, n := range nodes {
 		if n.Name == b.NodeName {
-			return "ok"
+			if !n.Checked {
+				return "unknown"
+			}
+			if n.Alive {
+				return "ok"
+			}
+			return "down"
 		}
 	}
 	return "missing"
@@ -1209,8 +1335,10 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 	}
 	b, err := s.store.UpsertBinding(ctx, proposed)
 	if err != nil {
-		_ = s.regenerate(ctx) // restore the live configuration (best effort)
-		return BindingView{}, fmt.Errorf("保存代理绑定失败：%w", err)
+		if rerr := s.regenerate(ctx); rerr != nil {
+			return BindingView{}, fmt.Errorf("保存代理绑定失败，且运行配置恢复失败（保存错误：%v；恢复错误：%v），请重启核心以恢复一致", err, rerr)
+		}
+		return BindingView{}, fmt.Errorf("保存代理绑定失败，运行配置已恢复：%w", err)
 	}
 	return s.bindingView(ctx, b), nil
 }
@@ -1261,8 +1389,10 @@ func (s *ProxyService) ClearBinding(operationID string, instanceID string) error
 			return fmt.Errorf("核心配置更新失败，绑定未清除：%w", err)
 		}
 		if err := s.store.DeleteBinding(ctx, instanceID); err != nil {
-			_ = s.regenerate(ctx) // restore the live configuration (best effort)
-			return err
+			if rerr := s.regenerate(ctx); rerr != nil {
+				return fmt.Errorf("清除代理绑定失败，且运行配置恢复失败（清除错误：%v；恢复错误：%v），请重启核心以恢复一致", err, rerr)
+			}
+			return fmt.Errorf("清除代理绑定失败，运行配置已恢复：%w", err)
 		}
 		return nil
 	}()

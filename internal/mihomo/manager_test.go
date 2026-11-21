@@ -148,3 +148,85 @@ func TestEnsureBinaryVerifiesExistingFile(t *testing.T) {
 		t.Fatalf("EnsureBinary = %q, want %q", got, bin)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Real-binary startup cleanup (DEBROWSER_TEST_MIHOMO gated)
+// ---------------------------------------------------------------------------
+
+// startCleanupFixture builds a manager whose client polls a
+// controller port the core is NOT listening on (the core's own
+// config uses a different one), so readiness can never succeed
+// while the core itself runs fine. It returns the manager and
+// the ports the core actually occupies.
+func startCleanupFixture(t *testing.T, readyTimeout time.Duration) (*Manager, int, int) {
+	t.Helper()
+	bin := os.Getenv("DEBROWSER_TEST_MIHOMO")
+	if bin == "" {
+		t.Skip("DEBROWSER_TEST_MIHOMO not set; real-core tests skipped")
+	}
+	data, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(BinaryPath(dir), data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const corePort, wrongPort, listenerPort = 19099, 19199, 19101
+	cfg := "log-level: warning\nmode: rule\n" +
+		"external-controller: \"127.0.0.1:19099\"\nsecret: \"test-secret\"\n" +
+		"listeners:\n  - {name: l1, type: mixed, listen: 127.0.0.1, port: 19101}\n" +
+		"rules:\n  - \"MATCH,DIRECT\"\n"
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(dir, cfgPath, NewClient(wrongPort, "test-secret"), wrongPort)
+	m.readyTimeout = readyTimeout
+	return m, corePort, listenerPort
+}
+
+func assertPortFree(t *testing.T, port int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !ProbePort(port) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("port %d is still occupied; a core process was left behind", port)
+}
+
+// A readiness timeout must terminate the just-started core: no
+// process, no controller, no listener survives a failed Start.
+func TestManagerStartTimeoutLeavesNoProcess(t *testing.T) {
+	m, corePort, listenerPort := startCleanupFixture(t, 800*time.Millisecond)
+	if err := m.Start(context.Background()); err == nil {
+		t.Fatal("start with an unreachable controller must fail")
+	}
+	if m.Running() {
+		t.Fatal("manager still reports running after a failed start")
+	}
+	assertPortFree(t, corePort)
+	assertPortFree(t, listenerPort)
+}
+
+// Same guarantee when the caller's context is cancelled during
+// the readiness wait.
+func TestManagerStartContextCancelLeavesNoProcess(t *testing.T) {
+	m, corePort, listenerPort := startCleanupFixture(t, 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		cancel()
+	}()
+	if err := m.Start(ctx); err == nil {
+		t.Fatal("start with a cancelled context must fail")
+	}
+	if m.Running() {
+		t.Fatal("manager still reports running after a cancelled start")
+	}
+	assertPortFree(t, corePort)
+	assertPortFree(t, listenerPort)
+}

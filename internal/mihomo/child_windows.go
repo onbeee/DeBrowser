@@ -112,6 +112,27 @@ func init() {
 		_ = windows.SetHandleInformation(nul,
 			windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
 
+		// Restrict handle inheritance to exactly the three
+		// standard handles the core needs (stdin/stdout/stderr).
+		// With bInheritHandles=true but no handle list, the child
+		// would inherit EVERY inheritable handle this process
+		// happens to hold; the attribute list bounds the set, and
+		// no global handle state is changed beyond the two std
+		// handles above.
+		attrList, err := windows.NewProcThreadAttributeList(1)
+		if err != nil {
+			windows.CloseHandle(nul)
+			return fail(fmt.Errorf("prepare core handle list: %w", err))
+		}
+		defer attrList.Delete()
+		stdHandles := []windows.Handle{nul, logHandle, logHandle}
+		if err := attrList.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+			unsafe.Pointer(&stdHandles[0]),
+			uintptr(len(stdHandles))*unsafe.Sizeof(stdHandles[0])); err != nil {
+			windows.CloseHandle(nul)
+			return fail(fmt.Errorf("prepare core handle list: %w", err))
+		}
+
 		parts := make([]string, 0, len(args)+1)
 		parts = append(parts, quoteArg(bin))
 		for _, a := range args {
@@ -132,17 +153,24 @@ func init() {
 			windows.CloseHandle(nul)
 			return fail(err)
 		}
-		si := &windows.StartupInfo{
-			Flags:     windows.STARTF_USESTDHANDLES,
-			StdInput:  nul,
-			StdOutput: logHandle,
-			StdErr:    logHandle,
+		si := &windows.StartupInfoEx{
+			StartupInfo: windows.StartupInfo{
+				Cb:        uint32(unsafe.Sizeof(windows.StartupInfoEx{})),
+				Flags:     windows.STARTF_USESTDHANDLES,
+				StdInput:  nul,
+				StdOutput: logHandle,
+				StdErr:    logHandle,
+			},
+			ProcThreadAttributeList: attrList.List(),
 		}
 		pi := &windows.ProcessInformation{}
 		// CREATE_SUSPENDED: the process does not run until it is
 		// inside the job and ResumeThread is called.
+		// EXTENDED_STARTUPINFO_PRESENT selects the StartupInfoEx
+		// (with the handle list) over a plain StartupInfo.
 		err = windows.CreateProcess(exePtr, cmdline, nil, nil, true,
-			windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW, nil, dirPtr, si, pi)
+			windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW|windows.EXTENDED_STARTUPINFO_PRESENT,
+			nil, dirPtr, &si.StartupInfo, pi)
 		windows.CloseHandle(nul)
 		if err != nil {
 			return fail(fmt.Errorf("create core process: %w", err))

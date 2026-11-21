@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -429,5 +430,458 @@ func TestProxySubscriptionRefreshNoFallback(t *testing.T) {
 	probeWant(t, b.Port, "")
 	if got, _, err := f.svc.GetBinding(inst.ID); err != nil || got.NodeState != "missing" {
 		t.Fatalf("node state after refresh = %+v, %v; want missing", got, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Final fix round: selection errors, health states, rollbacks
+// ---------------------------------------------------------------------------
+
+// forceDelayCheck runs one health-check round for a provider's
+// nodes through the core's delay endpoint, using the local echo
+// as the check URL (the sandbox has no internet; the production
+// path differs only in the URL the core checks against).
+func forceDelayCheck(t *testing.T, f *proxyFixture, sourceID string, echoPort int) {
+	t.Helper()
+	src, err := f.store.GetProxySource(context.Background(), sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := os.ReadFile(filepath.Join(f.cfg.Layout.Mihomo, "controller-secret.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := url.Values{}
+	q.Set("url", fmt.Sprintf("http://127.0.0.1:%d/", echoPort))
+	// The echo answers only after its read settles (~3s), so the
+	// per-node timeout must comfortably exceed that.
+	q.Set("timeout", "9000")
+	req, err := http.NewRequest(http.MethodGet,
+		"http://127.0.0.1:19097/group/"+url.PathEscape(mihomo.DelayGroupName(src.ProviderName))+"/delay?"+q.Encode(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(secret)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delay check: status %d", resp.StatusCode)
+	}
+}
+
+func bindingState(t *testing.T, f *proxyFixture, instanceID string) string {
+	t.Helper()
+	view, bound, err := f.svc.GetBinding(instanceID)
+	if err != nil || !bound {
+		t.Fatalf("get binding: bound=%v err=%v", bound, err)
+	}
+	return view.NodeState
+}
+
+// Node health states come from the core's own data: unchecked is
+// neutral ("unknown"), a passed health check is "ok", a failed
+// one is "down", and a node gone from its source is "missing" —
+// while the recorded binding NEVER changes.
+func TestProxyNodeHealthStates(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+
+	echoA := startEcho(t, "VIA-A")
+	nodeA := startSocksNode(t, echoA)
+	// A node whose upstream is dead: the SOCKS handshake works,
+	// every connect fails — the node exists but is unhealthy.
+	deadLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadPort := deadLn.Addr().(*net.TCPAddr).Port
+	_ = deadLn.Close()
+	nodeC := startSocksNode(t, deadPort)
+
+	dir := t.TempDir()
+	fileV1 := filepath.Join(dir, "s1.yaml")
+	fileV2 := filepath.Join(dir, "s2.yaml")
+	writeSourceYAML(t, fileV1, fmt.Sprintf("NodeA=%d", nodeA), fmt.Sprintf("NodeC=%d", nodeC))
+	writeSourceYAML(t, fileV2, fmt.Sprintf("NodeA=%d", nodeA))
+	pick := fileV1
+	f.svc.SourceFilePicker = func() (string, error) { return pick, nil }
+
+	view, err := f.svc.AddFileSource("op", "健康状态")
+	if err != nil {
+		t.Fatalf("add source: %v", err)
+	}
+	inst1 := f.makeInstance(t, "健康实例")
+	inst2 := f.makeInstance(t, "故障实例")
+	if _, err := f.svc.SetBinding("op", inst1.ID, view.ID, "NodeA"); err != nil {
+		t.Fatalf("bind inst1: %v", err)
+	}
+	if _, err := f.svc.SetBinding("op", inst2.ID, view.ID, "NodeC"); err != nil {
+		t.Fatalf("bind inst2: %v", err)
+	}
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatalf("start core: %v", err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+
+	// Not yet health-checked: neutral, never presented as healthy.
+	if got := bindingState(t, f, inst1.ID); got != "unknown" {
+		t.Fatalf("unchecked node state = %q, want unknown", got)
+	}
+	forceDelayCheck(t, f, view.ID, echoA)
+	if got := bindingState(t, f, inst1.ID); got != "ok" {
+		t.Fatalf("healthy node state = %q, want ok", got)
+	}
+	if got := bindingState(t, f, inst2.ID); got != "down" {
+		t.Fatalf("failing node state = %q, want down", got)
+	}
+
+	// NodeC disappears from the source: yellow "missing", and
+	// the recorded binding still names NodeC.
+	pick = fileV2
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err != nil {
+		t.Fatalf("reimport without NodeC: %v", err)
+	}
+	if got := bindingState(t, f, inst2.ID); got != "missing" {
+		t.Fatalf("vanished node state = %q, want missing", got)
+	}
+	stored, err := f.store.GetBinding(context.Background(), inst2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.NodeName != "NodeC" {
+		t.Fatalf("binding was rewritten to %q; the user's binding must be preserved", stored.NodeName)
+	}
+}
+
+// A selection failure is an error (never a swallowed warning),
+// the failed instance's group is parked on REJECT, other
+// instances are unaffected, and a StartCore whose selections
+// fail stops the core again instead of reporting success.
+func TestProxySelectionFailureHandling(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+
+	echoA := startEcho(t, "VIA-A")
+	echoB := startEcho(t, "VIA-B")
+	nodeA := startSocksNode(t, echoA)
+	nodeB := startSocksNode(t, echoB)
+	fileV1 := filepath.Join(t.TempDir(), "s.yaml")
+	writeSourceYAML(t, fileV1, fmt.Sprintf("NodeA=%d", nodeA), fmt.Sprintf("NodeB=%d", nodeB))
+	f.svc.SourceFilePicker = func() (string, error) { return fileV1, nil }
+	view, err := f.svc.AddFileSource("op", "选择失败")
+	if err != nil {
+		t.Fatalf("add source: %v", err)
+	}
+	inst1 := f.makeInstance(t, "实例甲")
+	inst2 := f.makeInstance(t, "实例乙")
+	b1, err := f.svc.SetBinding("op", inst1.ID, view.ID, "NodeA")
+	if err != nil {
+		t.Fatalf("bind inst1: %v", err)
+	}
+	b2, err := f.svc.SetBinding("op", inst2.ID, view.ID, "NodeB")
+	if err != nil {
+		t.Fatalf("bind inst2: %v", err)
+	}
+
+	var rejectParked []string
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error {
+		if node == "NodeA" {
+			return fmt.Errorf("injected selection failure")
+		}
+		if node == "REJECT" {
+			rejectParked = append(rejectParked, group)
+		}
+		return f.svc.client.SelectNode(ctx, group, node)
+	}
+
+	// StartCore must fail AND leave no core running.
+	if err := f.svc.StartCore("op"); err == nil {
+		t.Fatal("StartCore with a failing selection must return an error")
+	}
+	if st := f.svc.GetCoreStatus(); st.State != "stopped" {
+		t.Fatalf("core state after failed StartCore = %q, want stopped", st.State)
+	}
+	if mihomo.ProbePort(proxyControllerPort) {
+		t.Fatal("controller port still answers after failed StartCore; the core was left running")
+	}
+
+	// With selections working again the core starts; a direct
+	// applySelections failure then names only the failed
+	// instance, parks its group on REJECT and changes nothing
+	// in the database.
+	f.svc.selectOverride = nil
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatalf("start core: %v", err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+	rejectParked = nil
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error {
+		if node == "NodeA" {
+			return fmt.Errorf("injected selection failure")
+		}
+		if node == "REJECT" {
+			rejectParked = append(rejectParked, group)
+		}
+		return f.svc.client.SelectNode(ctx, group, node)
+	}
+	err = f.svc.applySelections(context.Background())
+	if err == nil {
+		t.Fatal("applySelections must return the selection failure")
+	}
+	if !strings.Contains(err.Error(), "实例甲") || strings.Contains(err.Error(), "实例乙") {
+		t.Fatalf("error should name only the failed instance: %v", err)
+	}
+	parked := false
+	for _, g := range rejectParked {
+		if g == mihomo.GroupName(inst1.ID) {
+			parked = true
+		}
+	}
+	if !parked {
+		t.Fatal("the failed instance's group was not parked on REJECT")
+	}
+	stored, err := f.store.GetBinding(context.Background(), inst1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.NodeName != "NodeA" {
+		t.Fatalf("binding changed to %q after a selection failure", stored.NodeName)
+	}
+	// The other instance still runs on its own node.
+	probeWant(t, b2.Port, "VIA-B")
+	_ = b1
+}
+
+// A reimport whose provider refresh fails restores the old file
+// byte for byte and keeps the old nodes serving; the same
+// reimport succeeds once the refresh works again.
+func TestProxyReimportRefreshFailureRollsBack(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+
+	echoA := startEcho(t, "VIA-A")
+	echoB := startEcho(t, "VIA-B")
+	nodeA := startSocksNode(t, echoA)
+	nodeB := startSocksNode(t, echoB)
+	dir := t.TempDir()
+	fileV1 := filepath.Join(dir, "r1.yaml")
+	fileV2 := filepath.Join(dir, "r2.yaml")
+	v1Bytes := writeSourceYAML(t, fileV1, fmt.Sprintf("NodeA=%d", nodeA), fmt.Sprintf("NodeB=%d", nodeB))
+	writeSourceYAML(t, fileV2, fmt.Sprintf("NodeB=%d", nodeB))
+	pick := fileV1
+	f.svc.SourceFilePicker = func() (string, error) { return pick, nil }
+	view, err := f.svc.AddFileSource("op", "回滚来源")
+	if err != nil {
+		t.Fatalf("add source: %v", err)
+	}
+	inst1 := f.makeInstance(t, "回滚实例")
+	b1, err := f.svc.SetBinding("op", inst1.ID, view.ID, "NodeA")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatalf("start core: %v", err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+	probeWant(t, b1.Port, "VIA-A")
+
+	// The first refresh (the new file) fails; the rollback
+	// refresh (the restored old file) succeeds.
+	refreshCalls := 0
+	f.svc.refreshOverride = func(ctx context.Context, provider string) error {
+		refreshCalls++
+		if refreshCalls == 1 {
+			return fmt.Errorf("injected refresh failure")
+		}
+		return f.svc.client.RefreshProvider(ctx, provider)
+	}
+	pick = fileV2
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err == nil {
+		t.Fatal("reimport with a failing refresh must return an error")
+	}
+	srcRec, err := f.store.GetProxySource(context.Background(), view.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(filepath.Join(f.svc.sourcesDir(), srcRec.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != string(v1Bytes) {
+		t.Fatal("the stored copy was not restored to the old file after the refresh failure")
+	}
+	probeWant(t, b1.Port, "VIA-A") // old nodes keep serving
+	if got := bindingState(t, f, inst1.ID); got == "missing" {
+		t.Fatal("NodeA must still exist after the rollback")
+	}
+
+	// Once refreshes work, the same reimport goes through.
+	f.svc.refreshOverride = nil
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err != nil {
+		t.Fatalf("reimport after recovery: %v", err)
+	}
+	probeWant(t, b1.Port, "") // NodeA is gone now: rejected, never switched to NodeB
+}
+
+// Adding a subscription whose provider refresh fails rolls the
+// whole source back: no row, no provider in the live config.
+func TestProxyAddURLSourceRefreshFailureRollsBack(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	nodeA := startSocksNode(t, startEcho(t, "VIA-A"))
+	payload := fmt.Sprintf("proxies:\n  - {name: NodeA, type: socks5, server: 127.0.0.1, port: %d}\n", nodeA)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatalf("start core: %v", err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+
+	f.svc.refreshOverride = func(ctx context.Context, provider string) error {
+		return fmt.Errorf("injected refresh failure")
+	}
+	if _, err := f.svc.AddURLSource("op", "失败订阅", srv.URL); err == nil {
+		t.Fatal("AddURLSource with a failing refresh must return an error")
+	}
+	sources, err := f.store.ListProxySources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 0 {
+		t.Fatalf("rolled-back source left %d rows behind", len(sources))
+	}
+	cfgText, err := os.ReadFile(f.svc.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfgText), "src-") {
+		t.Fatal("the live configuration still contains the rolled-back provider")
+	}
+
+	f.svc.refreshOverride = nil
+	if _, err := f.svc.AddURLSource("op", "正常订阅", srv.URL); err != nil {
+		t.Fatalf("add after recovery: %v", err)
+	}
+	nodes, err := f.svc.ListNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "NodeA" {
+		t.Fatalf("nodes after recovery = %+v", nodes)
+	}
+}
+
+// The throwaway validation core is always reaped: after a
+// successful validation, after an unloadable file, and after a
+// cancelled context, its controller port is free again.
+func TestProxyValidationProcessReaped(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	_ = f.svc.GetCoreStatus() // one-time secret/manager init
+	bin := mihomo.BinaryPath(f.cfg.Layout.Mihomo)
+	valid := writeSourceYAML(t, filepath.Join(t.TempDir(), "v.yaml"), "NodeA=1")
+
+	assertValidatePortFree := func() {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if !mihomo.ProbePort(proxyValidatePort) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatal("the validation core was left running (port still occupied)")
+	}
+
+	n, err := f.svc.countFileNodes(context.Background(), bin, valid)
+	if err != nil || n != 1 {
+		t.Fatalf("valid file: count=%d err=%v", n, err)
+	}
+	assertValidatePortFree()
+
+	bogus := []byte("proxies:\n  - {name: X, type: no-such-type, server: 127.0.0.1, port: 1}\n")
+	_, _ = f.svc.countFileNodes(context.Background(), bin, bogus)
+	assertValidatePortFree()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.svc.countFileNodes(ctx, bin, valid); err == nil {
+		t.Fatal("a cancelled validation must return an error")
+	}
+	assertValidatePortFree()
+}
+
+// When the database delete of a source fails, the runtime
+// configuration is restored: database and core stay consistent.
+func TestProxyDeleteSourceDatabaseFailureKeepsRuntime(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	nodeA := startSocksNode(t, startEcho(t, "VIA-A"))
+	fileV1 := filepath.Join(t.TempDir(), "d.yaml")
+	writeSourceYAML(t, fileV1, fmt.Sprintf("NodeA=%d", nodeA))
+	f.svc.SourceFilePicker = func() (string, error) { return fileV1, nil }
+	view, err := f.svc.AddFileSource("op", "删除失败来源")
+	if err != nil {
+		t.Fatalf("add source: %v", err)
+	}
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatalf("start core: %v", err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+
+	if _, err := f.db.SQL().Exec("CREATE TRIGGER block_source_delete BEFORE DELETE ON proxy_sources BEGIN SELECT RAISE(ABORT, 'blocked by test'); END;"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = f.db.SQL().Exec("DROP TRIGGER block_source_delete") }()
+	if err := f.svc.DeleteSource("op", view.ID); err == nil {
+		t.Fatal("DeleteSource with a failing database delete must return an error")
+	}
+	if _, err := f.store.GetProxySource(context.Background(), view.ID); err != nil {
+		t.Fatalf("the source row must survive its failed delete: %v", err)
+	}
+	nodes, err := f.svc.ListNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range nodes {
+		if n.Name == "NodeA" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the runtime configuration lost the source after its failed delete")
+	}
+}
+
+// A file that fails core validation is rejected before anything
+// is archived: no row, no stored copy.
+func TestProxyAddFileSourceValidationFailureLeavesNothing(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	bad := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(bad, []byte("proxies:\n  - {name: X, type: no-such-type, server: 127.0.0.1, port: 1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SourceFilePicker = func() (string, error) { return bad, nil }
+	if _, err := f.svc.AddFileSource("op", "坏文件"); err == nil {
+		t.Fatal("an unloadable file must be rejected")
+	}
+	sources, err := f.store.ListProxySources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 0 {
+		t.Fatalf("rejected import left %d source rows", len(sources))
+	}
+	entries, _ := os.ReadDir(f.svc.sourcesDir())
+	if len(entries) != 0 {
+		t.Fatalf("rejected import left files behind: %v", entries)
 	}
 }

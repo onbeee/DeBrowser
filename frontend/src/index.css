@@ -39,6 +39,7 @@
   --hover-bg: #e9edf3;
   --badge-bg: #e7ebf0;
   --ok: #27845a;
+  --ok-bg: #e4f2ea;
   --warn: #b7791f;
   --warn-bg: #faf0dc;
   --danger: #c44747;
@@ -67,6 +68,7 @@
   --hover-bg: #eae2d5;
   --badge-bg: #eae1d0;
   --ok: #548064;
+  --ok-bg: #e9efe4;
   --warn: #a97835;
   --warn-bg: #f3e8d2;
   --danger: #b65f55;
@@ -95,6 +97,7 @@
   --hover-bg: #2a313d;
   --badge-bg: #2a313d;
   --ok: #63bd8b;
+  --ok-bg: #22352a;
   --warn: #e0ad58;
   --warn-bg: #38301e;
   --danger: #e27b7b;

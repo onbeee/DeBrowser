@@ -26,7 +26,7 @@ export interface BindingView {
     "port": number;
 
     /**
-     * "ok" | "missing" | "unknown"
+     * "ok" | "down" | "missing" | "unknown"
      */
     "nodeState": string;
 
@@ -272,6 +272,11 @@ export interface NodeView {
      * ms; 0 = not measured
      */
     "delay": number;
+
+    /**
+     * the core has health-checked this node at least once
+     */
+    "checked": boolean;
 }
 
 /**

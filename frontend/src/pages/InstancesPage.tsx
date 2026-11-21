@@ -19,6 +19,7 @@ import {
   type NodeView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
+import { NodeCapsule, asNodeState, nodeStateOfNode, type NodeHealthState } from "../components/NodeCapsule";
 import { useAppStore } from "../stores/useAppStore";
 import { notify, notifyError, notifySuccess, notifyWarning } from "../stores/useNotificationStore";
 import { classifyCounts } from "../lib/operationResult";
@@ -200,6 +201,18 @@ export default function InstancesPage() {
   const [proxyNodes, setProxyNodes] = useState<NodeView[]>([]);
   const [proxyNodesLoaded, setProxyNodesLoaded] = useState(false);
   const [formBinding, setFormBinding] = useState<BindingView | null>(null);
+  // All instances' bindings, for the list's 代理节点 capsules.
+  // Best-effort: a failed load keeps the last known bindings.
+  const [proxyBindings, setProxyBindings] = useState<BindingView[]>([]);
+
+  const refreshProxyBindings = useCallback(async () => {
+    try {
+      const list = await ProxyService.ListBindings();
+      setProxyBindings(list ?? []);
+    } catch {
+      // Keep the last known bindings; the next poll retries.
+    }
+  }, []);
 
   // Loads the proxy node options (and, when editing, the
   // instance's current binding) for the form. Failures leave the
@@ -239,6 +252,22 @@ export default function InstancesPage() {
   // select-all always refer to exactly this displayed list.
   const displayInstances = useMemo(() => sortInstancesByName(instances), [instances]);
   const kernelLabels = useMemo(() => kernelOptionLabels(browsers), [browsers]);
+  const proxyBindingByInstance = useMemo(() => {
+    const map = new Map<string, BindingView>();
+    for (const b of proxyBindings) map.set(b.instanceId, b);
+    return map;
+  }, [proxyBindings]);
+  // The form's currently selected node, for its capsule preview
+  // (the same state rule as the list and the proxy page).
+  const formSelectedProxy = form ? parseProxyNodeKey(form.proxyKey) : null;
+  const formSelectedNode = formSelectedProxy
+    ? proxyNodes.find((n) => n.sourceId === formSelectedProxy.sourceId && n.name === formSelectedProxy.nodeName)
+    : undefined;
+  const formSelectedState: NodeHealthState = formSelectedNode
+    ? nodeStateOfNode(formSelectedNode)
+    : formBinding && form && proxyNodeKey(formBinding.sourceId, formBinding.nodeName) === form.proxyKey
+      ? asNodeState(formBinding.nodeState)
+      : "unknown";
 
   const refreshInstances = useCallback(async () => {
     try {
@@ -248,7 +277,8 @@ export default function InstancesPage() {
       // A failed background refresh keeps the last known list;
       // the next poll or action retries.
     }
-  }, []);
+    void refreshProxyBindings();
+  }, [refreshProxyBindings]);
 
   const load = useCallback(async () => {
     // Close the editing gate FIRST, before any await: on a reload,
@@ -282,7 +312,8 @@ export default function InstancesPage() {
       // existing associations is inferred or touched.
       setBrowsersError(err instanceof Error ? err.message : String(err));
     }
-  }, []);
+    void refreshProxyBindings();
+  }, [refreshProxyBindings]);
 
   useEffect(() => {
     void load();
@@ -817,7 +848,16 @@ export default function InstancesPage() {
                     </td>
                     <td className="px-4 py-2.5 font-medium">{inst.name}</td>
                     <td className="px-4 py-2.5 text-center text-(--text-dim)">
-                      {inst.proxyId ? "已设置（历史关联）" : "未设置"}
+                      {proxyBindingByInstance.get(inst.id) ? (
+                        <NodeCapsule
+                          name={proxyBindingByInstance.get(inst.id)!.nodeName}
+                          state={asNodeState(proxyBindingByInstance.get(inst.id)!.nodeState)}
+                        />
+                      ) : inst.proxyId ? (
+                        "已设置（历史关联）"
+                      ) : (
+                        "未设置"
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       <span title={inst.kernelExecutablePath || undefined}>
@@ -981,6 +1021,14 @@ export default function InstancesPage() {
                     </optgroup>
                   ))}
                 </select>
+                {form.proxyKey && formSelectedProxy && (
+                  <div className="mt-1.5">
+                    <NodeCapsule
+                      name={formSelectedNode?.name ?? formSelectedProxy.nodeName}
+                      state={formSelectedState}
+                    />
+                  </div>
+                )}
                 {!proxyNodesLoaded ? (
                   <p className="mt-1 text-xs text-(--text-faint)">节点列表加载中…</p>
                 ) : proxyNodes.length === 0 && !formBinding ? (

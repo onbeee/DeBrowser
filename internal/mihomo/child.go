@@ -24,3 +24,14 @@ type childProcess interface {
 // arguments and working directory, sending its output to logFile.
 // Implemented per platform in child_unix.go / child_windows.go.
 var startCoreChild func(bin string, args []string, dir string, logFile *os.File) (childProcess, error)
+
+// StartProcess starts one core process with the same platform
+// lifecycle as the managed core (on Windows: suspended creation
+// into a kill-on-close Job Object). It exists for short-lived
+// one-shot runs outside the Manager — the throwaway validation
+// core — so those processes get the identical guarantee: they
+// cannot outlive DeBrowser, and the caller owns killing and
+// waiting for the returned process.
+func StartProcess(bin string, args []string, dir string, logFile *os.File) (childProcess, error) {
+	return startCoreChild(bin, args, dir, logFile)
+}

@@ -249,6 +249,9 @@ type Manager struct {
 	// stopTimeout bounds Stop's wait for the child to exit
 	// (a field so tests can shorten it).
 	stopTimeout time.Duration
+	// readyTimeout bounds Start's wait for the controller to
+	// answer (a field so tests can shorten it).
+	readyTimeout time.Duration
 }
 
 // NewManager builds a manager for a working directory and the
@@ -256,7 +259,7 @@ type Manager struct {
 // controller port, used to detect a port conflict with an
 // external core before starting.
 func NewManager(workdir, cfgPath string, client *Client, port int) *Manager {
-	return &Manager{workdir: workdir, cfgPath: cfgPath, client: client, port: port, stopTimeout: 5 * time.Second}
+	return &Manager{workdir: workdir, cfgPath: cfgPath, client: client, port: port, stopTimeout: 5 * time.Second, readyTimeout: 15 * time.Second}
 }
 
 // Client returns the API client bound to the controller.
@@ -339,26 +342,51 @@ func (m *Manager) Start(ctx context.Context) error {
 		close(done)
 	}()
 
-	// Readiness: poll the controller until it answers or ~15s pass.
-	deadline := time.Now().Add(15 * time.Second)
+	// Readiness: poll the controller until it answers or the
+	// ready timeout passes. EVERY failure path below goes through
+	// abortStart: a start that reports an error never leaves a
+	// core process running behind it.
+	deadline := time.Now().Add(m.readyTimeout)
 	for {
 		if _, err := m.client.Version(ctx); err == nil {
 			return nil
 		}
 		select {
 		case <-done:
+			m.abortStart(child, done)
 			return fmt.Errorf("mihomo: core exited during startup (%v); see core.log", m.WaitErr())
 		default:
 		}
 		if time.Now().After(deadline) {
+			m.abortStart(child, done)
 			return fmt.Errorf("mihomo: core did not become ready in time; see core.log")
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			err := ctx.Err()
+			m.abortStart(child, done)
+			return err
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// abortStart tears down a just-started child whose readiness
+// check failed: it terminates the process, waits (bounded) for
+// it to exit so its handles and Job Object are released, and
+// clears the manager's run state. The caller still returns the
+// original startup error; a failed start leaves nothing running.
+func (m *Manager) abortStart(child childProcess, done chan struct{}) {
+	_ = child.Kill() // already-exited children simply report an error here
+	select {
+	case <-done:
+	case <-time.After(m.stopTimeout):
+	}
+	m.mu.Lock()
+	if m.child == child {
+		m.child = nil
+	}
+	m.mu.Unlock()
 }
 
 // Stop terminates the core process this manager started. It

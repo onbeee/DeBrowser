@@ -16,6 +16,7 @@ import {
   type NodeView,
   type SourceView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
+import { NodeCapsule, asNodeState } from "../components/NodeCapsule";
 import { notifyError, notifySuccess, notifyWarning } from "../stores/useNotificationStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
@@ -382,14 +383,17 @@ export default function ProxyConfigPage() {
                         <div className="flex flex-wrap items-center gap-2 text-sm">
                           <span className="font-medium">{b.instanceName || b.instanceId}</span>
                           <span className="text-(--text-faint)">→</span>
-                          <span>{b.nodeName}</span>
+                          <NodeCapsule name={b.nodeName} state={asNodeState(b.nodeState)} />
                           <span className="text-xs text-(--text-faint)">
                             {b.sourceName} · 本地端口 {b.port}
                           </span>
                         </div>
-                        {(b.nodeState === "missing" || b.listenerState === "down") && (
+                        {(b.nodeState === "missing" || b.nodeState === "down" || b.listenerState === "down") && (
                           <p className="mt-1 text-xs text-(--danger)">
-                            {b.nodeState === "missing" ? "该节点当前不可用（订阅更新后可能已消失），请为实例重新选择节点。" : ""}
+                            {b.nodeState === "missing"
+                              ? "该节点已从来源中消失。绑定保持不变，节点重新出现后将自动恢复使用。"
+                              : ""}
+                            {b.nodeState === "down" ? "该节点当前连接失败。绑定保持不变，不会改用其他节点。" : ""}
                             {b.listenerState === "down" ? "该实例的本地监听端口当前无响应，实例暂时无法使用代理。" : ""}
                           </p>
                         )}
