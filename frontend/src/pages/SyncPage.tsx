@@ -139,86 +139,94 @@ export default function SyncPage() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-6 py-5">
-      {/* 顶部功能栏：常驻单行、靠左排列，不随下方列表滚动。
-          控件顺序固定为 开始 / 暂停 / 恢复 / 停止 / 排列窗口 /
-          恢复窗口 / 显示器；启用与禁用沿用原有 phase 判断，
-          功能栏内不再展示同步状态徽标。 */}
-      <div className="flex shrink-0 flex-nowrap items-center gap-2">
-        <button
-          className="flex h-9 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
-          disabled={busy || !controls.start || !canStart(selection)}
-          onClick={() =>
-            void run("start", (op) =>
-              SyncService.StartSync(op, selection.masterId, selection.followerIds),
-            "同步已开始")
-          }
-        >
-          <Play size={14} /> 开始
-        </button>
-        <button
-          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-          disabled={busy || !controls.pause}
-          onClick={() => void run("pause", (op) => SyncService.PauseSync(op), "同步已暂停")}
-        >
-          <Pause size={14} /> 暂停
-        </button>
-        <button
-          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-          disabled={busy || !controls.resume}
-          onClick={() => void run("resume", (op) => SyncService.ResumeSync(op), "同步已恢复")}
-        >
-          <RotateCcw size={14} /> 恢复
-        </button>
-        <button
-          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-          disabled={busy || !controls.stop}
-          onClick={() => void run("stop", (op) => SyncService.StopSync(op), "同步已停止")}
-        >
-          <Square size={14} /> 停止
-        </button>
-        <button
-          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-          disabled={busy || arrangeIds.length === 0}
-          onClick={() =>
-            void run("arrange", (op) =>
-              SyncService.ArrangeSyncWindows(op, arrangeIds, monitorId),
-            "窗口已排列")
-          }
-        >
-          <AppWindow size={14} /> 排列窗口
-        </button>
-        <button
-          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-          disabled={busy}
-          onClick={() =>
-            void run("restore", (op) => SyncService.RestoreSyncWindows(op), "窗口已恢复")
-          }
-        >
-          <RotateCcw size={14} /> 恢复窗口
-        </button>
-        <select
-          className="h-9 rounded-md border border-(--border-strong) bg-(--panel-bg) px-2 text-sm text-(--text-main)"
-          value={monitorId}
-          onChange={(e) => setMonitorId(Number(e.target.value))}
-        >
-          {monitors.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-        {monitorsError && monitors.length === 0 && (
-          <>
-            <span className="text-sm text-(--danger)">显示器列表读取失败：{monitorsError}</span>
-            <button
-              type="button"
-              onClick={loadMonitors}
-              className="rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
-            >
-              重新加载
-            </button>
-          </>
-        )}
+      {/* 顶部功能栏：常驻显示，按功能组整体换行。同步控制组
+          （开始 / 暂停 / 恢复 / 停止）、窗口管理组（排列窗口 /
+          恢复窗口）与显示器组（显示器选择）各自保持单行不
+          拆分；宽度不足时按组顺序整体换行。启用与禁用沿用
+          原有 phase 判断，功能栏内不展示同步状态徽标。 */}
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="flex shrink-0 flex-nowrap items-center gap-2">
+  <button
+            className="flex h-9 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
+            disabled={busy || !controls.start || !canStart(selection)}
+            onClick={() =>
+              void run("start", (op) =>
+                SyncService.StartSync(op, selection.masterId, selection.followerIds),
+              "同步已开始")
+            }
+          >
+            <Play size={14} /> 开始
+          </button>
+          <button
+            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+            disabled={busy || !controls.pause}
+            onClick={() => void run("pause", (op) => SyncService.PauseSync(op), "同步已暂停")}
+          >
+            <Pause size={14} /> 暂停
+          </button>
+          <button
+            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+            disabled={busy || !controls.resume}
+            onClick={() => void run("resume", (op) => SyncService.ResumeSync(op), "同步已恢复")}
+          >
+            <RotateCcw size={14} /> 恢复
+          </button>
+          <button
+            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+            disabled={busy || !controls.stop}
+            onClick={() => void run("stop", (op) => SyncService.StopSync(op), "同步已停止")}
+          >
+            <Square size={14} /> 停止
+          </button>
+        
+        </div>
+        <div className="flex shrink-0 flex-nowrap items-center gap-2">
+  <button
+            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+            disabled={busy || arrangeIds.length === 0}
+            onClick={() =>
+              void run("arrange", (op) =>
+                SyncService.ArrangeSyncWindows(op, arrangeIds, monitorId),
+              "窗口已排列")
+            }
+          >
+            <AppWindow size={14} /> 排列窗口
+          </button>
+          <button
+            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+            disabled={busy}
+            onClick={() =>
+              void run("restore", (op) => SyncService.RestoreSyncWindows(op), "窗口已恢复")
+            }
+          >
+            <RotateCcw size={14} /> 恢复窗口
+          </button>
+        </div>
+        <div className="flex shrink-0 flex-nowrap items-center gap-2">
+          <select
+            className="h-9 rounded-md border border-(--border-strong) bg-(--panel-bg) px-2 text-sm text-(--text-main)"
+            value={monitorId}
+            onChange={(e) => setMonitorId(Number(e.target.value))}
+          >
+            {monitors.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          {monitorsError && monitors.length === 0 && (
+            <>
+              <span className="text-sm text-(--danger)">显示器列表读取失败：{monitorsError}</span>
+              <button
+                type="button"
+                onClick={loadMonitors}
+                className="rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+              >
+                重新加载
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="mt-5 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
