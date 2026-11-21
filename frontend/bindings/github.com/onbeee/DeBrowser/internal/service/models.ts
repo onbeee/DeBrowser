@@ -13,6 +13,29 @@ export interface ApplySearchResult {
     "failedNodes": number;
 }
 
+/**
+ * BindingView is one instance's proxy binding as the frontend
+ * shows it.
+ */
+export interface BindingView {
+    "instanceId": string;
+    "instanceName": string;
+    "sourceId": string;
+    "sourceName": string;
+    "nodeName": string;
+    "port": number;
+
+    /**
+     * "ok" | "missing" | "unknown"
+     */
+    "nodeState": string;
+
+    /**
+     * "ok" | "down" | "unknown"
+     */
+    "listenerState": string;
+}
+
 export interface BookmarkInstanceInfo {
     "id": string;
     "name": string;
@@ -83,6 +106,19 @@ export interface ClientEventInput {
     "status": string;
     "userMessage": string;
     "metadata": { [_ in string]?: string } | null;
+}
+
+/**
+ * CoreStatusView is the proxy page's core status summary.
+ */
+export interface CoreStatusView {
+    /**
+     * "running" | "stopped" | "error"
+     */
+    "state": string;
+    "version": string;
+    "binaryReady": boolean;
+    "message": string;
 }
 
 /**
@@ -207,6 +243,58 @@ export interface LogExportInfo {
      */
     "latestDate": string;
     "recordCount": number;
+}
+
+/**
+ * NodeDelayView is one delay test result.
+ */
+export interface NodeDelayView {
+    "sourceId": string;
+    "name": string;
+
+    /**
+     * ms; -1 = test failed / unreachable
+     */
+    "delay": number;
+}
+
+/**
+ * NodeView is one proxy node of one source.
+ */
+export interface NodeView {
+    "sourceId": string;
+    "sourceName": string;
+    "name": string;
+    "type": string;
+    "alive": boolean;
+
+    /**
+     * ms; 0 = not measured
+     */
+    "delay": number;
+}
+
+/**
+ * SourceView is one proxy source as the frontend shows it. It
+ * never carries the subscription URL or any credential.
+ */
+export interface SourceView {
+    "id": string;
+    "name": string;
+
+    /**
+     * "url" | "file"
+     */
+    "kind": string;
+    "nodeCount": number;
+    "boundInstances": number;
+
+    /**
+     * "ok" | "empty" | "error" | "core-stopped"
+     */
+    "state": string;
+    "message": string;
+    "createdAt": string;
 }
 
 /**

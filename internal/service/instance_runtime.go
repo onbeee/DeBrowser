@@ -630,6 +630,22 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 			"--remote-debugging-address=127.0.0.1",
 			"--remote-debugging-port="+strconv.Itoa(cdpPort))
 	}
+	// Stage 6C: an instance with a proxy binding launches against
+	// its own Mihomo listener port, never a shared entry point. No
+	// binding means no proxy argument at all (the product
+	// default). A bound instance whose proxy is not usable (core
+	// not started manually, listener down) refuses the launch:
+	// starting it against a dead proxy port would strand the
+	// browser without network and hide the real problem.
+	if s.ProxyPortFor != nil {
+		proxyPort, perr := s.ProxyPortFor(id)
+		if perr != nil {
+			return fail(perr)
+		}
+		if proxyPort > 0 {
+			args = append(args, "--proxy-server=http://127.0.0.1:"+strconv.Itoa(proxyPort))
+		}
+	}
 	if strings.TrimSpace(inst.StartURL) != "" {
 		args = append(args, strings.TrimSpace(inst.StartURL))
 	}

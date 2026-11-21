@@ -13,11 +13,14 @@ import {
 import {
   BrowserService,
   InstanceService,
+  ProxyService,
+  type BindingView,
   type BrowserView,
+  type NodeView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
-import { notify, notifyError, notifySuccess } from "../stores/useNotificationStore";
+import { notify, notifyError, notifySuccess, notifyWarning } from "../stores/useNotificationStore";
 import { classifyCounts } from "../lib/operationResult";
 import type { NotificationItem } from "../lib/notifications";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
@@ -75,9 +78,33 @@ interface FormState {
   // Edit: "rename" | "swap" (no default option on edit).
   profileMode: string;
   profileName: string;
+  // Proxy binding (Stage 6C): proxyKey is "" for no proxy, else
+  // "<sourceId><nodeName>" identifying one node of one source.
+  // The binding is applied through ProxyService after the
+  // instance itself is saved.
+  proxyKey: string;
 }
 
-const EMPTY_FORM: FormState = { name: "", browserId: "", profileMode: "default", profileName: "" };
+const EMPTY_FORM: FormState = {
+  name: "",
+  browserId: "",
+  profileMode: "default",
+  profileName: "",
+  proxyKey: "",
+};
+
+// proxyNodeKey identifies one node of one source in the form's
+// select. Node names may contain almost anything, so the key uses
+// a control-character separator that cannot appear in practice.
+function proxyNodeKey(sourceId: string, nodeName: string): string {
+  return `${sourceId}${nodeName}`;
+}
+
+function parseProxyNodeKey(key: string): { sourceId: string; nodeName: string } | null {
+  const at = key.indexOf("");
+  if (at <= 0) return null;
+  return { sourceId: key.slice(0, at), nodeName: key.slice(at + 1) };
+}
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
@@ -167,6 +194,46 @@ export default function InstancesPage() {
   const [profilePicker, setProfilePicker] = useState<ProfilePickerState | null>(null);
   const [pickerBusy, setPickerBusy] = useState(false);
   const [profileNote, setProfileNote] = useState<string | null>(null);
+  // Proxy binding state (inside the create/edit form): the node
+  // options come from the running Mihomo core; formBinding is the
+  // binding the edited instance had when the form opened.
+  const [proxyNodes, setProxyNodes] = useState<NodeView[]>([]);
+  const [proxyNodesLoaded, setProxyNodesLoaded] = useState(false);
+  const [formBinding, setFormBinding] = useState<BindingView | null>(null);
+
+  // Loads the proxy node options (and, when editing, the
+  // instance's current binding) for the form. Failures leave the
+  // form usable with no proxy options rather than blocking it.
+  const loadProxyFormData = async (instanceId?: string) => {
+    setProxyNodesLoaded(false);
+    try {
+      const nodes = await ProxyService.ListNodes();
+      setProxyNodes(nodes ?? []);
+    } catch {
+      setProxyNodes([]);
+    } finally {
+      setProxyNodesLoaded(true);
+    }
+    if (instanceId) {
+      try {
+        const [binding, bound] = await ProxyService.GetBinding(instanceId);
+        if (bound) {
+          setFormBinding(binding);
+          setForm((current) =>
+            current && current.id === instanceId
+              ? { ...current, proxyKey: proxyNodeKey(binding.sourceId, binding.nodeName) }
+              : current,
+          );
+        } else {
+          setFormBinding(null);
+        }
+      } catch {
+        setFormBinding(null);
+      }
+    } else {
+      setFormBinding(null);
+    }
+  };
 
   // The list is displayed in natural name order; selection and
   // select-all always refer to exactly this displayed list.
@@ -245,6 +312,7 @@ export default function InstancesPage() {
     setForm(EMPTY_FORM);
     setFormError(null);
     setProfileNote(null);
+    void loadProxyFormData();
   };
 
   const openEdit = (inst: Instance) => {
@@ -258,9 +326,11 @@ export default function InstancesPage() {
       browserId: browsers.some((b) => b.id === inst.kernelId) ? inst.kernelId : "",
       profileMode: "rename",
       profileName: profileFolderOf(inst),
+      proxyKey: "",
     });
     setFormError(null);
     setProfileNote(null);
+    void loadProxyFormData(inst.id);
   };
 
   const submitForm = async () => {
@@ -287,7 +357,28 @@ export default function InstancesPage() {
     setBusy(true);
     const opId = newOperationId();
     const action = form.id ? "instance.update" : "instance.create";
+    // applyFormBinding runs after the instance itself is saved:
+    // it creates, updates or clears the instance's proxy binding
+    // to match the form, and reports failure separately (the
+    // instance result is already decided by then).
+    const applyFormBinding = async (instanceId: string): Promise<string | null> => {
+      const desired = parseProxyNodeKey(form.proxyKey);
+      try {
+        if (!desired) {
+          if (formBinding) await ProxyService.ClearBinding(opId, instanceId);
+        } else if (
+          !formBinding ||
+          proxyNodeKey(formBinding.sourceId, formBinding.nodeName) !== form.proxyKey
+        ) {
+          await ProxyService.SetBinding(opId, instanceId, desired.sourceId, desired.nodeName);
+        }
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
     try {
+      let savedId = "";
       if (form.id && editing) {
         // Translate the form's instance-file choice into a backend
         // action only when it actually changes something.
@@ -309,6 +400,7 @@ export default function InstancesPage() {
           profileAction,
           profileName,
         });
+        savedId = form.id;
         notifySuccess(`实例已更新：${form.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已更新：${form.name}`, "浏览器实例", action);
       } else {
@@ -318,8 +410,13 @@ export default function InstancesPage() {
           profileMode: form.profileMode,
           profileName: form.profileMode === "default" ? "" : form.profileName,
         });
+        savedId = created.id;
         notifySuccess(`实例已创建：${created.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
+      }
+      const bindingError = await applyFormBinding(savedId);
+      if (bindingError) {
+        notifyWarning(`实例已保存，但代理绑定设置失败：${bindingError}`, { operationId: opId, important: true });
       }
       setForm(null);
       setEditing(null);
@@ -855,6 +952,53 @@ export default function InstancesPage() {
                   </p>
                 ) : null}
               </div>
+              <div>
+                <label className={labelCls}>代理节点</label>
+                <select
+                  className={inputCls}
+                  value={form.proxyKey}
+                  disabled={!proxyNodesLoaded}
+                  onChange={(e) => setForm({ ...form, proxyKey: e.target.value })}
+                >
+                  <option value="">不使用代理</option>
+                  {formBinding &&
+                    !proxyNodes.some(
+                      (n) => proxyNodeKey(n.sourceId, n.name) === proxyNodeKey(formBinding.sourceId, formBinding.nodeName),
+                    ) && (
+                      <option value={proxyNodeKey(formBinding.sourceId, formBinding.nodeName)}>
+                        {formBinding.nodeName}（当前绑定）
+                      </option>
+                    )}
+                  {[...new Set(proxyNodes.map((n) => n.sourceId))].map((sid) => (
+                    <optgroup key={sid} label={proxyNodes.find((n) => n.sourceId === sid)?.sourceName ?? sid}>
+                      {proxyNodes
+                        .filter((n) => n.sourceId === sid)
+                        .map((n) => (
+                          <option key={proxyNodeKey(n.sourceId, n.name)} value={proxyNodeKey(n.sourceId, n.name)}>
+                            {n.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                  ))}
+                </select>
+                {!proxyNodesLoaded ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">节点列表加载中…</p>
+                ) : proxyNodes.length === 0 && !formBinding ? (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    暂无可选节点。请先在「代理配置」页面添加来源并启动核心。
+                  </p>
+                ) : null}
+                {formBinding?.nodeState === "missing" ? (
+                  <p className="mt-1 text-xs text-(--danger)">
+                    当前绑定的节点已不可用（订阅更新后可能已消失）。保持不变将继续保留绑定，也可以重新选择节点或改为不使用代理。
+                  </p>
+                ) : null}
+              </div>
+              {form.proxyKey && (
+                <p className="text-xs text-(--text-faint)">
+                  该实例通过自己的本地入口使用所选节点。代理核心未开启时，已绑定代理的实例无法启动，请先在「代理配置」页面手动开启代理。
+                </p>
+              )}
               <div>
                 <label className={labelCls}>实例文件</label>
                 {!form.id ? (

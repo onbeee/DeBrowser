@@ -158,12 +158,11 @@ func run() error {
 	// rows reference vault entries, and opening it at startup
 	// preserves the established recovery behaviour (a vault
 	// recovered from its backup, or quarantined as
-	// unrecoverable, is reported loudly). The vault is a
-	// data-compatibility layer only — no product feature in
-	// the current scope reads or writes credentials through a
-	// user-facing service, and the file is never deleted or
-	// cleared by this cleanup.
-	_, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
+	// unrecoverable, is reported loudly). Since Stage 6C the
+	// proxy service also stores subscription URLs in the vault
+	// (the database holds only opaque references); the file is
+	// never deleted or cleared by cleanup.
+	vaultStore, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
 	if err != nil {
 		logger.Error("open credential vault failed", "error", err)
 		return failStart("打开凭据 Vault 失败", err)
@@ -191,7 +190,14 @@ func run() error {
 	syncService := service.NewSyncService(instanceService)
 	syncService.Auditor = logSystem
 
-	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, logger, assets)
+	// Stage 6C: the proxy service owns Mihomo sources, instance
+	// bindings and the core process. Instance launches resolve
+	// their proxy port through it.
+	proxyService := service.NewProxyService(db, cfg.Layout, vaultStore, logger)
+	proxyService.Auditor = logSystem
+	instanceService.ProxyPortFor = proxyService.ProxyPortForInstance
+
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, proxyService, logger, assets)
 	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)
 	runErr := wailsApp.Run()
 	if runErr != nil {

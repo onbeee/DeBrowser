@@ -1734,3 +1734,34 @@ func TestReconcileExeMatchCreatedMismatchIsNotOurs(t *testing.T) {
 		t.Fatalf("runtime record not cleared for a recycled PID: %v", err)
 	}
 }
+
+// Stage 6C launch gate: a bound instance whose proxy is unusable
+// (the hook reports an error) must not launch at all; with a
+// usable port the browser receives --proxy-server for its own
+// listener.
+func TestStartInstanceProxyGate(t *testing.T) {
+	fl := newFakeLauncher()
+	svc, _, db := testRuntimeService(t, fl)
+	registerFakeBrowser(t, db, "reg-a", "fake-browser.exe")
+	inst, err := svc.CreateInstance("", CreateInstanceInput{Name: "代理实例", BrowserID: "reg-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.ProxyPortFor = func(string) (int, error) {
+		return 0, errors.New("该实例已绑定代理节点，但代理核心尚未开启")
+	}
+	if err := svc.StartInstance("op", inst.ID); err == nil {
+		t.Fatal("start with an unusable bound proxy must fail")
+	}
+	if fl.seq != 0 {
+		t.Fatalf("launches = %d, want 0 (browser must not start)", fl.seq)
+	}
+	svc.ProxyPortFor = func(string) (int, error) { return 21001, nil }
+	if err := svc.StartInstance("op", inst.ID); err != nil {
+		t.Fatalf("start with usable proxy: %v", err)
+	}
+	args := fl.lastArgs[fl.lastProc.pid]
+	if !strings.Contains(strings.Join(args, " "), "--proxy-server=http://127.0.0.1:21001") {
+		t.Fatalf("launch args = %v, want --proxy-server for the instance listener", args)
+	}
+}
