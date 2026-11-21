@@ -109,12 +109,17 @@ const (
 	proxyListenerMaxPort = 21999
 )
 
-// CoreStatusView is the proxy page's core status summary.
+// CoreStatusView is the proxy page's core status summary. It
+// also carries the read-only facts the page's settings dialog
+// shows (the pinned core version and the core data directory);
+// there are no user-adjustable core parameters behind them.
 type CoreStatusView struct {
 	State       string `json:"state"` // "running" | "stopped" | "error"
 	Version     string `json:"version"`
 	BinaryReady bool   `json:"binaryReady"`
 	Message     string `json:"message"`
+	CoreVersion string `json:"coreVersion"` // pinned official Mihomo version
+	DataDir     string `json:"dataDir"`     // the core's portable working directory
 }
 
 // SourceView is one proxy source as the frontend shows it. It
@@ -255,7 +260,11 @@ func (s *ProxyService) GetCoreStatus() CoreStatusView {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, binErr := os.Stat(mihomo.BinaryPath(s.layout.Mihomo))
-	view := CoreStatusView{BinaryReady: binErr == nil}
+	view := CoreStatusView{
+		BinaryReady: binErr == nil,
+		CoreVersion: mihomo.CoreVersion,
+		DataDir:     s.layout.Mihomo,
+	}
 	if err := s.initCore(); err != nil {
 		view.State = "error"
 		view.Message = err.Error()
@@ -307,13 +316,13 @@ func (s *ProxyService) StartCore(operationID string) error {
 		if err := s.regenerate(ctx); err != nil {
 			return err
 		}
-		// Validate with the core's own check before starting, so
-		// a bad configuration is a clear error here instead of a
-		// core that exits silently. Validation downloads the
-		// binary when missing, which the start would need anyway.
-		if err := mihomo.Validate(ctx, s.layout.Mihomo, s.configPath()); err != nil {
-			return err
-		}
+		// No separate configuration pre-check: the generated
+		// configuration is machine-produced, the core's own load
+		// at start is the real check, and a core that fails to
+		// load it exits during startup — which Start reports and
+		// cleans up. (The binary's -t mode does not parse
+		// provider payloads, so it could not validate the parts
+		// that matter anyway.)
 		if err := s.manager.Start(ctx); err != nil {
 			return err
 		}

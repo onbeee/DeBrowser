@@ -230,3 +230,36 @@ func TestManagerStartContextCancelLeavesNoProcess(t *testing.T) {
 	assertPortFree(t, corePort)
 	assertPortFree(t, listenerPort)
 }
+
+// If a failed start's child cannot be confirmed exited,
+// abortStart must KEEP tracking it: clearing the handle would
+// lose the process while it may still be running. Once the exit
+// is confirmed, tracking is cleared.
+func TestAbortStartKeepsTrackingWhenExitUnconfirmed(t *testing.T) {
+	child := newFakeChild() // Wait blocks until waitRelease closes; Kill succeeds but the process "does not exit"
+	m, done := managerWithChild(child, 150*time.Millisecond)
+	m.abortStart(child, done)
+	m.mu.Lock()
+	tracked := m.child
+	m.mu.Unlock()
+	if tracked == nil {
+		t.Fatal("abortStart cleared tracking although the child never exited")
+	}
+	if !m.Running() {
+		t.Fatal("manager must still report the unconfirmed child as running")
+	}
+	// Let the child exit; a second abort clears the tracking.
+	close(child.waitRelease)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child exit was not observed")
+	}
+	m.abortStart(child, done)
+	m.mu.Lock()
+	tracked = m.child
+	m.mu.Unlock()
+	if tracked != nil {
+		t.Fatal("abortStart must clear tracking once the exit is confirmed")
+	}
+}

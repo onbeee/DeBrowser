@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -372,21 +371,26 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // abortStart tears down a just-started child whose readiness
-// check failed: it terminates the process, waits (bounded) for
-// it to exit so its handles and Job Object are released, and
-// clears the manager's run state. The caller still returns the
-// original startup error; a failed start leaves nothing running.
+// check failed: it terminates the process and waits (bounded)
+// for it to exit so its handles and Job Object are released,
+// then clears the manager's run state. If the exit cannot be
+// confirmed within the wait, the tracking is KEPT — the manager
+// still owns the process, Running() stays true and Stop() can
+// retry — instead of losing the handle and pretending the
+// failed start was fully cleaned up. The caller still returns
+// the original startup error either way.
 func (m *Manager) abortStart(child childProcess, done chan struct{}) {
 	_ = child.Kill() // already-exited children simply report an error here
 	select {
 	case <-done:
+		m.mu.Lock()
+		if m.child == child {
+			m.child = nil
+		}
+		m.mu.Unlock()
 	case <-time.After(m.stopTimeout):
+		// Exit unconfirmed: keep tracking the process.
 	}
-	m.mu.Lock()
-	if m.child == child {
-		m.child = nil
-	}
-	m.mu.Unlock()
 }
 
 // Stop terminates the core process this manager started. It
@@ -431,22 +435,6 @@ func (m *Manager) Stop() error {
 	case <-time.After(m.stopTimeout):
 		return fmt.Errorf("核心进程在规定时间内未退出，仍在运行")
 	}
-}
-
-// Validate runs the core binary's own configuration check
-// (mihomo -t). It is the same validation the core performs at
-// load, so a configuration that passes here loads there.
-func Validate(ctx context.Context, workdir, cfgPath string) error {
-	bin, err := EnsureBinary(ctx, workdir)
-	if err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, bin, "-t", "-d", workdir, "-f", cfgPath)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("mihomo: configuration check failed: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // ProbePort reports whether something accepts TCP connections on

@@ -109,7 +109,10 @@ export interface ClientEventInput {
 }
 
 /**
- * CoreStatusView is the proxy page's core status summary.
+ * CoreStatusView is the proxy page's core status summary. It
+ * also carries the read-only facts the page's settings dialog
+ * shows (the pinned core version and the core data directory);
+ * there are no user-adjustable core parameters behind them.
  */
 export interface CoreStatusView {
     /**
@@ -119,6 +122,16 @@ export interface CoreStatusView {
     "version": string;
     "binaryReady": boolean;
     "message": string;
+
+    /**
+     * pinned official Mihomo version
+     */
+    "coreVersion": string;
+
+    /**
+     * the core's portable working directory
+     */
+    "dataDir": string;
 }
 
 /**

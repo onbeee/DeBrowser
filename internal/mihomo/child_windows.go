@@ -1,6 +1,7 @@
 package mihomo
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -96,11 +97,24 @@ func init() {
 			return fail(fmt.Errorf("configure job object: %w", err))
 		}
 
-		// The child's std handles must be inheritable.
-		logHandle := windows.Handle(logFile.Fd())
-		if err := windows.SetHandleInformation(logHandle,
-			windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
-			return fail(fmt.Errorf("prepare core log handle: %w", err))
+		// The child receives inheritable DUPLICATES of the
+		// handles it needs as its standard handles. The
+		// originals (the log file handle, the NUL handle) are
+		// never modified — in particular their inherit flag is
+		// not set — so starting the core leaves no side effects
+		// on this process's own handles. The duplicates are
+		// closed again as soon as the process is created (the
+		// child holds its own copies by then).
+		self, err := windows.GetCurrentProcess()
+		if err != nil {
+			return fail(fmt.Errorf("prepare core handles: %w", err))
+		}
+		dup := func(h windows.Handle) (windows.Handle, error) {
+			var out windows.Handle
+			if err := windows.DuplicateHandle(self, h, self, &out, 0, true, windows.DUPLICATE_SAME_ACCESS); err != nil {
+				return 0, err
+			}
+			return out, nil
 		}
 		nulName, _ := windows.UTF16PtrFromString("NUL")
 		nul, err := windows.CreateFile(nulName, windows.GENERIC_READ,
@@ -109,27 +123,39 @@ func init() {
 		if err != nil {
 			return fail(fmt.Errorf("open NUL for core stdin: %w", err))
 		}
-		_ = windows.SetHandleInformation(nul,
-			windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
+		logHandle := windows.Handle(logFile.Fd())
+		stdIn, errIn := dup(nul)
+		stdOut, errOut := dup(logHandle)
+		stdErr, errErr := dup(logHandle)
+		windows.CloseHandle(nul)
+		dups := []windows.Handle{stdIn, stdOut, stdErr}
+		closeDups := func() {
+			for _, h := range dups {
+				if h != 0 {
+					windows.CloseHandle(h)
+				}
+			}
+		}
+		if err := errors.Join(errIn, errOut, errErr); err != nil {
+			closeDups()
+			return fail(fmt.Errorf("prepare core handles: %w", err))
+		}
 
 		// Restrict handle inheritance to exactly the three
-		// standard handles the core needs (stdin/stdout/stderr).
-		// With bInheritHandles=true but no handle list, the child
-		// would inherit EVERY inheritable handle this process
-		// happens to hold; the attribute list bounds the set, and
-		// no global handle state is changed beyond the two std
-		// handles above.
+		// duplicated standard handles. With bInheritHandles=true
+		// but no handle list, the child would inherit EVERY
+		// inheritable handle this process happens to hold; the
+		// attribute list bounds the set to the duplicates.
 		attrList, err := windows.NewProcThreadAttributeList(1)
 		if err != nil {
-			windows.CloseHandle(nul)
+			closeDups()
 			return fail(fmt.Errorf("prepare core handle list: %w", err))
 		}
 		defer attrList.Delete()
-		stdHandles := []windows.Handle{nul, logHandle, logHandle}
 		if err := attrList.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-			unsafe.Pointer(&stdHandles[0]),
-			uintptr(len(stdHandles))*unsafe.Sizeof(stdHandles[0])); err != nil {
-			windows.CloseHandle(nul)
+			unsafe.Pointer(&dups[0]),
+			uintptr(len(dups))*unsafe.Sizeof(dups[0])); err != nil {
+			closeDups()
 			return fail(fmt.Errorf("prepare core handle list: %w", err))
 		}
 
@@ -140,26 +166,26 @@ func init() {
 		}
 		cmdline, err := windows.UTF16PtrFromString(strings.Join(parts, " "))
 		if err != nil {
-			windows.CloseHandle(nul)
+			closeDups()
 			return fail(err)
 		}
 		exePtr, err := windows.UTF16PtrFromString(bin)
 		if err != nil {
-			windows.CloseHandle(nul)
+			closeDups()
 			return fail(err)
 		}
 		dirPtr, err := windows.UTF16PtrFromString(dir)
 		if err != nil {
-			windows.CloseHandle(nul)
+			closeDups()
 			return fail(err)
 		}
 		si := &windows.StartupInfoEx{
 			StartupInfo: windows.StartupInfo{
 				Cb:        uint32(unsafe.Sizeof(windows.StartupInfoEx{})),
 				Flags:     windows.STARTF_USESTDHANDLES,
-				StdInput:  nul,
-				StdOutput: logHandle,
-				StdErr:    logHandle,
+				StdInput:  stdIn,
+				StdOutput: stdOut,
+				StdErr:    stdErr,
 			},
 			ProcThreadAttributeList: attrList.List(),
 		}
@@ -171,7 +197,7 @@ func init() {
 		err = windows.CreateProcess(exePtr, cmdline, nil, nil, true,
 			windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW|windows.EXTENDED_STARTUPINFO_PRESENT,
 			nil, dirPtr, &si.StartupInfo, pi)
-		windows.CloseHandle(nul)
+		closeDups() // the child holds its own copies now (or never started)
 		if err != nil {
 			return fail(fmt.Errorf("create core process: %w", err))
 		}

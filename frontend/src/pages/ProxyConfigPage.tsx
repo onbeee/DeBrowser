@@ -6,6 +6,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Settings,
   Square,
   Trash2,
 } from "lucide-react";
@@ -60,6 +61,7 @@ export default function ProxyConfigPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const [addSub, setAddSub] = useState<AddSubState | null>(null);
   const [addFileName, setAddFileName] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -233,6 +235,9 @@ export default function ProxyConfigPage() {
               {busy === "core-start" ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} 启动核心
             </button>
           )}
+          <button type="button" className={btnSecondary} disabled={busy != null} onClick={() => setShowSettings(true)}>
+            <Settings size={14} /> 设置
+          </button>
         </div>
       </div>
 
@@ -283,6 +288,10 @@ export default function ProxyConfigPage() {
             {/* 来源 */}
             <section>
               <h3 className="text-sm font-semibold">节点来源</h3>
+              <p className="mt-1 text-xs text-(--text-faint)">
+                本地 YAML 需为包含 proxies 节点列表的 Mihomo 节点文件；完整 Clash 配置中的代理组、规则与 DNS
+                等内容不会被采用，仅提取其中的节点。订阅与本地文件的节点都由 Mihomo 核心解析。
+              </p>
               <div className="mt-2 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
                 {sources.length === 0 ? (
                   <p className="px-4 py-8 text-center text-sm text-(--text-faint)">
@@ -429,6 +438,52 @@ export default function ProxyConfigPage() {
               </button>
               <button type="button" className={btnPrimary} disabled={busy != null || !addSub.name.trim() || !addSub.url.trim()} onClick={submitAddSub}>
                 {busy === "source-add-url" ? <Loader2 size={14} className="animate-spin" /> : null} 添加
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 设置弹窗：只展示只读信息。核心参数均采用固定默认值，
+          没有需要用户调整的开关。 */}
+      {showSettings && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-md rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
+            <h3 className="text-base font-semibold">代理设置</h3>
+            <dl className="mt-4 space-y-2.5 text-sm">
+              <div className="flex gap-3">
+                <dt className="w-24 shrink-0 text-(--text-faint)">核心版本</dt>
+                <dd className="text-(--text-main)">Mihomo {core?.coreVersion ?? ""}（官方版本，固定）</dd>
+              </div>
+              <div className="flex gap-3">
+                <dt className="w-24 shrink-0 text-(--text-faint)">运行状态</dt>
+                <dd className="text-(--text-main)">
+                  {core?.state === "running"
+                    ? `运行中${core.version ? ` · ${core.version}` : ""}`
+                    : core?.state === "error"
+                      ? "异常"
+                      : "未运行"}
+                </dd>
+              </div>
+              <div className="flex gap-3">
+                <dt className="w-24 shrink-0 text-(--text-faint)">数据目录</dt>
+                <dd className="break-all text-(--text-main)">{core?.dataDir ?? "—"}</dd>
+              </div>
+              <div className="flex gap-3">
+                <dt className="w-24 shrink-0 text-(--text-faint)">本地监听端口</dt>
+                <dd className="text-(--text-main)">21001–21999，按实例自动分配</dd>
+              </div>
+              <div className="flex gap-3">
+                <dt className="w-24 shrink-0 text-(--text-faint)">控制接口</dt>
+                <dd className="text-(--text-main)">仅监听本机 127.0.0.1，带随机密钥</dd>
+              </div>
+            </dl>
+            <p className="mt-4 text-xs text-(--text-faint)">
+              核心运行参数均采用合理默认值，无需调整。DeBrowser 不修改 Windows 系统代理、不启用 TUN，也不接管电脑上已有的 Clash。
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className={btnPrimary} onClick={() => setShowSettings(false)}>
+                关闭
               </button>
             </div>
           </div>
