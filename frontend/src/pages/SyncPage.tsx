@@ -153,7 +153,7 @@ export default function SyncPage() {
             "同步已开始")
           }
         >
-          <Play size={14} /> 开始同步
+          <Play size={14} /> 开始
         </button>
         <button
           className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
