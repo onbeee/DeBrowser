@@ -84,25 +84,24 @@ func (s *Store) DeleteProxySource(ctx context.Context, id string) error {
 
 func scanBinding(row interface{ Scan(...any) error }) (model.InstanceProxyBinding, error) {
 	var b model.InstanceProxyBinding
-	err := row.Scan(&b.InstanceID, &b.SourceID, &b.NodeName, &b.Mode, &b.Port,
+	err := row.Scan(&b.InstanceID, &b.SourceID, &b.NodeName, &b.Port,
 		&b.CreatedAt, &b.UpdatedAt)
 	return b, err
 }
 
-const bindingColumns = `instance_id, source_id, node_name, mode, port, created_at, updated_at`
+const bindingColumns = `instance_id, source_id, node_name, port, created_at, updated_at`
 
 // UpsertBinding creates or replaces the binding of one instance.
 func (s *Store) UpsertBinding(ctx context.Context, b model.InstanceProxyBinding) (model.InstanceProxyBinding, error) {
 	if _, err := s.q.ExecContext(ctx,
-		`INSERT INTO instance_proxy_bindings (instance_id, source_id, node_name, mode, port)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO instance_proxy_bindings (instance_id, source_id, node_name, port)
+		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT (instance_id) DO UPDATE SET
 		   source_id = excluded.source_id,
 		   node_name = excluded.node_name,
-		   mode = excluded.mode,
 		   port = excluded.port,
 		   updated_at = datetime('now')`,
-		b.InstanceID, b.SourceID, b.NodeName, b.Mode, b.Port); err != nil {
+		b.InstanceID, b.SourceID, b.NodeName, b.Port); err != nil {
 		return model.InstanceProxyBinding{}, fmt.Errorf("store: upsert proxy binding: %w", err)
 	}
 	return s.GetBinding(ctx, b.InstanceID)

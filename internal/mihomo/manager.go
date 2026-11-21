@@ -75,15 +75,41 @@ func BinaryPath(workdir string) string {
 	return filepath.Join(workdir, binaryName())
 }
 
+// hashFile returns the SHA-256 of a file as lowercase hex.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // EnsureBinary makes sure the pinned core binary exists in the
 // working directory, downloading it from the official release and
 // verifying the artifact hash when it does not. An existing binary
-// is used as-is (the user may also place the official binary there
-// manually). Errors name the step that failed; no partial binary
-// is ever left behind.
+// is verified against the pinned executable hash as well: a file
+// that does not match the official release (for example one the
+// user replaced by hand) is refused, never executed. Errors name
+// the step that failed; no partial binary is ever left behind.
 func EnsureBinary(ctx context.Context, workdir string) (string, error) {
 	bin := BinaryPath(workdir)
 	if st, err := os.Stat(bin); err == nil && st.Size() > 0 {
+		asset, ok := releaseAssets[runtime.GOOS+"/"+runtime.GOARCH]
+		if !ok {
+			return bin, nil // no pinned hash for this platform (development only)
+		}
+		got, err := hashFile(bin)
+		if err != nil {
+			return "", fmt.Errorf("mihomo: verify core: %w", err)
+		}
+		if got != asset.exeSHA256 {
+			return "", fmt.Errorf("核心文件校验失败：%s 的内容与官方 Mihomo %s 不一致，已拒绝运行。请删除该文件后重试，DeBrowser 会重新下载官方核心", bin, CoreVersion)
+		}
 		return bin, nil
 	}
 	asset, ok := releaseAssets[runtime.GOOS+"/"+runtime.GOARCH]
@@ -133,17 +159,11 @@ func EnsureBinary(ctx context.Context, workdir string) (string, error) {
 	}
 	// Second, independent check: the installed executable itself
 	// must hash to the recorded value.
-	f, err := os.Open(bin)
+	got, err := hashFile(bin)
 	if err != nil {
 		return "", fmt.Errorf("mihomo: verify core: %w", err)
 	}
-	bh := sha256.New()
-	_, copyErr := io.Copy(bh, f)
-	f.Close()
-	if copyErr != nil {
-		return "", fmt.Errorf("mihomo: verify core: %w", copyErr)
-	}
-	if got := hex.EncodeToString(bh.Sum(nil)); got != asset.exeSHA256 {
+	if got != asset.exeSHA256 {
 		os.Remove(bin)
 		return "", fmt.Errorf("mihomo: installed core executable hash mismatch (got %s)", got)
 	}
@@ -212,22 +232,31 @@ func readZipEntry(path string) ([]byte, error) {
 // run started. It is intentionally small — start, stop, health —
 // with no watchdog or restart loop. A core that exits on its own
 // is reported through Running()/WaitErr and started again only by
-// an explicit Start (UI action or a configuration change).
+// an explicit Start (a manual user action; nothing starts the
+// core automatically). The manager never adopts, stops or kills a
+// core it did not start.
 type Manager struct {
 	workdir string
 	cfgPath string
 	client  *Client
+	port    int
 
-	mu   sync.Mutex
-	cmd  *exec.Cmd
-	done chan struct{}
-	err  error
+	mu    sync.Mutex
+	child childProcess
+	done  chan struct{}
+	err   error
+
+	// stopTimeout bounds Stop's wait for the child to exit
+	// (a field so tests can shorten it).
+	stopTimeout time.Duration
 }
 
 // NewManager builds a manager for a working directory and the
-// generated configuration file inside it.
-func NewManager(workdir, cfgPath string, client *Client) *Manager {
-	return &Manager{workdir: workdir, cfgPath: cfgPath, client: client}
+// generated configuration file inside it. port is the core's
+// controller port, used to detect a port conflict with an
+// external core before starting.
+func NewManager(workdir, cfgPath string, client *Client, port int) *Manager {
+	return &Manager{workdir: workdir, cfgPath: cfgPath, client: client, port: port, stopTimeout: 5 * time.Second}
 }
 
 // Client returns the API client bound to the controller.
@@ -238,7 +267,7 @@ func (m *Manager) Client() *Client { return m.client }
 func (m *Manager) Running() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cmd == nil {
+	if m.child == nil {
 		return false
 	}
 	select {
@@ -258,15 +287,16 @@ func (m *Manager) WaitErr() error {
 
 // Start launches the core with the configuration file and waits
 // until its controller answers (or the context/timeout expires).
-// A controller that already answers with our credentials (a core
-// left running by a previous DeBrowser run) is adopted as healthy
-// instead of spawning a duplicate.
+// It only ever starts a new process owned by this manager: an
+// already-running core of ours makes Start a no-op, and a
+// controller port occupied by anyone else is a reported conflict
+// — the external core is never adopted, reconfigured or stopped.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
-	if m.cmd != nil {
+	if m.child != nil {
 		select {
 		case <-m.done:
-			m.cmd = nil
+			m.child = nil
 		default:
 			m.mu.Unlock()
 			return nil // already running
@@ -274,9 +304,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 
-	if _, err := m.client.Version(ctx); err == nil {
-		return nil // a core with our secret already serves the controller
-	}
 	bin, err := EnsureBinary(ctx, m.workdir)
 	if err != nil {
 		return err
@@ -284,27 +311,27 @@ func (m *Manager) Start(ctx context.Context) error {
 	if _, err := os.Stat(m.cfgPath); err != nil {
 		return fmt.Errorf("mihomo: configuration file missing: %w", err)
 	}
+	if ProbePort(m.port) {
+		return fmt.Errorf("控制端口 %d 已被其他程序占用（可能是已在运行的 Clash 或 Mihomo），DeBrowser 不会接管或停止它；请关闭占用该端口的程序后重试", m.port)
+	}
 	logFile, err := os.OpenFile(filepath.Join(m.workdir, "core.log"),
 		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
 	if err != nil {
 		return fmt.Errorf("mihomo: open core log: %w", err)
 	}
-	cmd := exec.Command(bin, "-d", m.workdir, "-f", m.cfgPath)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	setProcAttrs(cmd)
-	if err := cmd.Start(); err != nil {
+	child, err := startCoreChild(bin, []string{"-d", m.workdir, "-f", m.cfgPath}, m.workdir, logFile)
+	if err != nil {
 		logFile.Close()
 		return fmt.Errorf("mihomo: start core: %w", err)
 	}
 	done := make(chan struct{})
 	m.mu.Lock()
-	m.cmd = cmd
+	m.child = child
 	m.done = done
 	m.err = nil
 	m.mu.Unlock()
 	go func() {
-		err := cmd.Wait()
+		err := child.Wait()
 		logFile.Close()
 		m.mu.Lock()
 		m.err = err
@@ -334,31 +361,48 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 }
 
-// Stop terminates the core process this manager started. It never
-// touches a core it did not start (for example the user's Clash).
+// Stop terminates the core process this manager started. It
+// never touches a core it did not start (for example the user's
+// Clash). A kill failure or a process that does not exit within
+// the wait is returned as an error and the process handle is
+// kept: Stop never reports success while its core is still
+// running.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	cmd, done := m.cmd, m.done
+	child, done := m.child, m.done
 	m.mu.Unlock()
-	if cmd == nil {
+	if child == nil {
 		return nil
+	}
+	clear := func() {
+		m.mu.Lock()
+		if m.child == child {
+			m.child = nil
+		}
+		m.mu.Unlock()
 	}
 	select {
 	case <-done:
+		clear()
 		return nil
 	default:
 	}
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
+	if err := child.Kill(); err != nil {
+		select {
+		case <-done:
+			clear()
+			return nil
+		default:
+			return fmt.Errorf("停止核心进程失败：%w", err)
+		}
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+		clear()
+		return nil
+	case <-time.After(m.stopTimeout):
+		return fmt.Errorf("核心进程在规定时间内未退出，仍在运行")
 	}
-	m.mu.Lock()
-	m.cmd = nil
-	m.mu.Unlock()
-	return nil
 }
 
 // Validate runs the core binary's own configuration check

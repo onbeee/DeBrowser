@@ -32,13 +32,12 @@ type SourceInput struct {
 
 // BindingInput is one browser instance's proxy binding as the
 // generated configuration needs it: which provider its node comes
-// from, the node's name inside that provider, the routing mode and
-// the loopback listener port assigned to the instance.
+// from, the node's name inside that provider and the loopback
+// listener port assigned to the instance.
 type BindingInput struct {
 	InstanceID   string
 	ProviderName string
 	NodeName     string
-	Mode         string // "rule" | "global"
 	Port         int
 }
 
@@ -67,31 +66,6 @@ func GroupName(instanceID string) string { return "inst-" + shortID(instanceID) 
 // for node delay tests (it exists even when no instance is bound
 // to the source).
 func DelayGroupName(providerName string) string { return "delay-" + providerName }
-
-// DefaultSubRules returns DeBrowser's default rule lines for one
-// instance, with the proxy target rewritten to the instance's own
-// group. The lines are deliberately few, local and offline-safe
-// (no GEOIP / remote rule providers): loopback and private ranges
-// go direct, everything else goes to the instance's selected node.
-// Rule order is significant and preserved.
-func DefaultSubRules(group string) []string {
-	return []string{
-		"DOMAIN-SUFFIX,localhost,DIRECT",
-		"IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
-		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
-		"IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
-		"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
-		"IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
-		"MATCH," + group,
-	}
-}
-
-// GlobalSubRules is the per-instance global mode: a single MATCH
-// line to the instance's own group. The core's top-level mode
-// always stays "rule"; global is per instance only.
-func GlobalSubRules(group string) []string {
-	return []string{"MATCH," + group}
-}
 
 // yq quotes a string as a YAML scalar. A JSON double-quoted string
 // is a valid YAML scalar and escapes everything that could break
@@ -124,9 +98,6 @@ func Generate(in ConfigInput) (string, error) {
 	for _, b := range bindings {
 		if b.Port <= 0 || b.Port > 65535 {
 			return "", fmt.Errorf("mihomo: listener port %d out of range", b.Port)
-		}
-		if b.Mode != "rule" && b.Mode != "global" {
-			return "", fmt.Errorf("mihomo: binding mode %q invalid", b.Mode)
 		}
 	}
 
@@ -191,8 +162,14 @@ func Generate(in ConfigInput) (string, error) {
 			}
 			// Each instance group draws nodes from its bound
 			// source's provider only: same-named nodes in other
-			// sources can never leak into this instance.
-			fmt.Fprintf(&w, "  - name: %s\n    type: select\n    use:\n      - %s\n",
+			// sources can never leak into this instance. REJECT is
+			// the first member on purpose: a select group falls
+			// back to its first member when the selected node
+			// disappears, so the default state refuses traffic
+			// instead of silently switching to another node.
+			// DeBrowser sets the bound node explicitly after every
+			// start/reload (store-selected stays false).
+			fmt.Fprintf(&w, "  - name: %s\n    type: select\n    proxies:\n      - REJECT\n    use:\n      - %s\n",
 				yq(GroupName(b.InstanceID)), b.ProviderName)
 		}
 	}
@@ -201,27 +178,20 @@ func Generate(in ConfigInput) (string, error) {
 		w.WriteString("listeners:\n")
 		for _, b := range bindings {
 			name := GroupName(b.InstanceID)
-			fmt.Fprintf(&w, "  - name: %s\n    type: mixed\n    listen: \"127.0.0.1\"\n    port: %d\n    rule: %s\n",
-				yq(name), b.Port, name)
-		}
-		w.WriteString("sub-rules:\n")
-		for _, b := range bindings {
-			name := GroupName(b.InstanceID)
-			lines := DefaultSubRules(name)
-			if b.Mode == "global" {
-				lines = GlobalSubRules(name)
-			}
-			fmt.Fprintf(&w, "  %s:\n", name)
-			for _, ln := range lines {
-				fmt.Fprintf(&w, "    - %s\n", yq(ln))
-			}
+			// The listener hands its traffic straight to the
+			// instance's own group: the simplest forwarding the
+			// core offers. DeBrowser keeps no rule set of its own;
+			// the group (REJECT by default, the bound node once
+			// DeBrowser applies it) is the whole routing decision.
+			fmt.Fprintf(&w, "  - name: %s\n    type: mixed\n    listen: \"127.0.0.1\"\n    port: %d\n    proxy: %s\n",
+				yq(name), b.Port, yq(name))
 		}
 	}
 
 	// The top-level rule list serves only the core's own traffic
 	// (provider fetches are pinned to DIRECT on the provider
-	// itself); instance traffic always enters through listeners
-	// and their sub-rules.
+	// itself); instance traffic enters through the listeners and
+	// never consults this list.
 	w.WriteString("rules:\n  - \"MATCH,DIRECT\"\n")
 	return w.String(), nil
 }

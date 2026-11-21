@@ -10,12 +10,18 @@
  *     instance bindings in SQLite, subscription URLs in the
  *     credential vault) and coordinates the core;
  *   - the Mihomo core does all proxy work (node parsing,
- *     connections, rule matching, DNS, delay tests).
+ *     connections, DNS, delay tests).
  * 
  * One core serves every browser instance. Each bound instance
- * gets its own loopback listener, its own select group (fed by
- * its bound source's provider only) and its own sub-rules, so
- * instances choose nodes independently and never interfere.
+ * gets its own loopback listener that hands its traffic straight
+ * to its own select group (fed by its bound source's provider
+ * only), so instances choose nodes independently and never
+ * interfere. DeBrowser keeps no rule set of its own.
+ * 
+ * Lifecycle: the core is started ONLY by the user's explicit
+ * action on the proxy page — never automatically at application
+ * startup, never as a side effect of another operation — and
+ * DeBrowser stops only the core process it started itself.
  * @module
  */
 
@@ -30,7 +36,9 @@ import * as $models from "./models.js";
 /**
  * AddFileSource imports a local Mihomo YAML file through the
  * native picker. DeBrowser copies the file into its own sources
- * directory; the user's original file is never modified.
+ * directory; the user's original file is never modified. The
+ * content is validated by the core itself (see validateFileData)
+ * before it is accepted.
  */
 export function AddFileSource(operationID: string, name: string): $CancellablePromise<$models.SourceView> {
     return $Call.ByID(795440173, operationID, name);
@@ -38,15 +46,20 @@ export function AddFileSource(operationID: string, name: string): $CancellablePr
 
 /**
  * AddURLSource archives a subscription URL (in the credential
- * vault; the database holds only the vault reference) and makes
- * its nodes available through the core.
+ * vault; the database holds only the vault reference). Adding a
+ * source never starts the core; when the core is already running
+ * the new provider is loaded into it, and a failure there rolls
+ * the archive back so database and core stay consistent.
  */
 export function AddURLSource(operationID: string, name: string, rawURL: string): $CancellablePromise<$models.SourceView> {
     return $Call.ByID(1483120682, operationID, name, rawURL);
 }
 
 /**
- * ClearBinding removes an instance's proxy binding.
+ * ClearBinding removes an instance's proxy binding, with the same
+ * consistency discipline as SetBinding: the configuration without
+ * the binding is loaded first, the database row is deleted only
+ * after the core has accepted it.
  */
 export function ClearBinding(operationID: string, instanceID: string): $CancellablePromise<void> {
     return $Call.ByID(3553361645, operationID, instanceID);
@@ -56,7 +69,9 @@ export function ClearBinding(operationID: string, instanceID: string): $Cancella
  * DeleteSource removes a source. Sources with instances bound to
  * their nodes cannot be deleted until the bindings are cleared,
  * so an update or deletion can never silently re-point an
- * instance at another node.
+ * instance at another node. The runtime configuration is updated
+ * to the proposed state (without the source) BEFORE the database
+ * row is removed; if the core rejects it, nothing is deleted.
  */
 export function DeleteSource(operationID: string, id: string): $CancellablePromise<void> {
     return $Call.ByID(3166649453, operationID, id);
@@ -102,8 +117,12 @@ export function ListSources(): $CancellablePromise<$models.SourceView[] | null> 
 
 /**
  * ProxyPortForInstance is the launch hook the instance service
- * uses: the loopback proxy port bound to an instance, or 0 when
- * the instance has no proxy binding. It never fails a launch.
+ * uses. (0, nil) means the instance has no proxy binding and
+ * launches exactly as before. A bound instance whose proxy is not
+ * actually usable — the core has not been started manually, or
+ * its listener does not answer — returns an error, so the launch
+ * is refused with a clear message instead of starting a browser
+ * against a dead proxy port. The core is never started from here.
  */
 export function ProxyPortForInstance(instanceID: string): $CancellablePromise<number> {
     return $Call.ByID(2136329050, instanceID);
@@ -112,7 +131,11 @@ export function ProxyPortForInstance(instanceID: string): $CancellablePromise<nu
 /**
  * RefreshSource re-fetches a subscription through the core. The
  * core keeps the previous nodes when the fetch fails, and
- * instance bindings are never changed by an update.
+ * instance bindings are never changed by an update; afterwards
+ * the recorded selections are re-applied (a node that disappeared
+ * leaves its instance on REJECT, a node that returned restores
+ * its binding). Refreshing requires the core to be running: it is
+ * never started implicitly.
  */
 export function RefreshSource(operationID: string, id: string): $CancellablePromise<void> {
     return $Call.ByID(367073987, operationID, id);
@@ -120,30 +143,43 @@ export function RefreshSource(operationID: string, id: string): $CancellableProm
 
 /**
  * ReimportFileSource replaces a file source's stored copy with a
- * newly picked file.
+ * newly picked file. The new content is validated by the core
+ * itself BEFORE anything is replaced (see checkFileData): a file
+ * the core cannot load, or one that yields no nodes, is rejected
+ * and the previous file and its nodes stay exactly as they were.
  */
 export function ReimportFileSource(operationID: string, id: string): $CancellablePromise<$models.SourceView> {
     return $Call.ByID(3052492324, operationID, id);
 }
 
 /**
- * SetBinding binds an instance to a node of a source. The binding
- * is recorded first and kept even when the node is currently
- * unavailable; the returned view reports the node's state.
+ * SetBinding binds an instance to a node of a source. When the
+ * core is running the node must currently exist in that source —
+ * a binding to a node that is not there is rejected outright.
+ * Database and runtime configuration stay consistent: the new
+ * configuration (with the proposed binding) is generated and
+ * loaded FIRST, and the database row is written only after the
+ * core has accepted it; if anything fails, the previous binding
+ * and the previous configuration both stay in force.
  */
-export function SetBinding(operationID: string, instanceID: string, sourceID: string, nodeName: string, mode: string): $CancellablePromise<$models.BindingView> {
-    return $Call.ByID(103901230, operationID, instanceID, sourceID, nodeName, mode);
+export function SetBinding(operationID: string, instanceID: string, sourceID: string, nodeName: string): $CancellablePromise<$models.BindingView> {
+    return $Call.ByID(103901230, operationID, instanceID, sourceID, nodeName);
 }
 
 /**
- * StartCore starts the core (user action on the proxy page).
+ * StartCore starts the core. It is the ONLY way the core starts:
+ * an explicit user action on the proxy page. DeBrowser startup
+ * never starts the core, and no other operation starts it as a
+ * side effect.
  */
 export function StartCore(operationID: string): $CancellablePromise<void> {
     return $Call.ByID(208438706, operationID);
 }
 
 /**
- * StopCore stops the core process DeBrowser started.
+ * StopCore stops the core process DeBrowser started. A stop that
+ * fails is reported as an error; the UI never shows a stopped
+ * state while our core is still running.
  */
 export function StopCore(operationID: string): $CancellablePromise<void> {
     return $Call.ByID(105252808, operationID);
@@ -151,7 +187,8 @@ export function StopCore(operationID: string): $CancellablePromise<void> {
 
 /**
  * TestDelays measures every node's delay through the core (one
- * group delay call per source) and returns per-node results.
+ * group delay call per source) and returns per-node results. It
+ * requires the core to be running and never starts it.
  */
 export function TestDelays(operationID: string): $CancellablePromise<$models.NodeDelayView[] | null> {
     return $Call.ByID(203525591, operationID);

@@ -14,8 +14,8 @@ func sampleInput() ConfigInput {
 			{ProviderName: "src-aaaa1111", Kind: "url", URL: "https://sub.example.com/feed?token=a&b=\"quoted\""},
 		},
 		Bindings: []BindingInput{
-			{InstanceID: "11111111-2222-3333-4444-555555555555", ProviderName: "src-aaaa1111", NodeName: "香港 01", Mode: "rule", Port: 21002},
-			{InstanceID: "66666666-7777-8888-9999-000000000000", ProviderName: "src-bbbb2222", NodeName: "NodeA", Mode: "global", Port: 21001},
+			{InstanceID: "11111111-2222-3333-4444-555555555555", ProviderName: "src-aaaa1111", NodeName: "香港 01", Port: 21002},
+			{InstanceID: "66666666-7777-8888-9999-000000000000", ProviderName: "src-bbbb2222", NodeName: "NodeA", Port: 21001},
 		},
 	}
 }
@@ -40,18 +40,20 @@ func TestGenerateShape(t *testing.T) {
 		// Hidden per-source delay groups.
 		"\"delay-src-aaaa1111\"",
 		"\"delay-src-bbbb2222\"",
-		// Per-instance groups, each fed by its own provider only.
+		// Per-instance groups, each fed by its own provider only,
+		// with REJECT as the first (default) member so a group
+		// whose selected node disappears refuses traffic instead
+		// of falling back to another node.
 		"\"inst-111111112222\"",
 		"\"inst-666666667777\"",
-		// Listeners bind loopback and reference sub-rules, never proxy:.
+		"proxies:\n      - REJECT",
+		// Listeners hand their traffic straight to the instance's
+		// own group.
 		"type: mixed",
 		"port: 21001",
 		"port: 21002",
-		// Rule-mode instance: private ranges direct, MATCH to own group.
-		"\"IP-CIDR,192.168.0.0/16,DIRECT,no-resolve\"",
-		"\"MATCH,inst-111111112222\"",
-		// Global-mode instance: single MATCH line to its own group.
-		"\"MATCH,inst-666666667777\"",
+		"proxy: \"inst-111111112222\"",
+		"proxy: \"inst-666666667777\"",
 		// Top-level fallback is DIRECT, never REJECT.
 		"rules:\n  - \"MATCH,DIRECT\"",
 	}
@@ -60,12 +62,16 @@ func TestGenerateShape(t *testing.T) {
 			t.Errorf("generated config missing %q\n---\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "proxy: \"") || strings.Contains(out, "\n    proxy: NodeA") {
-		t.Errorf("listener must not use proxy: binding\n%s", out)
+	// DeBrowser keeps no rule set of its own: no sub-rules, no
+	// built-in direct/bypass rule lines anywhere.
+	for _, banned := range []string{"sub-rules:", "IP-CIDR", "DOMAIN-SUFFIX", "\n    rule: "} {
+		if strings.Contains(out, banned) {
+			t.Errorf("generated config must not contain %q\n---\n%s", banned, out)
+		}
 	}
-	// The global-mode instance must not inherit the default rule lines.
-	if strings.Count(out, "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve") != 1 {
-		t.Errorf("default rule lines should appear exactly once (rule-mode instance only)\n%s", out)
+	// REJECT appears exactly once per instance group (2 groups).
+	if n := strings.Count(out, "- REJECT"); n != 2 {
+		t.Errorf("REJECT members = %d, want 2 (one per instance group)\n%s", n, out)
 	}
 }
 
@@ -89,14 +95,9 @@ func TestGenerateErrors(t *testing.T) {
 		t.Error("empty secret must fail")
 	}
 	bad = base
-	bad.Bindings = []BindingInput{{InstanceID: "x", ProviderName: "src-nope", NodeName: "N", Mode: "rule", Port: 21001}}
+	bad.Bindings = []BindingInput{{InstanceID: "x", ProviderName: "src-nope", NodeName: "N", Port: 21001}}
 	if _, err := Generate(bad); err == nil {
 		t.Error("binding to unknown provider must fail")
-	}
-	bad = base
-	bad.Bindings = []BindingInput{{InstanceID: "x", ProviderName: "src-aaaa1111", NodeName: "N", Mode: "weird", Port: 21001}}
-	if _, err := Generate(bad); err == nil {
-		t.Error("invalid mode must fail")
 	}
 	bad = base
 	bad.Sources = []SourceInput{{ProviderName: "src-x", Kind: "carrier-pigeon"}}

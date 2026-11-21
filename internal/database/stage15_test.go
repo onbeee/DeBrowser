@@ -41,8 +41,8 @@ func TestMigration15ProxyTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.SQL().ExecContext(ctx,
-		`INSERT INTO instance_proxy_bindings (instance_id, source_id, node_name, mode, port)
-		 VALUES ('i1', 's1', '香港 01', 'rule', 21001)`); err != nil {
+		`INSERT INTO instance_proxy_bindings (instance_id, source_id, node_name, port)
+		 VALUES ('i1', 's1', '香港 01', 21001)`); err != nil {
 		t.Fatal(err)
 	}
 	// A source with bindings cannot be deleted (FK without cascade).
@@ -62,7 +62,7 @@ func TestMigration15ProxyTables(t *testing.T) {
 	if _, err := db.SQL().ExecContext(ctx, `DELETE FROM proxy_sources WHERE id = 's1'`); err != nil {
 		t.Fatalf("delete source after cascade: %v", err)
 	}
-	// Mode and kind CHECK constraints hold.
+	// The kind CHECK constraint holds.
 	if _, err := db.SQL().ExecContext(ctx,
 		`INSERT INTO proxy_sources (id, name, kind, provider_name) VALUES ('s2', 'x', 'bogus', 'src-2')`); err == nil {
 		t.Fatal("invalid source kind must fail the CHECK constraint")

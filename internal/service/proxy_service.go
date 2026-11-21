@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,12 +32,18 @@ import (
 //     instance bindings in SQLite, subscription URLs in the
 //     credential vault) and coordinates the core;
 //   - the Mihomo core does all proxy work (node parsing,
-//     connections, rule matching, DNS, delay tests).
+//     connections, DNS, delay tests).
 //
 // One core serves every browser instance. Each bound instance
-// gets its own loopback listener, its own select group (fed by
-// its bound source's provider only) and its own sub-rules, so
-// instances choose nodes independently and never interfere.
+// gets its own loopback listener that hands its traffic straight
+// to its own select group (fed by its bound source's provider
+// only), so instances choose nodes independently and never
+// interfere. DeBrowser keeps no rule set of its own.
+//
+// Lifecycle: the core is started ONLY by the user's explicit
+// action on the proxy page — never automatically at application
+// startup, never as a side effect of another operation — and
+// DeBrowser stops only the core process it started itself.
 type ProxyService struct {
 	store  *store.Store
 	layout paths.Layout
@@ -52,20 +59,25 @@ type ProxyService struct {
 	// means local file import is unavailable.
 	SourceFilePicker func() (string, error)
 
-	mu      sync.Mutex // serializes configuration regeneration and core lifecycle
-	manager *mihomo.Manager
-	client  *mihomo.Client
-	secret  string
+	mu sync.Mutex // serializes configuration regeneration and core lifecycle
 
-	// coreStarterOverride substitutes the core start step in
-	// tests (a field, like the instance service's launcher).
-	coreStarterOverride func(ctx context.Context) error
+	// The controller secret, API client and process manager are
+	// initialized exactly once (initOnce), even when the
+	// frontend's first calls arrive concurrently.
+	initOnce sync.Once
+	initErr  error
+	manager  *mihomo.Manager
+	client   *mihomo.Client
+	secret   string
 }
 
 const (
 	// proxyControllerPort is the core's REST controller port on
 	// loopback. It is deliberately not a common Clash port.
 	proxyControllerPort = 19097
+	// proxyValidatePort is the controller port of the short-lived
+	// throwaway core used to validate imported YAML files.
+	proxyValidatePort = 19098
 	// proxyListenerBasePort is the first loopback port handed out
 	// to instance listeners.
 	proxyListenerBasePort = 21001
@@ -119,7 +131,6 @@ type BindingView struct {
 	SourceID      string `json:"sourceId"`
 	SourceName    string `json:"sourceName"`
 	NodeName      string `json:"nodeName"`
-	Mode          string `json:"mode"` // "rule" | "global"
 	Port          int    `json:"port"`
 	NodeState     string `json:"nodeState"`     // "ok" | "missing" | "unknown"
 	ListenerState string `json:"listenerState"` // "ok" | "down" | "unknown"
@@ -128,16 +139,12 @@ type BindingView struct {
 // NewProxyService builds the service. The vault carries the
 // subscription URLs; it must be the same store main opened.
 func NewProxyService(db *database.DB, layout paths.Layout, vault *secrets.Store, log *slog.Logger) *ProxyService {
-	client := mihomo.NewClient(proxyControllerPort, "")
-	s := &ProxyService{
+	return &ProxyService{
 		store:  store.New(db),
 		layout: layout,
 		log:    log,
 		vault:  vault,
-		client: client,
 	}
-	s.manager = mihomo.NewManager(layout.Mihomo, s.configPath(), client)
-	return s
 }
 
 func (s *ProxyService) configPath() string {
@@ -148,71 +155,70 @@ func (s *ProxyService) sourcesDir() string {
 	return filepath.Join(s.layout.Mihomo, "sources")
 }
 
-// controllerSecret loads the core controller secret, generating
-// and persisting a random one on first use. The secret lives in a
-// file inside the core working directory; it is never logged and
-// never leaves this machine.
-func (s *ProxyService) controllerSecret() (string, error) {
-	if s.secret != "" {
-		return s.secret, nil
-	}
+// initCore performs the one-time initialization of the controller
+// secret, the API client and the process manager. Concurrent
+// first calls (the proxy page loads status, sources, nodes and
+// bindings in parallel) all wait for the same initialization, so
+// the secret file, the client and the manager always agree on one
+// secret. Later calls return the stored result immediately.
+func (s *ProxyService) initCore() error {
+	s.initOnce.Do(func() {
+		s.initErr = s.loadControllerSecret()
+	})
+	return s.initErr
+}
+
+// loadControllerSecret loads the core controller secret,
+// generating and persisting a random one on first use. The secret
+// lives in a file inside the core working directory; it is never
+// logged and never leaves this machine.
+func (s *ProxyService) loadControllerSecret() error {
 	path := filepath.Join(s.layout.Mihomo, "controller-secret.txt")
 	if b, err := os.ReadFile(path); err == nil {
 		if v := strings.TrimSpace(string(b)); v != "" {
-			s.secret = v
-			s.client = mihomo.NewClient(proxyControllerPort, v)
-			s.manager = mihomo.NewManager(s.layout.Mihomo, s.configPath(), s.client)
-			return v, nil
+			s.setCoreHandles(v)
+			return nil
 		}
 	}
 	var raw [24]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("生成核心控制密钥失败：%w", err)
+		return fmt.Errorf("生成核心控制密钥失败：%w", err)
 	}
 	v := hex.EncodeToString(raw[:])
 	if err := os.MkdirAll(s.layout.Mihomo, 0o750); err != nil {
-		return "", fmt.Errorf("创建核心工作目录失败：%w", err)
+		return fmt.Errorf("创建核心工作目录失败：%w", err)
 	}
 	if err := os.WriteFile(path, []byte(v), 0o600); err != nil {
-		return "", fmt.Errorf("保存核心控制密钥失败：%w", err)
+		return fmt.Errorf("保存核心控制密钥失败：%w", err)
 	}
-	s.secret = v
-	s.client = mihomo.NewClient(proxyControllerPort, v)
-	s.manager = mihomo.NewManager(s.layout.Mihomo, s.configPath(), s.client)
-	return v, nil
-}
-
-// ServiceStartup starts the core in the background when the user
-// already has proxy sources, so instance proxies are ready by the
-// time a browser launches. Startup never blocks the application
-// and never fails it: problems surface on the proxy page.
-func (s *ProxyService) ServiceStartup(ctx context.Context) error {
-	go func() {
-		c, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		sources, err := s.store.ListProxySources(c)
-		if err != nil || len(sources) == 0 {
-			return
-		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if err := s.ensureCoreRunning(c); err != nil {
-			s.log.Warn("proxy core autostart failed", "error", err)
-		}
-	}()
+	s.setCoreHandles(v)
 	return nil
 }
 
-// ServiceShutdown stops the core process this run started. The
-// user's own Clash is a different process and is never touched.
+func (s *ProxyService) setCoreHandles(secret string) {
+	s.secret = secret
+	s.client = mihomo.NewClient(proxyControllerPort, secret)
+	s.manager = mihomo.NewManager(s.layout.Mihomo, s.configPath(), s.client, proxyControllerPort)
+}
+
+// ServiceShutdown stops the core process this DeBrowser run
+// started (if any). The user's own Clash is a different process
+// and is never touched. A run that never used the proxy features
+// has nothing to stop.
 func (s *ProxyService) ServiceShutdown() error {
+	if s.manager == nil {
+		return nil
+	}
 	return s.manager.Stop()
 }
 
-// coreRunning reports whether the core answers its controller
-// with our credentials right now.
+// coreRunning reports whether the core DeBrowser started answers
+// its controller with our credentials right now.
 func (s *ProxyService) coreRunning(ctx context.Context) bool {
-	if _, err := s.controllerSecret(); err != nil {
+	if s.initCore() != nil {
+		return false
+	}
+	if !s.manager.Running() {
 		return false
 	}
 	_, err := s.client.Version(ctx)
@@ -225,92 +231,136 @@ func (s *ProxyService) GetCoreStatus() CoreStatusView {
 	defer cancel()
 	_, binErr := os.Stat(mihomo.BinaryPath(s.layout.Mihomo))
 	view := CoreStatusView{BinaryReady: binErr == nil}
-	if _, err := s.controllerSecret(); err != nil {
+	if err := s.initCore(); err != nil {
 		view.State = "error"
 		view.Message = err.Error()
 		return view
 	}
-	if v, err := s.client.Version(ctx); err == nil {
-		view.State = "running"
-		view.Version = v
+	if s.manager.Running() {
+		if v, err := s.client.Version(ctx); err == nil {
+			view.State = "running"
+			view.Version = v
+			return view
+		}
+		view.State = "error"
+		view.Message = "核心进程存在但控制接口无响应"
+		return view
+	}
+	if _, err := s.client.Version(ctx); err == nil {
+		// Something answers with our secret but is not a process
+		// this run started: never claim or adopt it.
+		view.State = "error"
+		view.Message = "控制端口上已有其他核心在运行（不是 DeBrowser 启动的），DeBrowser 不会接管它"
+		return view
+	}
+	if mihomo.ProbePort(proxyControllerPort) {
+		view.State = "error"
+		view.Message = fmt.Sprintf("控制端口 %d 被其他程序占用，DeBrowser 无法在此端口启动核心；占用端口的程序不受影响", proxyControllerPort)
 		return view
 	}
 	view.State = "stopped"
-	if s.manager.Running() {
-		view.State = "error"
-		view.Message = "核心进程存在但控制接口无响应"
-	} else if werr := s.manager.WaitErr(); werr != nil {
+	if werr := s.manager.WaitErr(); werr != nil {
 		view.Message = "核心已退出：" + werr.Error()
 	}
 	return view
 }
 
-// ensureCoreRunning is the single entry point every operation
-// uses to get a running core; tests substitute it via
-// coreStarterOverride so no real core (or download) is involved.
-func (s *ProxyService) ensureCoreRunning(ctx context.Context) error {
-	if s.coreStarterOverride != nil {
-		return s.coreStarterOverride(ctx)
-	}
-	return s.ensureCore(ctx)
-}
-
-// ensureCore starts the core when it is not running, regenerating
-// the configuration first, then applies the recorded selections.
-func (s *ProxyService) ensureCore(ctx context.Context) error {
-	if s.coreRunning(ctx) {
-		return nil
-	}
-	if err := s.regenerate(ctx); err != nil {
-		return err
-	}
-	// Validate with the core's own check before starting, so a
-	// bad configuration is a clear error here instead of a core
-	// that exits silently. Validation downloads the binary when
-	// missing, which the start would need anyway.
-	if err := mihomo.Validate(ctx, s.layout.Mihomo, s.configPath()); err != nil {
-		return err
-	}
-	if err := s.manager.Start(ctx); err != nil {
-		return err
-	}
-	return s.applySelections(ctx)
-}
-
-// StartCore starts the core (user action on the proxy page).
+// StartCore starts the core. It is the ONLY way the core starts:
+// an explicit user action on the proxy page. DeBrowser startup
+// never starts the core, and no other operation starts it as a
+// side effect.
 func (s *ProxyService) StartCore(operationID string) error {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.core_start", "mihomo_core", "")
 	err := func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if err := s.initCore(); err != nil {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		return s.ensureCoreRunning(ctx)
+		if err := s.regenerate(ctx); err != nil {
+			return err
+		}
+		// Validate with the core's own check before starting, so
+		// a bad configuration is a clear error here instead of a
+		// core that exits silently. Validation downloads the
+		// binary when missing, which the start would need anyway.
+		if err := mihomo.Validate(ctx, s.layout.Mihomo, s.configPath()); err != nil {
+			return err
+		}
+		if err := s.manager.Start(ctx); err != nil {
+			return err
+		}
+		return s.applySelections(ctx)
 	}()
 	finishOp(op, err)
 	return err
 }
 
-// StopCore stops the core process DeBrowser started.
+// StopCore stops the core process DeBrowser started. A stop that
+// fails is reported as an error; the UI never shows a stopped
+// state while our core is still running.
 func (s *ProxyService) StopCore(operationID string) error {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.core_stop", "mihomo_core", "")
-	s.mu.Lock()
-	err := s.manager.Stop()
-	s.mu.Unlock()
+	err := func() error {
+		if err := s.initCore(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.manager.Stop()
+	}()
 	finishOp(op, err)
 	return err
 }
 
-// regenerate rebuilds the runtime configuration from the database
-// (sources + bindings) and writes it atomically. When the core is
-// running it hot-reloads; a rejected reload restores the previous
-// file and leaves the running configuration untouched.
+// ---------------------------------------------------------------------------
+// Runtime configuration
+// ---------------------------------------------------------------------------
+
+// proxyConfigState is one consistent snapshot of the business
+// data the runtime configuration is generated from. Mutations
+// that must keep the database and the running core in agreement
+// build the PROPOSED state first, push it into the configuration
+// (and the running core), and only then commit the database
+// change.
+type proxyConfigState struct {
+	sources  []model.ProxySource
+	bindings []model.InstanceProxyBinding
+}
+
+func (s *ProxyService) loadConfigState(ctx context.Context) (proxyConfigState, error) {
+	sources, err := s.store.ListProxySources(ctx)
+	if err != nil {
+		return proxyConfigState{}, err
+	}
+	bindings, err := s.store.ListBindings(ctx)
+	if err != nil {
+		return proxyConfigState{}, err
+	}
+	return proxyConfigState{sources: sources, bindings: bindings}, nil
+}
+
+// regenerate rebuilds the runtime configuration from the current
+// database state. Callers hold s.mu.
 func (s *ProxyService) regenerate(ctx context.Context) error {
-	secret, err := s.controllerSecret()
+	state, err := s.loadConfigState(ctx)
 	if err != nil {
 		return err
 	}
-	input, err := s.buildConfigInput(ctx, secret)
+	return s.regenerateState(ctx, state)
+}
+
+// regenerateState renders the configuration for the given state
+// and writes it atomically. When the core is running it
+// hot-reloads; a rejected reload restores the previous file and
+// leaves the running configuration untouched. Callers hold s.mu.
+func (s *ProxyService) regenerateState(ctx context.Context, state proxyConfigState) error {
+	if err := s.initCore(); err != nil {
+		return err
+	}
+	input, err := s.buildConfigInput(ctx, state)
 	if err != nil {
 		return err
 	}
@@ -345,20 +395,13 @@ func (s *ProxyService) regenerate(ctx context.Context) error {
 	return nil
 }
 
-// buildConfigInput assembles the generator input from the store.
-// Subscription URLs are read from the vault here and only here.
-func (s *ProxyService) buildConfigInput(ctx context.Context, secret string) (mihomo.ConfigInput, error) {
-	sources, err := s.store.ListProxySources(ctx)
-	if err != nil {
-		return mihomo.ConfigInput{}, err
-	}
-	bindings, err := s.store.ListBindings(ctx)
-	if err != nil {
-		return mihomo.ConfigInput{}, err
-	}
-	input := mihomo.ConfigInput{ControllerPort: proxyControllerPort, Secret: secret}
+// buildConfigInput assembles the generator input from a state
+// snapshot. Subscription URLs are read from the vault here and
+// only here.
+func (s *ProxyService) buildConfigInput(ctx context.Context, state proxyConfigState) (mihomo.ConfigInput, error) {
+	input := mihomo.ConfigInput{ControllerPort: proxyControllerPort, Secret: s.secret}
 	providerBySource := map[string]string{}
-	for _, src := range sources {
+	for _, src := range state.sources {
 		si := mihomo.SourceInput{ProviderName: src.ProviderName, Kind: src.Kind, FileName: src.FileName}
 		if src.Kind == model.ProxySourceKindURL {
 			if s.vault == nil || src.SecretRef == "" {
@@ -373,7 +416,7 @@ func (s *ProxyService) buildConfigInput(ctx context.Context, secret string) (mih
 		providerBySource[src.ID] = src.ProviderName
 		input.Sources = append(input.Sources, si)
 	}
-	for _, b := range bindings {
+	for _, b := range state.bindings {
 		provider, ok := providerBySource[b.SourceID]
 		if !ok {
 			continue // source deleted without its bindings cannot happen (FK), defensive only
@@ -382,7 +425,6 @@ func (s *ProxyService) buildConfigInput(ctx context.Context, secret string) (mih
 			InstanceID:   b.InstanceID,
 			ProviderName: provider,
 			NodeName:     b.NodeName,
-			Mode:         b.Mode,
 			Port:         b.Port,
 		})
 	}
@@ -390,17 +432,38 @@ func (s *ProxyService) buildConfigInput(ctx context.Context, secret string) (mih
 }
 
 // applySelections pushes DeBrowser's recorded instance->node
-// selections into the running core's groups.
+// selections into the running core's groups. A binding whose node
+// currently exists is selected; a binding whose node is gone (or
+// whose provider cannot be read) is set to REJECT explicitly, so
+// the instance refuses traffic instead of silently falling back
+// to another node. Selection problems never fail the caller: the
+// binding stays recorded and the UI reports the node as missing.
 func (s *ProxyService) applySelections(ctx context.Context) error {
 	bindings, err := s.store.ListBindings(ctx)
 	if err != nil {
 		return err
 	}
+	sources, err := s.store.ListProxySources(ctx)
+	if err != nil {
+		return err
+	}
+	providerBySource := map[string]string{}
+	for _, src := range sources {
+		providerBySource[src.ID] = src.ProviderName
+	}
 	for _, b := range bindings {
-		if err := s.client.SelectNode(ctx, mihomo.GroupName(b.InstanceID), b.NodeName); err != nil {
-			// A missing node (subscription updated) must not fail
-			// the whole apply: the binding stays recorded and is
-			// reported as unavailable in the UI.
+		target := "REJECT"
+		if provider, ok := providerBySource[b.SourceID]; ok {
+			if nodes, err := s.client.ProviderProxies(ctx, provider); err == nil {
+				for _, n := range nodes {
+					if n.Name == b.NodeName {
+						target = b.NodeName
+						break
+					}
+				}
+			}
+		}
+		if err := s.client.SelectNode(ctx, mihomo.GroupName(b.InstanceID), target); err != nil {
 			s.log.Warn("apply proxy selection failed", "instance", b.InstanceID, "error", err)
 		}
 	}
@@ -481,8 +544,10 @@ func validateSourceName(name string) (string, error) {
 }
 
 // AddURLSource archives a subscription URL (in the credential
-// vault; the database holds only the vault reference) and makes
-// its nodes available through the core.
+// vault; the database holds only the vault reference). Adding a
+// source never starts the core; when the core is already running
+// the new provider is loaded into it, and a failure there rolls
+// the archive back so database and core stay consistent.
 func (s *ProxyService) AddURLSource(operationID string, name string, rawURL string) (SourceView, error) {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.source_add_url", "proxy_source", "")
 	view, err := s.addURLSource(name, rawURL)
@@ -522,27 +587,31 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 		_, _ = s.vault.DeleteCompensating(ref)
 		return SourceView{}, fmt.Errorf("保存订阅失败：%w", err)
 	}
-	s.vault.MarkCommitted(ref)
-
 	s.mu.Lock()
-	coreErr := s.ensureCoreRunning(ctx)
-	if coreErr == nil {
-		// The provider was just added by the configuration reload;
-		// ask the core to fetch it now so node counts are real.
+	if s.coreRunning(ctx) {
+		if err := s.regenerate(ctx); err != nil {
+			// The core rejected the configuration with the new
+			// source: roll the archive back.
+			_ = s.store.DeleteProxySource(ctx, id)
+			_, _ = s.vault.DeleteCompensating(ref)
+			s.mu.Unlock()
+			return SourceView{}, fmt.Errorf("添加订阅失败，核心配置更新未生效，已回滚：%w", err)
+		}
+		// Ask the core to fetch the new provider now so node
+		// counts are real; a fetch failure keeps the (empty)
+		// provider and is reported by the source view.
 		_ = s.client.RefreshProvider(ctx, src.ProviderName)
 	}
 	s.mu.Unlock()
-	view := s.sourceView(ctx, src)
-	if coreErr != nil && view.State == "core-stopped" {
-		view.State = "error"
-		view.Message = "订阅已保存，但核心启动失败：" + coreErr.Error()
-	}
-	return view, nil
+	s.vault.MarkCommitted(ref)
+	return s.sourceView(ctx, src), nil
 }
 
 // AddFileSource imports a local Mihomo YAML file through the
 // native picker. DeBrowser copies the file into its own sources
-// directory; the user's original file is never modified.
+// directory; the user's original file is never modified. The
+// content is validated by the core itself (see validateFileData)
+// before it is accepted.
 func (s *ProxyService) AddFileSource(operationID string, name string) (SourceView, error) {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.source_add_file", "proxy_source", "")
 	view, err := s.addFileSource(name)
@@ -571,12 +640,15 @@ func (s *ProxyService) addFileSource(name string) (SourceView, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	if err := s.checkFileData(ctx, data); err != nil {
+		return SourceView{}, err
+	}
 	id, err := store.NewID()
 	if err != nil {
 		return SourceView{}, err
 	}
 	fileName := id + ".yaml"
-	if err := s.writeSourceCopy(id, fileName, data); err != nil {
+	if err := s.writeSourceCopy(fileName, data); err != nil {
 		return SourceView{}, err
 	}
 	src, err := s.store.CreateProxySource(ctx, model.ProxySource{
@@ -588,14 +660,16 @@ func (s *ProxyService) addFileSource(name string) (SourceView, error) {
 		return SourceView{}, fmt.Errorf("保存本地来源失败：%w", err)
 	}
 	s.mu.Lock()
-	coreErr := s.ensureCoreRunning(ctx)
-	s.mu.Unlock()
-	view := s.sourceView(ctx, src)
-	if coreErr != nil && view.State == "core-stopped" {
-		view.State = "error"
-		view.Message = "文件已导入，但核心启动失败：" + coreErr.Error()
+	if s.coreRunning(ctx) {
+		if err := s.regenerate(ctx); err != nil {
+			_ = s.store.DeleteProxySource(ctx, id)
+			os.Remove(filepath.Join(s.sourcesDir(), fileName))
+			s.mu.Unlock()
+			return SourceView{}, fmt.Errorf("导入文件失败，核心配置更新未生效，已回滚：%w", err)
+		}
 	}
-	return view, nil
+	s.mu.Unlock()
+	return s.sourceView(ctx, src), nil
 }
 
 // readSourceFile reads and sanity-checks an imported YAML file.
@@ -619,7 +693,7 @@ func readSourceFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-func (s *ProxyService) writeSourceCopy(id string, fileName string, data []byte) error {
+func (s *ProxyService) writeSourceCopy(fileName string, data []byte) error {
 	if err := os.MkdirAll(s.sourcesDir(), 0o750); err != nil {
 		return fmt.Errorf("创建来源目录失败：%w", err)
 	}
@@ -634,9 +708,106 @@ func (s *ProxyService) writeSourceCopy(id string, fileName string, data []byte) 
 	return nil
 }
 
+// checkFileData validates candidate YAML content with the core
+// itself before the content is accepted anywhere. The core's own
+// config test does not parse provider payloads, so validation
+// runs a short-lived throwaway core (its own temp directory, its
+// own controller port, no listeners) whose only job is loading
+// the candidate as a file provider and reporting its nodes. The
+// throwaway process is always killed before this returns, and
+// the running production core is never touched.
+//
+// When the core binary is not present yet there is nothing to
+// validate with and the check is skipped (nil); the content is
+// then judged by the production core when it first loads.
+func (s *ProxyService) checkFileData(ctx context.Context, data []byte) error {
+	bin := mihomo.BinaryPath(s.layout.Mihomo)
+	if _, err := os.Stat(bin); err != nil {
+		return nil
+	}
+	count, err := s.countFileNodes(ctx, bin, data)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("该文件无法被核心加载，或未提取到任何可用节点（格式不受支持或内部结构无法提取）")
+	}
+	return nil
+}
+
+// countFileNodes loads data as a file provider in a throwaway
+// core process and returns how many nodes the core extracted.
+func (s *ProxyService) countFileNodes(ctx context.Context, bin string, data []byte) (int, error) {
+	if err := s.initCore(); err != nil {
+		return 0, err
+	}
+	if mihomo.ProbePort(proxyValidatePort) {
+		return 0, fmt.Errorf("文件验证端口被占用，暂时无法验证文件内容")
+	}
+	dir, err := os.MkdirTemp(s.layout.Mihomo, "validate-*")
+	if err != nil {
+		return 0, fmt.Errorf("创建文件验证目录失败：%w", err)
+	}
+	defer os.RemoveAll(dir)
+	candidate := filepath.Join(dir, "candidate.yaml")
+	if err := os.WriteFile(candidate, data, 0o640); err != nil {
+		return 0, fmt.Errorf("写入验证文件失败：%w", err)
+	}
+	cfg := fmt.Sprintf("log-level: warning\nmode: rule\nexternal-controller: %q\nsecret: %q\nproxy-providers:\n  candidate:\n    type: file\n    path: %q\nrules:\n  - \"MATCH,DIRECT\"\n",
+		fmt.Sprintf("127.0.0.1:%d", proxyValidatePort), s.secret, candidate)
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o640); err != nil {
+		return 0, fmt.Errorf("写入验证配置失败：%w", err)
+	}
+	cmd := exec.Command(bin, "-d", dir, "-f", cfgPath)
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("启动验证核心失败：%w", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	client := mihomo.NewClient(proxyValidatePort, s.secret)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := client.Version(ctx); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("验证核心未能启动，无法验证文件内容")
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	// The provider's initial load completes with startup; poll
+	// briefly so a slow first parse is not misread as empty.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		nodes, err := client.ProviderProxies(ctx, "candidate")
+		if err == nil && len(nodes) > 0 {
+			return len(nodes), nil
+		}
+		if time.Now().After(deadline) {
+			return 0, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
 // RefreshSource re-fetches a subscription through the core. The
 // core keeps the previous nodes when the fetch fails, and
-// instance bindings are never changed by an update.
+// instance bindings are never changed by an update; afterwards
+// the recorded selections are re-applied (a node that disappeared
+// leaves its instance on REJECT, a node that returned restores
+// its binding). Refreshing requires the core to be running: it is
+// never started implicitly.
 func (s *ProxyService) RefreshSource(operationID string, id string) error {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.source_refresh", "proxy_source", id)
 	err := func() error {
@@ -654,20 +825,23 @@ func (s *ProxyService) RefreshSource(operationID string, id string) error {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if err := s.ensureCoreRunning(ctx); err != nil {
-			return err
+		if !s.coreRunning(ctx) {
+			return fmt.Errorf("代理核心未开启，无法更新订阅；请先在代理配置页面手动开启代理")
 		}
 		if err := s.client.RefreshProvider(ctx, src.ProviderName); err != nil {
 			return fmt.Errorf("订阅更新失败，已保留原有节点：%w", err)
 		}
-		return nil
+		return s.applySelections(ctx)
 	}()
 	finishOp(op, err)
 	return err
 }
 
 // ReimportFileSource replaces a file source's stored copy with a
-// newly picked file.
+// newly picked file. The new content is validated by the core
+// itself BEFORE anything is replaced (see checkFileData): a file
+// the core cannot load, or one that yields no nodes, is rejected
+// and the previous file and its nodes stay exactly as they were.
 func (s *ProxyService) ReimportFileSource(operationID string, id string) (SourceView, error) {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.source_reimport", "proxy_source", id)
 	view, err := s.reimportFileSource(id)
@@ -702,27 +876,32 @@ func (s *ProxyService) reimportFileSource(id string) (SourceView, error) {
 	if err != nil {
 		return SourceView{}, err
 	}
-	if err := s.writeSourceCopy(id, src.FileName, data); err != nil {
+	// Validate first; the stored copy is touched only after the
+	// core itself has proven it can load the new content.
+	if err := s.checkFileData(ctx, data); err != nil {
+		return SourceView{}, fmt.Errorf("新文件未通过核心验证，已保留原文件和原有节点：%w", err)
+	}
+	if err := s.writeSourceCopy(src.FileName, data); err != nil {
 		return SourceView{}, err
 	}
 	s.mu.Lock()
 	if s.coreRunning(ctx) {
-		err = s.regenerate(ctx)
-		if err == nil {
-			_ = s.client.RefreshProvider(ctx, src.ProviderName)
+		if err := s.client.RefreshProvider(ctx, src.ProviderName); err != nil {
+			s.mu.Unlock()
+			return SourceView{}, fmt.Errorf("新文件已通过验证并已替换，但核心刷新失败，核心仍在使用原有节点：%w", err)
 		}
+		_ = s.applySelections(ctx)
 	}
 	s.mu.Unlock()
-	if err != nil {
-		return SourceView{}, err
-	}
 	return s.sourceView(ctx, src), nil
 }
 
 // DeleteSource removes a source. Sources with instances bound to
 // their nodes cannot be deleted until the bindings are cleared,
 // so an update or deletion can never silently re-point an
-// instance at another node.
+// instance at another node. The runtime configuration is updated
+// to the proposed state (without the source) BEFORE the database
+// row is removed; if the core rejects it, nothing is deleted.
 func (s *ProxyService) DeleteSource(operationID string, id string) error {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.source_delete", "proxy_source", id)
 	err := func() error {
@@ -740,7 +919,24 @@ func (s *ProxyService) DeleteSource(operationID string, id string) error {
 		} else if n > 0 {
 			return fmt.Errorf("有 %d 个实例正在使用该来源的节点，请先在实例编辑中解除这些实例的代理绑定", n)
 		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		state, err := s.loadConfigState(ctx)
+		if err != nil {
+			return err
+		}
+		kept := state.sources[:0]
+		for _, other := range state.sources {
+			if other.ID != id {
+				kept = append(kept, other)
+			}
+		}
+		state.sources = kept
+		if err := s.regenerateState(ctx, state); err != nil {
+			return fmt.Errorf("核心配置更新失败，来源未删除：%w", err)
+		}
 		if err := s.store.DeleteProxySource(ctx, id); err != nil {
+			_ = s.regenerate(ctx) // restore the live configuration (best effort)
 			return fmt.Errorf("删除来源失败：%w", err)
 		}
 		if src.Kind == model.ProxySourceKindFile && src.FileName != "" {
@@ -767,9 +963,7 @@ func (s *ProxyService) DeleteSource(operationID string, id string) error {
 				return false, nil
 			})
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.regenerate(ctx)
+		return nil
 	}()
 	finishOp(op, err)
 	return err
@@ -809,7 +1003,8 @@ func (s *ProxyService) ListNodes() ([]NodeView, error) {
 }
 
 // TestDelays measures every node's delay through the core (one
-// group delay call per source) and returns per-node results.
+// group delay call per source) and returns per-node results. It
+// requires the core to be running and never starts it.
 func (s *ProxyService) TestDelays(operationID string) ([]NodeDelayView, error) {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.delay_test", "mihomo_core", "")
 	out, err := s.testDelays()
@@ -822,8 +1017,8 @@ func (s *ProxyService) testDelays() ([]NodeDelayView, error) {
 	defer cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.ensureCoreRunning(ctx); err != nil {
-		return nil, err
+	if !s.coreRunning(ctx) {
+		return nil, fmt.Errorf("代理核心未开启，无法测速；请先在代理配置页面手动开启代理")
 	}
 	sources, err := s.store.ListProxySources(ctx)
 	if err != nil {
@@ -876,7 +1071,7 @@ func (s *ProxyService) nodeState(ctx context.Context, b model.InstanceProxyBindi
 func (s *ProxyService) bindingView(ctx context.Context, b model.InstanceProxyBinding) BindingView {
 	view := BindingView{
 		InstanceID: b.InstanceID, SourceID: b.SourceID, NodeName: b.NodeName,
-		Mode: b.Mode, Port: b.Port, NodeState: "unknown", ListenerState: "unknown",
+		Port: b.Port, NodeState: "unknown", ListenerState: "unknown",
 	}
 	providerName := ""
 	if src, err := s.store.GetProxySource(ctx, b.SourceID); err == nil {
@@ -929,22 +1124,24 @@ func (s *ProxyService) GetBinding(instanceID string) (view BindingView, bound bo
 	return s.bindingView(ctx, b), true, nil
 }
 
-// SetBinding binds an instance to a node of a source. The binding
-// is recorded first and kept even when the node is currently
-// unavailable; the returned view reports the node's state.
-func (s *ProxyService) SetBinding(operationID string, instanceID string, sourceID string, nodeName string, mode string) (BindingView, error) {
+// SetBinding binds an instance to a node of a source. When the
+// core is running the node must currently exist in that source —
+// a binding to a node that is not there is rejected outright.
+// Database and runtime configuration stay consistent: the new
+// configuration (with the proposed binding) is generated and
+// loaded FIRST, and the database row is written only after the
+// core has accepted it; if anything fails, the previous binding
+// and the previous configuration both stay in force.
+func (s *ProxyService) SetBinding(operationID string, instanceID string, sourceID string, nodeName string) (BindingView, error) {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.binding_set", "browser_instance", instanceID)
-	view, err := s.setBinding(instanceID, sourceID, nodeName, mode)
+	view, err := s.setBinding(instanceID, sourceID, nodeName)
 	finishOp(op, err)
 	return view, err
 }
 
-func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName string, mode string) (BindingView, error) {
+func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName string) (BindingView, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	if mode != model.ProxyModeRule && mode != model.ProxyModeGlobal {
-		return BindingView{}, fmt.Errorf("代理模式无效")
-	}
 	nodeName = strings.TrimSpace(nodeName)
 	if nodeName == "" {
 		return BindingView{}, fmt.Errorf("请选择代理节点")
@@ -955,7 +1152,8 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 		}
 		return BindingView{}, err
 	}
-	if _, err := s.store.GetProxySource(ctx, sourceID); err != nil {
+	src, err := s.store.GetProxySource(ctx, sourceID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return BindingView{}, fmt.Errorf("代理来源不存在")
 		}
@@ -963,6 +1161,22 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.coreRunning(ctx) {
+		nodes, err := s.client.ProviderProxies(ctx, src.ProviderName)
+		if err != nil {
+			return BindingView{}, fmt.Errorf("核心未能加载来源「%s」，暂时无法设置绑定", src.Name)
+		}
+		found := false
+		for _, n := range nodes {
+			if n.Name == nodeName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return BindingView{}, fmt.Errorf("节点「%s」不在来源「%s」的当前节点列表中，无法绑定", nodeName, src.Name)
+		}
+	}
 	port := 0
 	if existing, err := s.store.GetBinding(ctx, instanceID); err == nil {
 		port = existing.Port // an instance keeps its listener port across changes
@@ -973,14 +1187,30 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 		}
 		port = p
 	}
-	b, err := s.store.UpsertBinding(ctx, model.InstanceProxyBinding{
-		InstanceID: instanceID, SourceID: sourceID, NodeName: nodeName, Mode: mode, Port: port,
-	})
-	if err != nil {
-		return BindingView{}, fmt.Errorf("保存代理绑定失败：%w", err)
+	proposed := model.InstanceProxyBinding{
+		InstanceID: instanceID, SourceID: sourceID, NodeName: nodeName, Port: port,
 	}
-	if err := s.regenerate(ctx); err != nil {
+	state, err := s.loadConfigState(ctx)
+	if err != nil {
 		return BindingView{}, err
+	}
+	replaced := false
+	for i := range state.bindings {
+		if state.bindings[i].InstanceID == instanceID {
+			state.bindings[i] = proposed
+			replaced = true
+		}
+	}
+	if !replaced {
+		state.bindings = append(state.bindings, proposed)
+	}
+	if err := s.regenerateState(ctx, state); err != nil {
+		return BindingView{}, err
+	}
+	b, err := s.store.UpsertBinding(ctx, proposed)
+	if err != nil {
+		_ = s.regenerate(ctx) // restore the live configuration (best effort)
+		return BindingView{}, fmt.Errorf("保存代理绑定失败：%w", err)
 	}
 	return s.bindingView(ctx, b), nil
 }
@@ -1005,7 +1235,10 @@ func (s *ProxyService) allocatePort(ctx context.Context) (int, error) {
 	return 0, fmt.Errorf("没有可用的本地监听端口")
 }
 
-// ClearBinding removes an instance's proxy binding.
+// ClearBinding removes an instance's proxy binding, with the same
+// consistency discipline as SetBinding: the configuration without
+// the binding is loaded first, the database row is deleted only
+// after the core has accepted it.
 func (s *ProxyService) ClearBinding(operationID string, instanceID string) error {
 	op := beginOp(s.Auditor, operationID, "代理", "proxy.binding_clear", "browser_instance", instanceID)
 	err := func() error {
@@ -1013,24 +1246,52 @@ func (s *ProxyService) ClearBinding(operationID string, instanceID string) error
 		defer cancel()
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if err := s.store.DeleteBinding(ctx, instanceID); err != nil {
+		state, err := s.loadConfigState(ctx)
+		if err != nil {
 			return err
 		}
-		return s.regenerate(ctx)
+		kept := state.bindings[:0]
+		for _, b := range state.bindings {
+			if b.InstanceID != instanceID {
+				kept = append(kept, b)
+			}
+		}
+		state.bindings = kept
+		if err := s.regenerateState(ctx, state); err != nil {
+			return fmt.Errorf("核心配置更新失败，绑定未清除：%w", err)
+		}
+		if err := s.store.DeleteBinding(ctx, instanceID); err != nil {
+			_ = s.regenerate(ctx) // restore the live configuration (best effort)
+			return err
+		}
+		return nil
 	}()
 	finishOp(op, err)
 	return err
 }
 
 // ProxyPortForInstance is the launch hook the instance service
-// uses: the loopback proxy port bound to an instance, or 0 when
-// the instance has no proxy binding. It never fails a launch.
-func (s *ProxyService) ProxyPortForInstance(instanceID string) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+// uses. (0, nil) means the instance has no proxy binding and
+// launches exactly as before. A bound instance whose proxy is not
+// actually usable — the core has not been started manually, or
+// its listener does not answer — returns an error, so the launch
+// is refused with a clear message instead of starting a browser
+// against a dead proxy port. The core is never started from here.
+func (s *ProxyService) ProxyPortForInstance(instanceID string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	b, err := s.store.GetBinding(ctx, instanceID)
-	if err != nil {
-		return 0
+	if errors.Is(err, store.ErrNotFound) {
+		return 0, nil
 	}
-	return b.Port
+	if err != nil {
+		return 0, fmt.Errorf("读取实例代理绑定失败，实例未启动：%w", err)
+	}
+	if !s.coreRunning(ctx) {
+		return 0, fmt.Errorf("该实例已绑定代理节点，但代理核心尚未开启。请先在「代理配置」页面手动开启代理，再启动该实例")
+	}
+	if !mihomo.ProbePort(b.Port) {
+		return 0, fmt.Errorf("该实例的代理监听端口 127.0.0.1:%d 无响应，实例未启动。请检查「代理配置」页面的核心状态后重试", b.Port)
+	}
+	return b.Port, nil
 }

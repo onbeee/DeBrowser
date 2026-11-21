@@ -80,10 +80,9 @@ interface FormState {
   profileName: string;
   // Proxy binding (Stage 6C): proxyKey is "" for no proxy, else
   // "<sourceId><nodeName>" identifying one node of one source.
-  // proxyMode is "rule" | "global". The binding is applied through
-  // ProxyService after the instance itself is saved.
+  // The binding is applied through ProxyService after the
+  // instance itself is saved.
   proxyKey: string;
-  proxyMode: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -92,7 +91,6 @@ const EMPTY_FORM: FormState = {
   profileMode: "default",
   profileName: "",
   proxyKey: "",
-  proxyMode: "rule",
 };
 
 // proxyNodeKey identifies one node of one source in the form's
@@ -223,7 +221,7 @@ export default function InstancesPage() {
           setFormBinding(binding);
           setForm((current) =>
             current && current.id === instanceId
-              ? { ...current, proxyKey: proxyNodeKey(binding.sourceId, binding.nodeName), proxyMode: binding.mode }
+              ? { ...current, proxyKey: proxyNodeKey(binding.sourceId, binding.nodeName) }
               : current,
           );
         } else {
@@ -329,7 +327,6 @@ export default function InstancesPage() {
       profileMode: "rename",
       profileName: profileFolderOf(inst),
       proxyKey: "",
-      proxyMode: "rule",
     });
     setFormError(null);
     setProfileNote(null);
@@ -371,10 +368,9 @@ export default function InstancesPage() {
           if (formBinding) await ProxyService.ClearBinding(opId, instanceId);
         } else if (
           !formBinding ||
-          proxyNodeKey(formBinding.sourceId, formBinding.nodeName) !== form.proxyKey ||
-          formBinding.mode !== form.proxyMode
+          proxyNodeKey(formBinding.sourceId, formBinding.nodeName) !== form.proxyKey
         ) {
-          await ProxyService.SetBinding(opId, instanceId, desired.sourceId, desired.nodeName, form.proxyMode);
+          await ProxyService.SetBinding(opId, instanceId, desired.sourceId, desired.nodeName);
         }
         return null;
       } catch (e) {
@@ -999,20 +995,9 @@ export default function InstancesPage() {
                 ) : null}
               </div>
               {form.proxyKey && (
-                <div>
-                  <label className={labelCls}>代理模式</label>
-                  <select
-                    className={inputCls}
-                    value={form.proxyMode}
-                    onChange={(e) => setForm({ ...form, proxyMode: e.target.value })}
-                  >
-                    <option value="rule">规则模式</option>
-                    <option value="global">全局模式</option>
-                  </select>
-                  <p className="mt-1 text-xs text-(--text-faint)">
-                    规则模式下本地与局域网地址直连、其余流量经所选节点；全局模式下全部流量经所选节点。模式只影响当前实例。
-                  </p>
-                </div>
+                <p className="text-xs text-(--text-faint)">
+                  该实例通过自己的本地入口使用所选节点。代理核心未开启时，已绑定代理的实例无法启动，请先在「代理配置」页面手动开启代理。
+                </p>
               )}
               <div>
                 <label className={labelCls}>实例文件</label>

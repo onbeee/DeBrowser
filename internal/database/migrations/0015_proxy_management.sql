@@ -17,8 +17,8 @@
 --
 --   instance_proxy_bindings: which node (identified by source +
 --   the node's name inside that source) each browser instance
---   uses, its routing mode and the loopback listener port the
---   generated configuration assigns to the instance. The binding
+--   uses, and the loopback listener port the generated
+--   configuration assigns to the instance. The binding
 --   is DeBrowser's data: it is never delegated to the core's
 --   cache.db. Deleting an instance removes its binding; a source
 --   cannot be deleted while bindings reference it (the service
@@ -43,7 +43,6 @@ CREATE TABLE instance_proxy_bindings (
     instance_id TEXT PRIMARY KEY REFERENCES browser_instances (id) ON DELETE CASCADE,
     source_id   TEXT NOT NULL REFERENCES proxy_sources (id),
     node_name   TEXT NOT NULL,
-    mode        TEXT NOT NULL DEFAULT 'rule' CHECK (mode IN ('rule', 'global')),
     port        INTEGER NOT NULL UNIQUE,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))

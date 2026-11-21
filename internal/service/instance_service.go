@@ -44,10 +44,13 @@ type InstanceService struct {
 	// ProxyPortFor, when set, resolves the loopback proxy port
 	// bound to an instance (Stage 6C): the browser is then launched
 	// with --proxy-server pointing at its own Mihomo listener.
-	// Nil (or a 0 result) means the instance launches without a
-	// proxy. It is a plain function so the instance service never
-	// depends on the proxy service's type.
-	ProxyPortFor func(instanceID string) int
+	// (0, nil) means the instance has no binding and launches
+	// without a proxy; an error means the instance IS bound but
+	// its proxy is not usable, and the launch must be refused —
+	// never silently launched against a dead proxy port. It is a
+	// plain function so the instance service never depends on the
+	// proxy service's type.
+	ProxyPortFor func(instanceID string) (int, error)
 	// Runtime tracking (Stage 9B), guarded by rtMu: procs holds
 	// the verified live process of each running instance;
 	// transient holds the in-flight starting/stopping state of an

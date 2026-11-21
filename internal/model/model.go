@@ -228,12 +228,6 @@ const (
 	ProxySourceKindFile = "file"
 )
 
-// ProxyBindingMode values for InstanceProxyBinding.Mode.
-const (
-	ProxyModeRule   = "rule"
-	ProxyModeGlobal = "global"
-)
-
 // ProxySource is one imported proxy node source (Stage 6C): a
 // subscription URL or a local Mihomo YAML file. It maps 1:1 to one
 // proxy-provider in the generated Mihomo runtime configuration.
@@ -264,7 +258,6 @@ type InstanceProxyBinding struct {
 	InstanceID string `json:"instanceId"`
 	SourceID   string `json:"sourceId"`
 	NodeName   string `json:"nodeName"`
-	Mode       string `json:"mode"` // ProxyModeRule | ProxyModeGlobal
 	Port       int    `json:"port"`
 	CreatedAt  string `json:"createdAt"`
 	UpdatedAt  string `json:"updatedAt"`

@@ -23,11 +23,6 @@ export interface BindingView {
     "sourceId": string;
     "sourceName": string;
     "nodeName": string;
-
-    /**
-     * "rule" | "global"
-     */
-    "mode": string;
     "port": number;
 
     /**

@@ -272,7 +272,7 @@ export default function ProxyConfigPage() {
                   <p className="text-(--danger)">核心异常{core.message ? `：${core.message}` : ""}</p>
                 ) : (
                   <p className="text-(--text-dim)">
-                    未运行{core && !core.binaryReady ? "（首次启动时将自动下载官方核心）" : ""}。
+                    未运行{core && !core.binaryReady ? "（手动开启时将下载官方核心）" : ""}。核心只由您手动开启，DeBrowser 启动时不会自动开启。
                     {core?.message ? ` ${core.message}` : ""}
                   </p>
                 )}
@@ -384,7 +384,7 @@ export default function ProxyConfigPage() {
                           <span className="text-(--text-faint)">→</span>
                           <span>{b.nodeName}</span>
                           <span className="text-xs text-(--text-faint)">
-                            {b.sourceName} · {b.mode === "global" ? "全局" : "规则"} · 本地端口 {b.port}
+                            {b.sourceName} · 本地端口 {b.port}
                           </span>
                         </div>
                         {(b.nodeState === "missing" || b.listenerState === "down") && (
