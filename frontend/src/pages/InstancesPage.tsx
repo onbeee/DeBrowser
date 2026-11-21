@@ -580,23 +580,57 @@ export default function InstancesPage() {
 
   return (
     <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-6">
-      <div className="flex shrink-0 items-center justify-end gap-3">
-        <div className="flex shrink-0 gap-2">
-          <button
-            type="button"
-            onClick={openBatchCreate}
-            className="flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg)"
-          >
-            <Layers size={14} /> 批量创建
-          </button>
-          <button
-            type="button"
-            onClick={openCreate}
-            className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
-          >
-            <Plus size={14} /> 新建实例
-          </button>
-        </div>
+      {/* 顶部功能栏：常驻单行、靠左排列，顺序固定为
+          新建实例 / 批量创建 / 批量启动 / 批量关闭 / 批量删除 /
+          取消选择。批量按钮只在存在选择时可用，不再使用
+          勾选后弹出的批量操作栏，也不再单独显示选择计数。 */}
+      <div className="flex shrink-0 flex-nowrap items-center gap-2">
+        <button
+          type="button"
+          onClick={openCreate}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90"
+        >
+          <Plus size={14} /> 新建实例
+        </button>
+        <button
+          type="button"
+          onClick={openBatchCreate}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+        >
+          <Layers size={14} /> 批量创建
+        </button>
+        <button
+          type="button"
+          disabled={batchBusy || selectedIds.size === 0}
+          onClick={() => runBatch("start")}
+          className="flex h-9 shrink-0 items-center rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          批量启动
+        </button>
+        <button
+          type="button"
+          disabled={batchBusy || selectedIds.size === 0}
+          onClick={() => runBatch("stop")}
+          className="flex h-9 shrink-0 items-center rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          批量关闭
+        </button>
+        <button
+          type="button"
+          disabled={batchBusy || selectedIds.size === 0}
+          onClick={() => runBatch("delete")}
+          className="flex h-9 shrink-0 items-center rounded-md border border-(--border-strong) px-3 text-sm text-(--danger) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          批量删除
+        </button>
+        <button
+          type="button"
+          disabled={batchBusy || selectedIds.size === 0}
+          onClick={() => setSelectedIds(new Set())}
+          className="flex h-9 shrink-0 items-center rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          取消选择
+        </button>
       </div>
 
       {browsersError && (
@@ -615,45 +649,6 @@ export default function InstancesPage() {
         </div>
       )}
 
-      {selectedIds.size > 0 && (
-        <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-(--border) bg-(--panel-bg) px-3 py-2">
-          <span className="text-sm text-(--text-main)">已选择 {selectedIds.size} 个实例</span>
-          <div className="ml-auto flex gap-1">
-            <button
-              type="button"
-              disabled={batchBusy}
-              onClick={() => runBatch("start")}
-              className="rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              批量启动
-            </button>
-            <button
-              type="button"
-              disabled={batchBusy}
-              onClick={() => runBatch("stop")}
-              className="rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              批量关闭
-            </button>
-            <button
-              type="button"
-              disabled={batchBusy}
-              onClick={() => runBatch("delete")}
-              className="rounded px-2 py-1.5 text-xs text-(--danger) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              批量删除
-            </button>
-            <button
-              type="button"
-              disabled={batchBusy}
-              onClick={() => setSelectedIds(new Set())}
-              className="rounded px-2 py-1.5 text-xs text-(--text-dim) hover:bg-(--hover-bg) disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              取消选择
-            </button>
-          </div>
-        </div>
-      )}
 
       <div className="mt-5 min-h-0 flex-1 overflow-y-auto rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (

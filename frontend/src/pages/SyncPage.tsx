@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AppWindow, Monitor, Pause, Play, RotateCcw, Square } from "lucide-react";
+import { AppWindow, Pause, Play, RotateCcw, Square } from "lucide-react";
 import {
   SyncService,
   type SyncCandidate,
@@ -18,8 +18,8 @@ import {
 /**
  * 多开同步（Stage 10）：选择一个主实例与若干跟随实例，将主
  * 实例的网页操作（经 CDP）、已确认的导航与窗口状态同步到
- * 跟随实例。页面只呈现会话控制、参与实例状态、窗口排列与
- * 能力说明，不读取或显示任何网页内容。
+ * 跟随实例。页面顶部功能栏集中全部操作，下方为参与实例
+ * 状态与能力说明，不读取或显示任何网页内容。
  */
 export default function SyncPage() {
   const [candidates, setCandidates] = useState<SyncCandidate[]>([]);
@@ -138,12 +138,90 @@ export default function SyncPage() {
   ];
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-5 px-6 py-5">
-      <div className="flex items-center gap-3">
-        <span className="rounded-full bg-(--hover-bg) px-2.5 py-0.5 text-xs text-(--text-dim)">
-          {state ? state.phase : statusError ? "读取失败" : "加载中"}
-        </span>
+    <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-6 py-5">
+      {/* 顶部功能栏：常驻单行、靠左排列，不随下方列表滚动。
+          控件顺序固定为 开始 / 暂停 / 恢复 / 停止 / 排列窗口 /
+          恢复窗口 / 显示器；启用与禁用沿用原有 phase 判断，
+          功能栏内不再展示同步状态徽标。 */}
+      <div className="flex shrink-0 flex-nowrap items-center gap-2">
+        <button
+          className="flex h-9 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
+          disabled={busy || !controls.start || !canStart(selection)}
+          onClick={() =>
+            void run("start", (op) =>
+              SyncService.StartSync(op, selection.masterId, selection.followerIds),
+            "同步已开始")
+          }
+        >
+          <Play size={14} /> 开始
+        </button>
+        <button
+          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+          disabled={busy || !controls.pause}
+          onClick={() => void run("pause", (op) => SyncService.PauseSync(op), "同步已暂停")}
+        >
+          <Pause size={14} /> 暂停
+        </button>
+        <button
+          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+          disabled={busy || !controls.resume}
+          onClick={() => void run("resume", (op) => SyncService.ResumeSync(op), "同步已恢复")}
+        >
+          <RotateCcw size={14} /> 恢复
+        </button>
+        <button
+          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+          disabled={busy || !controls.stop}
+          onClick={() => void run("stop", (op) => SyncService.StopSync(op), "同步已停止")}
+        >
+          <Square size={14} /> 停止
+        </button>
+        <button
+          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+          disabled={busy || arrangeIds.length === 0}
+          onClick={() =>
+            void run("arrange", (op) =>
+              SyncService.ArrangeSyncWindows(op, arrangeIds, monitorId),
+            "窗口已排列")
+          }
+        >
+          <AppWindow size={14} /> 排列窗口
+        </button>
+        <button
+          className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+          disabled={busy}
+          onClick={() =>
+            void run("restore", (op) => SyncService.RestoreSyncWindows(op), "窗口已恢复")
+          }
+        >
+          <RotateCcw size={14} /> 恢复窗口
+        </button>
+        <select
+          className="h-9 rounded-md border border-(--border-strong) bg-(--panel-bg) px-2 text-sm text-(--text-main)"
+          value={monitorId}
+          onChange={(e) => setMonitorId(Number(e.target.value))}
+        >
+          {monitors.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        {monitorsError && monitors.length === 0 && (
+          <>
+            <span className="text-sm text-(--danger)">显示器列表读取失败：{monitorsError}</span>
+            <button
+              type="button"
+              onClick={loadMonitors}
+              className="rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+            >
+              重新加载
+            </button>
+          </>
+        )}
       </div>
+
+      <div className="mt-5 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
 
       {state === null && statusError && (
         <div className="flex items-center gap-2 rounded-xl border border-(--border) bg-(--panel-bg) px-4 py-3">
@@ -162,43 +240,7 @@ export default function SyncPage() {
       )}
 
       <section className="rounded-xl border border-(--border) bg-(--panel-bg) p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-medium text-(--text-main)">同步控制</h2>
-          <div className="flex gap-2">
-            <button
-              className="flex h-9 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
-              disabled={busy || !controls.start || !canStart(selection)}
-              onClick={() =>
-                void run("start", (op) =>
-                  SyncService.StartSync(op, selection.masterId, selection.followerIds),
-                "同步已开始")
-              }
-            >
-              <Play size={14} /> 开始同步
-            </button>
-            <button
-              className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-              disabled={busy || !controls.pause}
-              onClick={() => void run("pause", (op) => SyncService.PauseSync(op), "同步已暂停")}
-            >
-              <Pause size={14} /> 暂停
-            </button>
-            <button
-              className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-              disabled={busy || !controls.resume}
-              onClick={() => void run("resume", (op) => SyncService.ResumeSync(op), "同步已恢复")}
-            >
-              <RotateCcw size={14} /> 恢复
-            </button>
-            <button
-              className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-              disabled={busy || !controls.stop}
-              onClick={() => void run("stop", (op) => SyncService.StopSync(op), "同步已停止")}
-            >
-              <Square size={14} /> 停止
-            </button>
-          </div>
-        </div>
+        <h2 className="mb-3 text-sm font-medium text-(--text-main)">同步控制</h2>
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-(--text-faint)">
@@ -264,61 +306,6 @@ export default function SyncPage() {
         </table>
       </section>
 
-      <section className="rounded-xl border border-(--border) bg-(--panel-bg) p-4">
-        <h2 className="mb-3 flex items-center gap-2 text-sm font-medium text-(--text-main)">
-          <Monitor size={15} /> 窗口排列
-        </h2>
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            className="h-9 rounded-md border border-(--border-strong) bg-(--panel-bg) px-2 text-sm text-(--text-main)"
-            value={monitorId}
-            onChange={(e) => setMonitorId(Number(e.target.value))}
-          >
-            {monitors.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-          {monitorsError && monitors.length === 0 && (
-            <>
-              <span className="text-sm text-(--danger)">显示器列表读取失败：{monitorsError}</span>
-              <button
-                type="button"
-                onClick={loadMonitors}
-                className="rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
-              >
-                重新加载
-              </button>
-            </>
-          )}
-          <button
-            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-            disabled={busy || arrangeIds.length === 0}
-            onClick={() =>
-              void run("arrange", (op) =>
-                SyncService.ArrangeSyncWindows(op, arrangeIds, monitorId),
-              "窗口已排列")
-            }
-          >
-            <AppWindow size={14} /> 排列窗口
-          </button>
-          <button
-            className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-            disabled={busy}
-            onClick={() =>
-              void run("restore", (op) => SyncService.RestoreSyncWindows(op), "窗口已恢复")
-            }
-          >
-            <RotateCcw size={14} /> 恢复窗口
-          </button>
-        </div>
-        <p className="mt-2 text-xs leading-relaxed text-(--text-faint)">
-          排列使用所选显示器的工作区，恢复会还原排列前的完整窗口状态。窗口移动与尺寸调整不会激活窗口；
-          最大化、还原等状态切换经系统窗口状态接口执行，个别情况下可能影响前台窗口，属已知限制。
-        </p>
-      </section>
-
       <section className="rounded-xl border border-(--border) bg-(--panel-bg) p-4 text-sm leading-relaxed text-(--text-dim)">
         <h2 className="mb-2 text-sm font-medium text-(--text-main)">能力说明</h2>
         <ul className="list-disc space-y-1 pl-5">
@@ -328,6 +315,7 @@ export default function SyncPage() {
           <li>同步不移动系统鼠标、不抢占前台焦点；不记录网页内容、输入文本与浏览历史。</li>
         </ul>
       </section>
+      </div>
     </div>
   );
 }
