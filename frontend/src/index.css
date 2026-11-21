@@ -27,7 +27,6 @@
   --topbar-bg: #ffffff;
   --panel-bg: #ffffff;
   --input-bg: #ffffff;
-  --console-bg: #fafbfc;
   --border: #e2e5ea;
   --border-strong: #cbd2dc;
   --text-main: #20242c;
@@ -56,7 +55,6 @@
   --topbar-bg: #fbf8f2;
   --panel-bg: #fbf8f2;
   --input-bg: #fffdf8;
-  --console-bg: #f8f3ea;
   --border: #e2dace;
   --border-strong: #cfc2ab;
   --text-main: #302d28;
@@ -85,7 +83,6 @@
   --topbar-bg: #20252e;
   --panel-bg: #20252e;
   --input-bg: #191e26;
-  --console-bg: #14181f;
   --border: #343b47;
   --border-strong: #454f5e;
   --text-main: #e7eaf0;
@@ -137,4 +134,33 @@ body {
 *::-webkit-scrollbar-thumb {
   background-color: var(--scrollbar);
   border-radius: 4px;
+}
+
+/* 全局通知动画：浮动提示淡入、通知台从右侧滑入。 */
+@keyframes notification-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes notification-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+.notification-toast {
+  animation: notification-in 0.18s ease-out;
+}
+
+.notification-drawer {
+  animation: notification-drawer-in 0.2s ease-out;
 }

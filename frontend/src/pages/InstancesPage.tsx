@@ -9,7 +9,6 @@ import {
   Square,
   Trash2,
   TriangleAlert,
-  X,
 } from "lucide-react";
 import {
   BrowserService,
@@ -18,6 +17,9 @@ import {
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
+import { notify, notifyError, notifySuccess } from "../stores/useNotificationStore";
+import { classifyCounts } from "../lib/operationResult";
+import type { NotificationItem } from "../lib/notifications";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 import {
   kernelOptionLabels,
@@ -79,14 +81,28 @@ const EMPTY_FORM: FormState = { name: "", browserId: "", profileMode: "default",
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
-// The outcome of one batch operation, shown in a dismissible
-// banner: what succeeded, what was skipped (and why), what
-// failed (and why). Partial success is reported as partial.
-interface BatchResult {
-  title: string;
-  okNames: string[];
-  skipped: { name: string; reason: string }[];
-  failed: { name: string; reason: string }[];
+// The outcome of one batch operation goes to the global
+// notification system as ONE summary notification; the
+// per-item results (succeeded / skipped with reason / failed
+// with reason) ride along as expandable items in the
+// notification center. Partial success is reported as partial.
+function notifyBatchResult(
+  title: string,
+  okNames: string[],
+  skipped: { name: string; reason: string }[],
+  failed: { name: string; reason: string }[],
+): void {
+  const items: NotificationItem[] = [
+    ...okNames.map((name) => ({ name, status: "success" as const })),
+    ...skipped.map((it) => ({ name: it.name, status: "skipped" as const, reason: it.reason })),
+    ...failed.map((it) => ({ name: it.name, status: "failed" as const, reason: it.reason })),
+  ];
+  const summary =
+    `${title}：成功 ${okNames.length} 个` +
+    (skipped.length > 0 ? `，跳过 ${skipped.length} 个` : "") +
+    (failed.length > 0 ? `，失败 ${failed.length} 个` : "");
+  const kind = classifyCounts(okNames.length, failed.length, skipped.length);
+  if (kind !== null) notify(kind, summary, { items, important: true });
 }
 
 interface BatchCreateState {
@@ -122,9 +138,9 @@ const BATCH_OP_ACTION: Record<BatchAction, string> = {
  * 汇报，不引入额外的任务调度机制。
  */
 export default function InstancesPage() {
-  const log = useAppStore((state) => state.log);
   const setPage = useAppStore((state) => state.setPage);
   const [instances, setInstances] = useState<Instance[]>([]);
+  const [instancesError, setInstancesError] = useState<string | null>(null);
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   // browsersLoaded is true only after ListBrowsers has succeeded.
   // While it is false (still loading, or the load failed), saving
@@ -135,7 +151,7 @@ export default function InstancesPage() {
   const [browsersError, setBrowsersError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
   const [busy, setBusy] = useState(false);
@@ -143,7 +159,6 @@ export default function InstancesPage() {
   // Batch management state.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
-  const [batchResult, setBatchResult] = useState<BatchResult | null>(null);
   const [batchDeletePlan, setBatchDeletePlan] = useState<BatchPlanItem[] | null>(null);
   const [batchCreate, setBatchCreate] = useState<BatchCreateState | null>(null);
   const [batchCreateError, setBatchCreateError] = useState<string | null>(null);
@@ -178,11 +193,14 @@ export default function InstancesPage() {
     try {
       const list = await InstanceService.ListInstances();
       setInstances(list ?? []);
-      setError(null);
+      setInstancesError(null);
     } catch (err) {
+      // 读取失败与真实空列表严格区分：保留失败原因供页面
+      // 显示加载失败状态（不伪装成暂无实例），同时发一条
+      // 通知台错误。已有列表时不清空。
       const message = err instanceof Error ? err.message : String(err);
-      setError(`加载实例列表失败：${message}`);
-      log("error", `加载实例列表失败：${message}`);
+      setInstancesError(message);
+      notifyError(`加载实例列表失败：${message}`);
     } finally {
       setLoading(false);
     }
@@ -197,7 +215,7 @@ export default function InstancesPage() {
       // existing associations is inferred or touched.
       setBrowsersError(err instanceof Error ? err.message : String(err));
     }
-  }, [log]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -225,6 +243,7 @@ export default function InstancesPage() {
   const openCreate = () => {
     setEditing(null);
     setForm(EMPTY_FORM);
+    setFormError(null);
     setProfileNote(null);
   };
 
@@ -240,6 +259,7 @@ export default function InstancesPage() {
       profileMode: "rename",
       profileName: profileFolderOf(inst),
     });
+    setFormError(null);
     setProfileNote(null);
   };
 
@@ -248,21 +268,22 @@ export default function InstancesPage() {
     if (!browsersLoaded) {
       // Never let a save carry a browserId that was derived from
       // an incompletely loaded registration list.
-      setError("内核列表尚未加载完成，无法保存。请等待加载完成或重新加载页面。");
+      setFormError("内核列表尚未加载完成，无法保存。请等待加载完成或重新加载页面。");
       return;
     }
     if (!form.id && !form.browserId) {
-      setError("请选择实例内核。");
+      setFormError("请选择实例内核。");
       return;
     }
     if (!form.id && form.profileMode === "existing" && !form.profileName) {
-      setError("请选择实例文件。");
+      setFormError("请选择实例文件。");
       return;
     }
     if (form.id && form.profileMode === "swap" && !form.profileName) {
-      setError("请选择要更换的实例文件。");
+      setFormError("请选择要更换的实例文件。");
       return;
     }
+    setFormError(null);
     setBusy(true);
     const opId = newOperationId();
     const action = form.id ? "instance.update" : "instance.create";
@@ -288,7 +309,7 @@ export default function InstancesPage() {
           profileAction,
           profileName,
         });
-        log("info", `实例已更新：${form.name}`);
+        notifySuccess(`实例已更新：${form.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已更新：${form.name}`, "浏览器实例", action);
       } else {
         const created = await InstanceService.CreateInstance(opId, {
@@ -297,7 +318,7 @@ export default function InstancesPage() {
           profileMode: form.profileMode,
           profileName: form.profileMode === "default" ? "" : form.profileName,
         });
-        log("info", `实例已创建：${created.name}`);
+        notifySuccess(`实例已创建：${created.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
       }
       setForm(null);
@@ -305,8 +326,7 @@ export default function InstancesPage() {
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      log("error", `保存实例失败：${message}`);
+      notifyError(`保存实例失败：${message}`, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, `保存实例失败：${message}`, "浏览器实例", action);
     } finally {
       setBusy(false);
@@ -320,18 +340,16 @@ export default function InstancesPage() {
     try {
       if (kind === "start") {
         await InstanceService.StartInstance(opId, inst.id);
-        log("info", `实例已启动：${inst.name}`);
+        notifySuccess(`实例已启动：${inst.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已启动：${inst.name}`, "浏览器实例", action);
       } else {
         await InstanceService.StopInstance(opId, inst.id);
-        log("info", `实例已关闭：${inst.name}`);
+        notifySuccess(`实例已关闭：${inst.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已关闭：${inst.name}`, "浏览器实例", action);
       }
-      setError(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      log("error", `${kind === "start" ? "启动" : "关闭"}实例失败：${message}`);
+      notifyError(`${kind === "start" ? "启动" : "关闭"}实例失败：${message}`, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, message, "浏览器实例", action);
     } finally {
       setActingId(null);
@@ -347,19 +365,18 @@ export default function InstancesPage() {
     try {
       if (pendingDelete.withProfile) {
         await InstanceService.DeleteInstanceAndProfile(opId, pendingDelete.instance.id);
-        log("info", `实例及其实例文件已删除：${pendingDelete.instance.name}`);
+        notifySuccess(`实例及其实例文件已删除：${pendingDelete.instance.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例及其实例文件已删除：${pendingDelete.instance.name}`, "浏览器实例", action);
       } else {
         await InstanceService.DeleteInstance(opId, pendingDelete.instance.id);
-        log("info", `实例已删除（实例文件保留）：${pendingDelete.instance.name}`);
+        notifySuccess(`实例已删除（实例文件保留）：${pendingDelete.instance.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已删除（实例文件保留）：${pendingDelete.instance.name}`, "浏览器实例", action);
       }
       setPendingDelete(null);
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      log("error", `删除实例失败：${message}`);
+      notifyError(`删除实例失败：${message}`, { operationId: opId, important: true });
       recordOperationFeedback(opId, false, `删除实例失败：${message}`, "浏览器实例", action);
     } finally {
       setBusy(false);
@@ -388,7 +405,6 @@ export default function InstancesPage() {
 
   const executeBatch = async (action: BatchAction, plan: BatchPlanItem[]) => {
     setBatchBusy(true);
-    setBatchResult(null);
     const verb = BATCH_VERB[action];
     const okNames: string[] = [];
     const failed: { name: string; reason: string }[] = [];
@@ -404,18 +420,16 @@ export default function InstancesPage() {
         okNames.push(item.name);
         const doneMessage =
           action === "delete" ? `实例已删除（实例文件保留）：${item.name}` : `实例已${verb}：${item.name}`;
-        log("info", doneMessage);
         recordOperationFeedback(opId, true, doneMessage, "浏览器实例", BATCH_OP_ACTION[action]);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         failed.push({ name: item.name, reason: message });
-        log("error", `${verb}实例失败：${item.name}：${message}`);
         recordOperationFeedback(opId, false, `${verb}实例失败：${message}`, "浏览器实例", BATCH_OP_ACTION[action]);
       }
     }
     await refreshInstances();
     setSelectedIds(new Set());
-    setBatchResult({ title: `批量${verb}完成`, okNames, skipped, failed });
+    notifyBatchResult(`批量${verb}完成`, okNames, skipped, failed);
     setBatchBusy(false);
   };
 
@@ -476,18 +490,16 @@ export default function InstancesPage() {
             profileName: "",
           });
           okNames.push(created.name);
-          log("info", `实例已创建：${created.name}`);
           recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", "instance.create");
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           failed.push({ name, reason: message });
-          log("error", `创建实例失败：${name}：${message}`);
           recordOperationFeedback(opId, false, `创建实例失败：${message}`, "浏览器实例", "instance.create");
         }
       }
       setBatchCreate(null);
       await load();
-      setBatchResult({ title: "批量创建完成", okNames, skipped: [], failed });
+      notifyBatchResult("批量创建完成", okNames, [], failed);
     } catch (err) {
       setBatchCreateError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -568,10 +580,7 @@ export default function InstancesPage() {
 
   return (
     <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-6">
-      <div className="flex shrink-0 items-center justify-between gap-3">
-        <p className="text-sm text-(--text-dim)">
-          每个实例使用独立的实例文件，可独立启动、运行与关闭。
-        </p>
+      <div className="flex shrink-0 items-center justify-end gap-3">
         <div className="flex shrink-0 gap-2">
           <button
             type="button"
@@ -590,13 +599,6 @@ export default function InstancesPage() {
         </div>
       </div>
 
-      {error && (
-        <div className="mt-4 flex shrink-0 items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
-          <TriangleAlert size={16} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-
       {browsersError && (
         <div className="mt-4 flex shrink-0 items-start gap-2 rounded-lg border border-(--danger-border) bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">
           <TriangleAlert size={16} className="mt-0.5 shrink-0" />
@@ -610,36 +612,6 @@ export default function InstancesPage() {
           >
             重新加载
           </button>
-        </div>
-      )}
-
-      {batchResult && (
-        <div className="mt-4 shrink-0 rounded-lg border border-(--border) bg-(--panel-bg) px-3 py-2 text-sm text-(--text-dim)">
-          <div className="flex items-start justify-between gap-2">
-            <p className="font-medium text-(--text-main)">
-              {batchResult.title}：成功 {batchResult.okNames.length} 个
-              {batchResult.skipped.length > 0 && `，跳过 ${batchResult.skipped.length} 个`}
-              {batchResult.failed.length > 0 && `，失败 ${batchResult.failed.length} 个`}
-            </p>
-            <button
-              type="button"
-              title="关闭"
-              onClick={() => setBatchResult(null)}
-              className="shrink-0 rounded p-0.5 text-(--text-faint) hover:bg-(--hover-bg)"
-            >
-              <X size={14} />
-            </button>
-          </div>
-          {batchResult.skipped.map((s) => (
-            <p key={`skip-${s.name}`} className="mt-1 text-xs">
-              跳过「{s.name}」：{s.reason}
-            </p>
-          ))}
-          {batchResult.failed.map((f) => (
-            <p key={`fail-${f.name}`} className="mt-1 text-xs text-(--danger)">
-              「{f.name}」失败：{f.reason}
-            </p>
-          ))}
         </div>
       )}
 
@@ -686,6 +658,17 @@ export default function InstancesPage() {
       <div className="mt-5 min-h-0 flex-1 overflow-y-auto rounded-lg border border-(--border) bg-(--panel-bg)">
         {loading ? (
           <p className="px-4 py-10 text-center text-sm text-(--text-faint)">加载中…</p>
+        ) : instancesError && instances.length === 0 ? (
+          <div className="flex flex-col items-center px-4 py-12 text-center">
+            <p className="text-sm text-(--danger)">实例列表加载失败：{instancesError}</p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="mt-3 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+            >
+              重新加载
+            </button>
+          </div>
         ) : instances.length === 0 ? (
           <div className="flex flex-col items-center px-4 py-12 text-center">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-(--hover-bg) text-(--text-faint)">
@@ -872,13 +855,6 @@ export default function InstancesPage() {
                 ) : null}
               </div>
               <div>
-                <label className={labelCls}>代理节点</label>
-                <select className={inputCls} value="" disabled>
-                  <option value="">未设置（代理节点功能暂未开放）</option>
-                </select>
-                <p className="mt-1 text-xs text-(--text-faint)">不设置代理节点时，实例可正常启动和运行。</p>
-              </div>
-              <div>
                 <label className={labelCls}>实例文件</label>
                 {!form.id ? (
                   <div>
@@ -990,6 +966,7 @@ export default function InstancesPage() {
                   </div>
                 )}
               </div>
+              {formError && <p className="text-sm text-(--danger)">{formError}</p>}
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
@@ -1204,12 +1181,6 @@ export default function InstancesPage() {
                 {browsersLoaded && browsers.length === 0 && (
                   <p className="mt-1 text-xs text-(--text-faint)">尚未登记任何浏览器内核，请先在「浏览器内核」页面添加。</p>
                 )}
-              </div>
-              <div>
-                <label className={labelCls}>代理节点</label>
-                <select className={inputCls} value="" disabled>
-                  <option value="">未设置（代理节点功能暂未开放）</option>
-                </select>
               </div>
               {batchCreateError && <p className="text-sm text-(--danger)">{batchCreateError}</p>}
             </div>

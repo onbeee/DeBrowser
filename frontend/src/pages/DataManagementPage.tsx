@@ -7,6 +7,7 @@ import {
   type LogExportInfo,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { useAppStore } from "../stores/useAppStore";
+import { notifyError, notifySuccess } from "../stores/useNotificationStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 type RecordCategory = "all" | "operation" | "error" | "runtime";
@@ -54,12 +55,10 @@ function formatUptime(totalSeconds: number): string {
  * 或诊断导出区域。
  */
 export default function DataManagementPage() {
-  const log = useAppStore((state) => state.log);
   const status = useAppStore((state) => state.status);
   const [view, setView] = useState<DiagnosticsView | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [exportNote, setExportNote] = useState<string | null>(null);
   // 记录导出对话框（类别 + 动态日期范围）。
   const [exportDialog, setExportDialog] = useState<RecordCategory | null>(null);
   const [exportInfo, setExportInfo] = useState<LogExportInfo | null>(null);
@@ -77,10 +76,14 @@ export default function DataManagementPage() {
     DiagnosticsService.GetDiagnostics()
       .then((v) => {
         setView(v);
-        setError(null);
+        setLoadError(null);
       })
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        // 首次读取失败保留原因供页面显示失败状态（不一直
+        // 显示加载中）；已有数据时保留旧数据不清空。
+        setLoadError((prev) => prev ?? message);
+        notifyError(`无法读取数据管理信息：${message}`);
       });
   }, []);
 
@@ -119,24 +122,24 @@ export default function DataManagementPage() {
     DiagnosticsService.ExportRecords(opId, category, exportStart, exportEnd)
       .then((res: ExportResult) => {
         if (res.cancelled) {
-          setExportNote("已取消导出。");
-          recordOperationFeedback(opId, true, "已取消导出。", "数据管理", "logs.export");
+          // 用户主动取消保存对话框：静默关闭，不通知、
+          // 不记录成功或失败的操作反馈。
+          setExportDialog(null);
         } else {
           const msg = `${label}导出完成：${res.path}`;
-          setExportNote(msg);
+          notifySuccess(msg, { operationId: opId, important: true });
           setExportDialog(null);
-          log("info", msg);
           recordOperationFeedback(opId, true, msg, "数据管理", "logs.export");
           refresh();
         }
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        setDialogError(`导出失败：${message}`);
+        notifyError(`导出失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `导出失败：${message}`, "数据管理", "logs.export");
       })
       .finally(() => setExporting(false));
-  }, [exportDialog, exportStart, exportEnd, log, refresh]);
+  }, [exportDialog, exportStart, exportEnd, refresh]);
 
   const openCapacityDialog = useCallback(() => {
     setCapError(null);
@@ -170,14 +173,14 @@ export default function DataManagementPage() {
     DiagnosticsService.SetLogCapacity(opId, bytes)
       .then(() => {
         const msg = `日志容量已设置为 ${formatCapacity(bytes)}。`;
-        setExportNote(msg);
+        notifySuccess(msg, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, msg, "数据管理", "logs.set_capacity");
         setCapacityDialog(false);
         refresh();
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        setCapError(`设置失败：${message}`);
+        notifyError(`设置失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `设置失败：${message}`, "数据管理", "logs.set_capacity");
       })
       .finally(() => setCapSaving(false));
@@ -205,12 +208,25 @@ export default function DataManagementPage() {
     return names.length > 0 ? names.join("\n") : "暂无文件";
   };
 
-  return (    <div className="mx-auto max-w-4xl space-y-6 p-8">
-      {error && (
-        <div className="rounded-lg border border-(--danger-border) bg-(--danger-bg) px-4 py-3 text-sm text-(--danger)">
-          无法读取数据管理信息：{error}
+  if (view === null && loadError) {
+    return (
+      <div className="mx-auto max-w-4xl p-8">
+        <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-6 text-center">
+          <p className="text-sm text-(--danger)">无法读取数据管理信息：{loadError}</p>
+          <button
+            type="button"
+            onClick={refresh}
+            className="mt-3 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+          >
+            重新加载
+          </button>
         </div>
-      )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-6 p-8">
 
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">
         <h3 className="text-[15px] font-semibold">数据概览</h3>
@@ -259,7 +275,7 @@ export default function DataManagementPage() {
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">
         <h3 className="text-[15px] font-semibold">日志</h3>
         <p className="mt-1 text-xs leading-relaxed text-(--text-faint)">
-          全部记录由操作记录、错误记录与运行记录三类汇总，保存在同一日志目录中，程序运行期间自动记录，无需手动开启。超出容量时自动清理最早的记录。
+          包含操作、错误与运行三类记录，超出容量时自动清理最早记录。
         </p>
         <div className="mt-2 divide-y divide-(--border) text-sm">
           {RECORD_ROWS.map((row) => (
@@ -307,7 +323,6 @@ export default function DataManagementPage() {
         {(view?.categories ?? []).some((c) => c.cleanupErrors > 0) && (
           <div className="mt-2 text-xs text-(--danger)">部分日志清理曾失败，详情见运行日志。</div>
         )}
-        {exportNote && <div className="mt-2 text-sm text-(--text-dim)">{exportNote}</div>}
       </section>
 
       <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">

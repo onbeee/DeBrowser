@@ -1,6 +1,6 @@
-import { useState } from "react";
 import { AppService } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { useAppStore, type Theme } from "../stores/useAppStore";
+import { notifyError, notifySuccess } from "../stores/useNotificationStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
 
 const THEME_OPTIONS: { value: Theme; label: string }[] = [
@@ -29,34 +29,30 @@ export default function SettingsPage() {
   const status = useAppStore((state) => state.status);
   const theme = useAppStore((state) => state.theme);
   const setTheme = useAppStore((state) => state.setTheme);
-  const log = useAppStore((state) => state.log);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
   const changeTheme = (next: Theme) => {
+    const previous = theme;
     setTheme(next); // 即时生效
+    const label = THEME_OPTIONS.find((o) => o.value === next)?.label ?? next;
     const opId = newOperationId();
     AppService.SaveTheme(opId, next)
       .then(() => {
-        setSaveError(null);
-        log("info", `主题已切换并保存：${next}`);
+        notifySuccess(`主题已保存：${label}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `主题已切换并保存：${next}`, "设置", "settings.update_theme");
       })
       .catch((err: unknown) => {
+        // 保存失败必须回滚到切换前的主题：界面不得显示
+        // 一个实际没有保存成功的主题（否则重启后会恢复
+        // 旧主题，造成状态不一致）。
+        setTheme(previous);
         const message = err instanceof Error ? err.message : String(err);
-        setSaveError(message);
-        log("error", `保存主题失败：${message}`);
+        notifyError(`保存主题失败：${message}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, false, `保存主题失败：${message}`, "设置", "settings.update_theme");
       });
   };
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-8">
-      {saveError && (
-        <div className="rounded-lg border border-(--danger-border) bg-(--danger-bg) px-4 py-3 text-sm text-(--danger)">
-          保存设置失败：{saveError}
-        </div>
-      )}
-
       <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-5">
         <h3 className="text-[15px] font-semibold">外观与语言</h3>
         <div className="mt-4 space-y-4">
@@ -70,7 +66,6 @@ export default function SettingsPage() {
             >
               <option value="zh-CN">简体中文</option>
             </select>
-            <span className="text-xs text-(--text-faint)">当前版本仅提供简体中文界面</span>
           </label>
 
           <div className="flex items-center gap-4">

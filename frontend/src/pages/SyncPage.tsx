@@ -7,6 +7,7 @@ import {
   type SyncStateView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import { notifyError, notifySuccess } from "../stores/useNotificationStore";
 import {
   canStart,
   phaseControls,
@@ -25,8 +26,13 @@ export default function SyncPage() {
   const [state, setState] = useState<SyncStateView | null>(null);
   const [monitors, setMonitors] = useState<SyncMonitor[]>([]);
   const [monitorId, setMonitorId] = useState(0);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  // 在途请求保护：任一同步操作执行期间禁用全部操作入口，
+  // 防止连续点击造成重复请求；请求结束（成功或失败）后恢复。
+  const [busy, setBusy] = useState(false);
+  const refreshFailedRef = useRef(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const hasStateRef = useRef(false);
+  const [monitorsError, setMonitorsError] = useState<string | null>(null);
   const selectionRef = useRef<SyncSelection>({ masterId: "", followerIds: [] });
   const [selection, setSelectionState] = useState<SyncSelection>(selectionRef.current);
   const setSelection = (next: SyncSelection) => {
@@ -46,6 +52,9 @@ export default function SyncPage() {
       const list = cands ?? [];
       setCandidates(list);
       setState(st);
+      hasStateRef.current = true;
+      setStatusError(null);
+      refreshFailedRef.current = false;
       setSelection(
         refreshSelection(
           selectionRef.current,
@@ -54,42 +63,63 @@ export default function SyncPage() {
           st.masterId,
         ),
       );
-    } catch {
-      // 状态读取失败时保留上次已知状态，不打断用户。
+    } catch (err) {
+      // 状态读取失败时保留上次已知状态；只在首次失败时提示
+      // 一次，避免轮询期间反复弹出相同错误。从未成功读取
+      // 时保留失败原因，页面显示读取失败而非伪造的停止状态。
+      const message = err instanceof Error ? err.message : String(err);
+      if (!hasStateRef.current) setStatusError(message);
+      if (!refreshFailedRef.current) {
+        refreshFailedRef.current = true;
+        notifyError(`同步状态读取失败：${message}`);
+      }
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
+  // 显示器列表只在页面挂载时读取一次（不是轮询）；
+  // 加载失败时通过全局通知显示真实原因，不静默吞掉，
+  // 并保留失败原因供页面区分读取失败与真实空列表。
+  const loadMonitors = useCallback(() => {
     SyncService.ListSyncMonitors(newOperationId())
       .then((ms) => {
         const list = ms ?? [];
         setMonitors(list);
+        setMonitorsError(null);
         const primary = list.find((m) => m.primary);
         if (primary) setMonitorId(primary.id);
       })
-      .catch(() => {});
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setMonitorsError(message);
+        notifyError(`加载显示器列表失败：${message}`);
+      });
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    loadMonitors();
     const t = setInterval(() => void refresh(), 2500);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, loadMonitors]);
 
   const run = async (
     action: string,
     fn: (op: string) => Promise<unknown>,
     okMessage: string,
   ) => {
+    if (busy) return;
+    setBusy(true);
     const op = newOperationId();
-    setError("");
-    setNotice("");
     try {
       await fn(op);
       recordOperationFeedback(op, true, okMessage, "sync", action);
-      setNotice(okMessage);
+      notifySuccess(okMessage, { operationId: op, important: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       recordOperationFeedback(op, false, message, "sync", action);
-      setError(message);
+      notifyError(message, { operationId: op, important: true });
     } finally {
+      setBusy(false);
       void refresh();
     }
   };
@@ -110,17 +140,25 @@ export default function SyncPage() {
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 px-6 py-5">
       <div className="flex items-center gap-3">
-        <h1 className="text-lg font-semibold text-(--text-main)">多开同步</h1>
         <span className="rounded-full bg-(--hover-bg) px-2.5 py-0.5 text-xs text-(--text-dim)">
-          {state?.phase ?? "已停止"}
+          {state ? state.phase : statusError ? "读取失败" : "加载中"}
         </span>
       </div>
 
-      {error && (
-        <p className="rounded-lg bg-(--danger-bg) px-3 py-2 text-sm text-(--danger)">{error}</p>
+      {state === null && statusError && (
+        <div className="flex items-center gap-2 rounded-xl border border-(--border) bg-(--panel-bg) px-4 py-3">
+          <p className="flex-1 text-sm text-(--danger)">同步状态读取失败：{statusError}</p>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            className="shrink-0 rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+          >
+            重新加载
+          </button>
+        </div>
       )}
-      {notice && !error && (
-        <p className="rounded-lg bg-(--hover-bg) px-3 py-2 text-sm text-(--text-dim)">{notice}</p>
+      {state === null && !statusError && (
+        <p className="text-sm text-(--text-faint)">正在加载同步状态…</p>
       )}
 
       <section className="rounded-xl border border-(--border) bg-(--panel-bg) p-4">
@@ -129,7 +167,7 @@ export default function SyncPage() {
           <div className="flex gap-2">
             <button
               className="flex h-9 items-center gap-1.5 rounded-md bg-(--accent) px-3 text-sm font-medium text-(--accent-contrast) hover:opacity-90 disabled:opacity-50"
-              disabled={!controls.start || !canStart(selection)}
+              disabled={busy || !controls.start || !canStart(selection)}
               onClick={() =>
                 void run("start", (op) =>
                   SyncService.StartSync(op, selection.masterId, selection.followerIds),
@@ -140,21 +178,21 @@ export default function SyncPage() {
             </button>
             <button
               className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-              disabled={!controls.pause}
+              disabled={busy || !controls.pause}
               onClick={() => void run("pause", (op) => SyncService.PauseSync(op), "同步已暂停")}
             >
               <Pause size={14} /> 暂停
             </button>
             <button
               className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-              disabled={!controls.resume}
+              disabled={busy || !controls.resume}
               onClick={() => void run("resume", (op) => SyncService.ResumeSync(op), "同步已恢复")}
             >
               <RotateCcw size={14} /> 恢复
             </button>
             <button
               className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-              disabled={!controls.stop}
+              disabled={busy || !controls.stop}
               onClick={() => void run("stop", (op) => SyncService.StopSync(op), "同步已停止")}
             >
               <Square size={14} /> 停止
@@ -215,7 +253,7 @@ export default function SyncPage() {
                 </tr>
               );
             })}
-            {candidates.length === 0 && (
+            {candidates.length === 0 && state !== null && (
               <tr>
                 <td colSpan={5} className="py-3 text-(--text-faint)">
                   尚无浏览器实例。请先在「浏览器实例」中创建并启动实例。
@@ -242,9 +280,21 @@ export default function SyncPage() {
               </option>
             ))}
           </select>
+          {monitorsError && monitors.length === 0 && (
+            <>
+              <span className="text-sm text-(--danger)">显示器列表读取失败：{monitorsError}</span>
+              <button
+                type="button"
+                onClick={loadMonitors}
+                className="rounded-md border border-(--border-strong) bg-(--input-bg) px-3 py-1.5 text-sm text-(--text-main) hover:bg-(--hover-bg)"
+              >
+                重新加载
+              </button>
+            </>
+          )}
           <button
             className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
-            disabled={arrangeIds.length === 0}
+            disabled={busy || arrangeIds.length === 0}
             onClick={() =>
               void run("arrange", (op) =>
                 SyncService.ArrangeSyncWindows(op, arrangeIds, monitorId),
@@ -255,6 +305,7 @@ export default function SyncPage() {
           </button>
           <button
             className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"
+            disabled={busy}
             onClick={() =>
               void run("restore", (op) => SyncService.RestoreSyncWindows(op), "窗口已恢复")
             }

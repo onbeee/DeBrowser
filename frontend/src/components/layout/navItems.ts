@@ -3,7 +3,6 @@ import {
   Bookmark,
   Cpu,
   Database,
-  LayoutDashboard,
   Network,
   RefreshCw,
   Settings,
@@ -19,9 +18,8 @@ export interface NavItem {
   stage: string;
 }
 
-// 侧边栏一级入口由产品负责人固定为以下八项，名称与顺序不得增减或调整。
+// 侧边栏一级入口由产品负责人固定为以下七项，名称与顺序不得增减或调整。
 export const NAV_ITEMS: NavItem[] = [
-  { key: "overview", label: "总览", icon: LayoutDashboard, stage: "阶段 1" },
   { key: "instances", label: "浏览器实例", icon: AppWindow, stage: "阶段 3" },
   { key: "proxyconfig", label: "代理配置", icon: Network, stage: "暂未开放" },
   { key: "kernels", label: "浏览器内核", icon: Cpu, stage: "阶段 9" },

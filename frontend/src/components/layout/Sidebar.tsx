@@ -34,7 +34,7 @@ export default function Sidebar() {
             >
               <Icon size={17} strokeWidth={2} />
               <span className="flex-1">{item.label}</span>
-              {item.key !== "overview" && item.key !== "settings" && (
+              {item.key !== "settings" && (
                 <span className="rounded bg-(--badge-bg) px-1.5 py-0.5 text-[10px] text-(--text-faint)">
                   {item.stage}
                 </span>
@@ -43,10 +43,6 @@ export default function Sidebar() {
           );
         })}
       </nav>
-
-      <div className="px-5 py-4 text-[11px] leading-relaxed text-(--text-faint)">
-        本地优先：你的配置文件与数据只保存在本机应用目录中。
-      </div>
     </aside>
   );
 }
