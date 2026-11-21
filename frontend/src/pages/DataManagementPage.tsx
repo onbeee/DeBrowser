@@ -50,9 +50,8 @@ function formatUptime(totalSeconds: number): string {
 
 /**
  * 数据管理：数据概览、统一日志（全部 / 操作 / 错误 / 运行
- * 记录与总容量管理），以及备份与恢复（路线图最后阶段，
- * 当前未开放）。日志是唯一的记录系统：没有独立的操作审计
- * 或诊断导出区域。
+ * 记录与总容量管理）。日志是唯一的记录系统：没有独立的
+ * 操作审计或诊断导出区域。
  */
 export default function DataManagementPage() {
   const status = useAppStore((state) => state.status);
@@ -323,13 +322,6 @@ export default function DataManagementPage() {
         {(view?.categories ?? []).some((c) => c.cleanupErrors > 0) && (
           <div className="mt-2 text-xs text-(--danger)">部分日志清理曾失败，详情见运行日志。</div>
         )}
-      </section>
-
-      <section className="rounded-lg border border-(--border) bg-(--panel-bg) p-4">
-        <h3 className="text-[15px] font-semibold">备份与恢复</h3>
-        <p className="mt-1.5 text-sm leading-relaxed text-(--text-dim)">
-          完整备份与恢复属于路线图最后阶段，暂未开放。本页面不提供尚不可用的备份或恢复操作。
-        </p>
       </section>
 
       {exportDialog && (

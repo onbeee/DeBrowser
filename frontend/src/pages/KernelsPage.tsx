@@ -121,8 +121,7 @@ export default function KernelsPage() {
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-6">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-(--text-dim)">登记本机浏览器程序，供创建浏览器实例时选择。</p>
+      <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={addManual}
@@ -167,7 +166,7 @@ export default function KernelsPage() {
               <AppWindow size={22} />
             </span>
             <p className="mt-3 text-sm text-(--text-dim)">尚未登记浏览器内核</p>
-            <p className="mt-1 text-xs text-(--text-faint)">点击右上角「添加内核」，手动选择电脑中的浏览器程序。</p>
+            <p className="mt-1 text-xs text-(--text-faint)">点击左上角「添加内核」，手动选择电脑中的浏览器程序。</p>
           </div>
         ) : (
           <ul className="divide-y divide-(--border)">
