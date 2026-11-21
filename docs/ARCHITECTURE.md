@@ -79,7 +79,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | 日志 | 统一自动记录、容量管理、分类导出 | 已交付 |
 | 设置 | 主题（浅色/暖色/深色）、日志容量等，存 `config/settings.json` | 已交付 |
 | 书签 | 资源库（文件夹树）管理 + 向实例分发、跨实例聚合搜索/编辑/删除 | 已交付（Stage 9C 书签部分） |
-| 代理配置 | 仅占位页面，无后端功能 | 待开发（Stage 6C） |
+| 代理配置 | 订阅/本地 YAML 来源管理、节点列表与测速、实例节点绑定、Mihomo 核心进程管理（`internal/mihomo` 生成运行配置并调用核心 API；节点、规则、DNS 由核心执行） | 已实现（Stage 6C，待合并与 Windows 11 实机验收） |
 | CDP 与多开同步 | 每实例 localhost CDP 端口与主控—被控同步 | 正在验证（Stage 10 重构实现已提交，未合并；main 尚无此实现） |
 | 程序内更新、备份与恢复 | — | 未实现（Stage 11、12） |
 
@@ -154,6 +154,6 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 当前功能边界
 
-已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。正在验证（未合并，不属于 main 的已交付能力）：Stage 10 多开同步——重构实现位于分支 `feature/stage-10-sync-refactor`（实例运行层统一分配回环 CDP 端口、`internal/cdp` 客户端、页面事件捕获与 CDP 输入执行、`internal/capture` 页面观察脚本、`internal/winmgr` 原生窗口管理），其旧方案 PR #17、PR #19、PR #20 不是当前架构的一部分，本文档不按它们描述系统。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
+已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。正在验证（未合并，不属于 main 的已交付能力）：Stage 10 多开同步——重构实现位于分支 `feature/stage-10-sync-refactor`（实例运行层统一分配回环 CDP 端口、`internal/cdp` 客户端、页面事件捕获与 CDP 输入执行、`internal/capture` 页面观察脚本、`internal/winmgr` 原生窗口管理），其旧方案 PR #17、PR #19、PR #20 不是当前架构的一部分，本文档不按它们描述系统。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。已实现待验收：代理配置（Stage 6C：Mihomo 核心统一代理、订阅/本地 YAML 节点来源、每实例独立监听与节点绑定；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
 
 补充说明：`DiagnosticsService` 是数据管理页面的后端（应用版本、数据库状态与统一日志的查看，以及日志按类别导出），名字沿用自早期的诊断功能；早期的一键诊断导出已经移除，统一日志是唯一的记录系统（见「日志」），不存在第二套审计或诊断通道。

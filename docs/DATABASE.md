@@ -29,7 +29,7 @@
 
 ## 当前有效表
 
-当前产品实际使用的数据表共五张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`。
+当前产品实际使用的数据表共七张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`、`proxy_sources`、`instance_proxy_bindings`。
 
 ### `browser_instances`
 
@@ -71,6 +71,18 @@ DeBrowser 重启后的重新识别逐项核验记录（PID 存在、创建时间
 ### `profile_counter`
 
 默认实例文件编号的持久计数器（单行，`next_seq` 只增不减）。删除实例或实例文件都不会让编号被重新分配；分配时服务还会跳过已被绑定或已存在于磁盘的候选名。
+
+### `proxy_sources`
+
+代理节点来源（Stage 6C，migration 0015）：每个订阅或本地 YAML 文件一行，与生成的 Mihomo 运行配置中的一个 proxy-provider 一一对应。列：`id`、`name`、`kind`（CHECK：`url` / `file`）、`secret_ref`（订阅地址在凭据 Vault 中的不透明引用；订阅 URL 本身是凭据，永不落库、永不进日志）、`file_name`（本地文件来源在 `data/mihomo/sources/` 下的副本文件名；原文件不被修改）、`provider_name`（核心中的 provider 名，唯一）、时间戳。
+
+本表与 migration 0004–0009 的历史 `subscriptions` 表无关：历史表是数据兼容层，本表是当前产品的来源档案。订阅自带的代理组、规则、DNS 不被采用，来源只提供节点。
+
+### `instance_proxy_bindings`
+
+实例代理绑定（Stage 6C，migration 0015）：每个使用代理的浏览器实例一行。列：`instance_id`（主键，外键 → `browser_instances(id)`，随实例删除级联）、`source_id`（外键 → `proxy_sources(id)`，无级联：有绑定的来源不能删除，服务层先行检查并明确提示）、`node_name`（节点在所属来源内的名称；节点身份由「来源 + 名称」共同确定，不同来源的同名节点不冲突）、`mode`（CHECK：`rule` / `global`）、`port`（该实例专属的本地监听端口，唯一）、时间戳。
+
+绑定是 DeBrowser 的业务数据，只存于本表，永不依赖 Mihomo 核心的 cache 保存；核心每次启动或配置重载后由服务按本表重新下达节点选择。订阅更新后原绑定节点消失时，绑定保留、界面标记不可用，永不静默回退到其他节点。
 
 ## 遗留表（当前未使用）
 

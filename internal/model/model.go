@@ -222,6 +222,54 @@ type BookmarkNode struct {
 	UpdatedAt string  `json:"updatedAt"`
 }
 
+// ProxySource kind values for ProxySource.Kind.
+const (
+	ProxySourceKindURL  = "url"
+	ProxySourceKindFile = "file"
+)
+
+// ProxyBindingMode values for InstanceProxyBinding.Mode.
+const (
+	ProxyModeRule   = "rule"
+	ProxyModeGlobal = "global"
+)
+
+// ProxySource is one imported proxy node source (Stage 6C): a
+// subscription URL or a local Mihomo YAML file. It maps 1:1 to one
+// proxy-provider in the generated Mihomo runtime configuration.
+// The subscription URL itself is a credential and never stored
+// here: SecretRef is the opaque credential-vault reference for it
+// (empty for file sources). FileName is the basename of
+// DeBrowser's own copy of an imported local file, under
+// data/mihomo/sources/ (empty for URL sources).
+type ProxySource struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"` // ProxySourceKindURL | ProxySourceKindFile
+	SecretRef    string `json:"-"`
+	FileName     string `json:"fileName"`
+	ProviderName string `json:"providerName"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// InstanceProxyBinding is DeBrowser's own record of which proxy
+// node one browser instance uses (Stage 6C). The node is identified
+// by the source it belongs to plus the node's name inside that
+// source, so same-named nodes from different sources never
+// collide. Port is the loopback listener port the generated
+// Mihomo configuration assigns to this instance. Bindings live
+// only here — never in the Mihomo core's cache.
+type InstanceProxyBinding struct {
+	InstanceID string `json:"instanceId"`
+	SourceID   string `json:"sourceId"`
+	NodeName   string `json:"nodeName"`
+	Mode       string `json:"mode"` // ProxyModeRule | ProxyModeGlobal
+	Port       int    `json:"port"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
 // Bookmark kind values for BookmarkNode.Kind.
 const (
 	BookmarkKindBookmark = "bookmark"

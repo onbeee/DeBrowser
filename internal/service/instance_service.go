@@ -41,6 +41,13 @@ type InstanceService struct {
 	// launcher starts, inspects and re-attaches browser main
 	// processes. A field so tests can substitute a fake.
 	launcher runner.Launcher
+	// ProxyPortFor, when set, resolves the loopback proxy port
+	// bound to an instance (Stage 6C): the browser is then launched
+	// with --proxy-server pointing at its own Mihomo listener.
+	// Nil (or a 0 result) means the instance launches without a
+	// proxy. It is a plain function so the instance service never
+	// depends on the proxy service's type.
+	ProxyPortFor func(instanceID string) int
 	// Runtime tracking (Stage 9B), guarded by rtMu: procs holds
 	// the verified live process of each running instance;
 	// transient holds the in-flight starting/stopping state of an

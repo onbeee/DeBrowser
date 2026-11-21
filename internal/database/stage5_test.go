@@ -79,7 +79,7 @@ func TestUpgradeFromV4ToV5RemovesGroupsAndTags(t *testing.T) {
 	// Migrate runs the whole chain; since Stage 6 the latest
 	// version is 6. The 0005-specific assertions below (removed
 	// tables, preserved rows) are unaffected by 0006.
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 14 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 15 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 11", v, err)
 	}
 
@@ -187,7 +187,7 @@ func TestUpgradeFromV4ToV5RemovesGroupsAndTags(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	if got := appliedVersions(t, db); len(got) != 14 {
+	if got := appliedVersions(t, db); len(got) != 15 {
 		t.Errorf("after second Migrate applied = %v, want 11 rows", got)
 	}
 }

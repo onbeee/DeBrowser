@@ -51,6 +51,12 @@ type Layout struct {
 	// proxy credential and subscription URL lives there, encrypted;
 	// SQLite holds only opaque references to its entries.
 	SecretsFile string // <root>/data/secrets.vault
+	// Mihomo is the proxy core's working directory (Stage 6C): the
+	// core binary, the generated runtime configuration, imported
+	// source copies (sources/), provider caches and the core's own
+	// cache all live here, fully separate from any Clash install
+	// the user may have.
+	Mihomo string // <root>/data/mihomo
 }
 
 // Resolve builds the portable layout for an application root directory.
@@ -82,6 +88,7 @@ func Resolve(root string) (Layout, error) {
 		InstanceLock:   filepath.Join(data, "app.lock"),
 		ActivationFile: filepath.Join(data, "activate.request"),
 		SecretsFile:    filepath.Join(data, "secrets.vault"),
+		Mihomo:         filepath.Join(data, "mihomo"),
 	}, nil
 }
 
@@ -105,7 +112,7 @@ func ExecutableDir() (string, error) {
 // in each key directory. A read-only location is a hard startup error:
 // DeBrowser never silently falls back to %APPDATA% or %LOCALAPPDATA%.
 func (l Layout) Ensure() error {
-	dirs := []string{l.Root, l.Data, l.Backups, l.Logs, l.Profiles, l.Kernels, l.WebView2, l.Config}
+	dirs := []string{l.Root, l.Data, l.Backups, l.Logs, l.Profiles, l.Kernels, l.WebView2, l.Config, l.Mihomo}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create directory %s: %w", dir, err)
