@@ -301,7 +301,7 @@ export default function SyncPage() {
               "窗口已排列")
             }
           >
-            <AppWindow size={14} /> 自动排列所选实例窗口
+            <AppWindow size={14} /> 排列窗口
           </button>
           <button
             className="flex h-9 items-center gap-1.5 rounded-md border border-(--border-strong) px-3 text-sm text-(--text-main) hover:bg-(--hover-bg) disabled:opacity-50"

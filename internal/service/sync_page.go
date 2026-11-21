@@ -94,19 +94,38 @@ func (t *pageTracker) WaitReady(ctx context.Context, targetID string) error {
 // itself visible, or "" when there is none or more than one —
 // callers must treat "" as "cannot confirm", never guess.
 func (t *pageTracker) VisibleTarget() string {
+	id, count := t.visibleState()
+	if count != 1 {
+		return ""
+	}
+	return id
+}
+
+// visibleState reports the currently visible targets as a
+// count plus the single visible target when the count is
+// exactly one. "None visible" (a covered or minimized window,
+// or reports not yet arrived) and "several visible" (which
+// must never be guessed between) stay distinguishable for
+// callers and tests, even though both mean "cannot confirm"
+// for activation purposes.
+func (t *pageTracker) visibleState() (string, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	found := ""
+	count := 0
 	for id, v := range t.visible {
 		if !v {
 			continue
 		}
-		if found != "" {
-			return ""
+		count++
+		if found == "" {
+			found = id
 		}
-		found = id
 	}
-	return found
+	if count != 1 {
+		return "", count
+	}
+	return found, count
 }
 
 // mainFrameOf returns the tracked main frame ID of a target.

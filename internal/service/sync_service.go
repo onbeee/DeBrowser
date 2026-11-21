@@ -43,11 +43,59 @@ type SyncService struct {
 	savedMu         sync.Mutex
 	savedPlacements map[uintptr]savedWindow
 
+	// winMu serializes every window-geometry mutation:
+	// arranging, restoring and the session's window mirror
+	// must never move the same windows at the same time.
+	winMu sync.Mutex
+
 	// setWindowPlacement is indirect for tests.
 	setWindowPlacement func(hwnd uintptr, p winmgr.Placement) error
 	// verifySavedWindow re-validates a saved window's identity
 	// before restore (indirect for tests).
 	verifySavedWindow func(hwnd uintptr, rec savedWindow) bool
+	// getWindowGeometry reads a window's placement and screen
+	// rectangle together (indirect for tests).
+	getWindowGeometry func(hwnd uintptr) (winmgr.Placement, winmgr.Rect, error)
+	// setWindowRect applies a screen-coordinate rectangle
+	// (indirect for tests).
+	setWindowRect func(hwnd uintptr, r winmgr.Rect) error
+	// windowOwnerPID reads a window's owner PID (indirect
+	// for tests).
+	windowOwnerPID func(hwnd uintptr) int
+}
+
+// defaultWindowGeometry reads placement and screen rectangle.
+func defaultWindowGeometry(hwnd uintptr) (winmgr.Placement, winmgr.Rect, error) {
+	pl, err := winmgr.GetPlacement(hwnd)
+	if err != nil {
+		return winmgr.Placement{}, winmgr.Rect{}, err
+	}
+	scr, err := winmgr.WindowScreenRect(hwnd)
+	if err != nil {
+		return winmgr.Placement{}, winmgr.Rect{}, err
+	}
+	return pl, scr, nil
+}
+
+func (s *SyncService) geometryOf(hwnd uintptr) (winmgr.Placement, winmgr.Rect, error) {
+	if s.getWindowGeometry != nil {
+		return s.getWindowGeometry(hwnd)
+	}
+	return defaultWindowGeometry(hwnd)
+}
+
+func (s *SyncService) applyWindowRect(hwnd uintptr, r winmgr.Rect) error {
+	if s.setWindowRect != nil {
+		return s.setWindowRect(hwnd, r)
+	}
+	return winmgr.SetWindowRect(hwnd, r)
+}
+
+func (s *SyncService) ownerPID(hwnd uintptr) int {
+	if s.windowOwnerPID != nil {
+		return s.windowOwnerPID(hwnd)
+	}
+	return winmgr.WindowOwnerPID(hwnd)
 }
 
 // savedWindow is one window's pre-arrange placement PLUS the
@@ -373,18 +421,24 @@ func (sess *syncSession) refreshActive() {
 	if sess.masterTrack == nil {
 		return
 	}
-	active := sess.masterTrack.VisibleTarget()
-	sess.mu.Lock()
-	changed := active != "" && active != sess.activeTarget
-	if changed {
-		sess.activeTarget = active
-	}
-	sess.mu.Unlock()
-	if active == "" {
+	active, visibleCount := sess.masterTrack.visibleState()
+	if visibleCount != 1 {
+		// No unique visible target: pause. The previously
+		// confirmed active target is KEPT — a transient
+		// invisibility (the master window covered or
+		// minimized) must not discard it; a destroyed target
+		// is cleared by the destruction handler before this
+		// runs, so a stale target is never revived here.
 		sess.setSystemPause("target", true)
 		return
 	}
 	sess.setSystemPause("target", false)
+	sess.mu.Lock()
+	changed := active != sess.activeTarget
+	if changed {
+		sess.activeTarget = active
+	}
+	sess.mu.Unlock()
 	if !changed {
 		return
 	}
@@ -537,7 +591,7 @@ func (s *SyncService) start(masterID string, followerIDs []string) (SyncStateVie
 	}
 	active := sess.masterTrack.VisibleTarget()
 	if active == "" {
-		return fail(fmt.Errorf("无法确认主实例当前显示的标签页，已取消开始同步"))
+		return fail(fmt.Errorf("无法确认主实例当前显示的标签页。请先确保主实例窗口可见且只有一个活动标签页，再重试。"))
 	}
 	sess.activeTarget = active
 	s.wireMaster(sess)
@@ -838,8 +892,52 @@ func (s *SyncService) ResumeSync(operationID string) (SyncStateView, error) {
 		}
 	})
 	sess.refreshActive()
+	// Resume succeeds only when the session is REALLY back
+	// in the running, unpaused phase. A surviving system
+	// pause (unconfirmed active target, an open dialog) is
+	// reported with its reason — never cleared by force and
+	// never reported as a successful resume.
+	if reason := sess.pauseReasonText(); reason != "" {
+		err := fmt.Errorf("同步仍处于暂停状态：%s", reason)
+		finishOp(op, err)
+		return s.state(), err
+	}
 	finishOp(op, nil)
 	return s.state(), nil
+}
+
+// pauseReasonText describes why the session is not in the
+// plain running state, or "" when it is running unpaused.
+// System pause keys are internal; the user-facing text is
+// fixed per known key.
+func (sess *syncSession) pauseReasonText() string {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.phase != syncRunning {
+		return "同步会话尚未进入运行状态"
+	}
+	var parts []string
+	if sess.manualPaused {
+		parts = append(parts, "已手动暂停")
+	}
+	keys := make([]string, 0, len(sess.systemPauses))
+	for k := range sess.systemPauses {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch k {
+		case "target":
+			parts = append(parts, "无法确认主实例当前显示的标签页")
+		case "dialog-master":
+			parts = append(parts, "主实例有未处理的对话框")
+		case "dialog-follower":
+			parts = append(parts, "跟随实例有未处理的对话框")
+		default:
+			parts = append(parts, "系统原因")
+		}
+	}
+	return strings.Join(parts, "；")
 }
 
 // StopSync ends the session and releases every resource.
@@ -945,15 +1043,21 @@ func (s *SyncService) state() SyncStateView {
 	if sess == nil {
 		return SyncStateView{Phase: "已停止", Participants: []SyncParticipantView{}}
 	}
+	// Every participant's status derives from the ONE real
+	// session phase: the master never reports 同步中 while
+	// the session is starting, paused or stopping. A
+	// follower's own failure stays its independent status
+	// and is never overwritten by the session phase.
+	label := sess.phaseLabel()
 	view := SyncStateView{
-		Phase:        sess.phaseLabel(),
+		Phase:        label,
 		MasterID:     sess.masterID,
 		MasterName:   names[sess.masterID],
 		MirrorActive: sess.masterHWND != 0,
 		Participants: []SyncParticipantView{},
 	}
 	view.Participants = append(view.Participants, SyncParticipantView{
-		InstanceID: sess.masterID, Name: names[sess.masterID], Role: "master", Status: "同步中",
+		InstanceID: sess.masterID, Name: names[sess.masterID], Role: "master", Status: label,
 	})
 	snapshot := sess.followersSnapshot()
 	ids := make([]string, 0, len(snapshot))
@@ -962,12 +1066,10 @@ func (s *SyncService) state() SyncStateView {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		p := SyncParticipantView{InstanceID: id, Name: names[id], Role: "follower", Status: "同步中"}
+		p := SyncParticipantView{InstanceID: id, Name: names[id], Role: "follower", Status: label}
 		if w := snapshot[id]; w == nil || w.isFailed() {
 			p.Status = "失败"
 			p.Reason = sess.failedReason(id)
-		} else if sess.phaseLabel() == "已暂停" {
-			p.Status = "已暂停"
 		}
 		view.Participants = append(view.Participants, p)
 	}
