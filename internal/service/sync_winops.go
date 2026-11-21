@@ -99,6 +99,13 @@ func (s *SyncService) ArrangeSyncWindows(operationID string, instanceIDs []strin
 }
 
 func (s *SyncService) arrange(instanceIDs []string, monitorID int) error {
+	// Serialized with restores and the window mirror; when
+	// the arrange finishes, the mirror baseline is refreshed
+	// from the master's actual geometry so the mirror never
+	// undoes the arrangement on its next tick.
+	s.winMu.Lock()
+	defer s.winMu.Unlock()
+	defer s.refreshMirrorBaseline()
 	if len(instanceIDs) == 0 {
 		return fmt.Errorf("请选择要排列的实例")
 	}
@@ -175,6 +182,11 @@ func (s *SyncService) RestoreSyncWindows(operationID string) error {
 }
 
 func (s *SyncService) restore() error {
+	// Serialized with arranges and the window mirror; the
+	// mirror baseline follows the restored master geometry.
+	s.winMu.Lock()
+	defer s.winMu.Unlock()
+	defer s.refreshMirrorBaseline()
 	s.savedMu.Lock()
 	snapshot := make(map[uintptr]savedWindow, len(s.savedPlacements))
 	for hwnd, rec := range s.savedPlacements {
@@ -237,6 +249,21 @@ func (s *SyncService) startMirror(sess *syncSession) {
 	if err != nil || masterHWND == 0 {
 		return
 	}
+	// Establish the master's CURRENT geometry as the mirror
+	// baseline BEFORE the loop starts. Without this, the
+	// first tick mistook the master's pre-existing layout
+	// for a change and copied it onto every follower,
+	// stacking all windows on top of each other. When the
+	// baseline cannot be read, mirroring stays off rather
+	// than starting from an empty baseline.
+	pl, scr, err := s.geometryOf(masterHWND)
+	if err != nil {
+		return
+	}
+	sess.mu.Lock()
+	sess.lastMasterPl = &pl
+	sess.lastMasterScr = &scr
+	sess.mu.Unlock()
 	sess.masterHWND = masterHWND
 	for id := range sess.followersSnapshot() {
 		if hwnd, _, err := s.resolveWindow(id); err == nil && hwnd != 0 {
@@ -257,30 +284,82 @@ func (s *SyncService) startMirror(sess *syncSession) {
 	}()
 }
 
-func (s *SyncService) mirrorOnce(sess *syncSession) {
-	if !s.instances.VerifySyncIdentity(sess.master) {
+// noteMasterGeometry records the master's latest geometry as
+// the mirror baseline and reports whether it CHANGED from
+// the previous baseline. An empty baseline is only ever
+// established, never treated as a change: a tick that finds
+// no baseline seeds it and reports no change, so a follower
+// window is never moved because of a missing baseline.
+func (sess *syncSession) noteMasterGeometry(pl winmgr.Placement, scr winmgr.Rect) bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.lastMasterPl == nil || sess.lastMasterScr == nil {
+		sess.lastMasterPl = &pl
+		sess.lastMasterScr = &scr
+		return false
+	}
+	if winmgr.PlacementsEqual(*sess.lastMasterPl, pl) && *sess.lastMasterScr == scr {
+		return false
+	}
+	sess.lastMasterPl = &pl
+	sess.lastMasterScr = &scr
+	return true
+}
+
+// refreshMirrorBaseline re-reads the master window's actual
+// geometry into the session's mirror baseline. Arrange and
+// restore call it when they finish (they hold winMu), so the
+// mirror's next tick compares against the post-layout
+// reality instead of undoing the layout. Identity is
+// re-verified before the window is read.
+func (s *SyncService) refreshMirrorBaseline() {
+	sess := s.current()
+	if sess == nil {
 		return
 	}
-	if winmgr.WindowOwnerPID(sess.masterHWND) != sess.master.PID {
+	sess.mu.Lock()
+	hwnd := sess.masterHWND
+	sess.mu.Unlock()
+	if hwnd == 0 || s.ownerPID(hwnd) != sess.master.PID {
 		return
 	}
-	pl, err := winmgr.GetPlacement(sess.masterHWND)
-	if err != nil {
-		return
-	}
-	scr, err := winmgr.WindowScreenRect(sess.masterHWND)
+	pl, scr, err := s.geometryOf(hwnd)
 	if err != nil {
 		return
 	}
 	sess.mu.Lock()
-	if sess.lastMasterPl != nil && winmgr.PlacementsEqual(*sess.lastMasterPl, pl) &&
-		sess.lastMasterScr != nil && *sess.lastMasterScr == scr {
-		sess.mu.Unlock()
-		return
-	}
 	sess.lastMasterPl = &pl
 	sess.lastMasterScr = &scr
 	sess.mu.Unlock()
+}
+
+func (s *SyncService) mirrorOnce(sess *syncSession) {
+	// Serialized with arrange/restore: the mirror never
+	// moves windows while a layout operation is applying,
+	// and a layout operation never races a mirror tick.
+	s.winMu.Lock()
+	defer s.winMu.Unlock()
+	// No mirroring while the session is not fully live:
+	// manual pause, system pause, starting, stopping and
+	// torn-down sessions leave every window alone, so the
+	// user can arrange windows while paused without the
+	// mirror fighting the layout.
+	if !sess.live() {
+		return
+	}
+	if !s.instances.VerifySyncIdentity(sess.master) {
+		return
+	}
+	if s.ownerPID(sess.masterHWND) != sess.master.PID {
+		return
+	}
+	pl, scr, err := s.geometryOf(sess.masterHWND)
+	if err != nil {
+		return
+	}
+	if !sess.noteMasterGeometry(pl, scr) {
+		return
+	}
 
 	for id, hwnd := range sess.followerHWNDs {
 		w := sess.followerByID(id)
@@ -291,7 +370,7 @@ func (s *SyncService) mirrorOnce(sess *syncSession) {
 		if !ok || !s.instances.VerifySyncIdentity(info) {
 			continue
 		}
-		if winmgr.WindowOwnerPID(hwnd) != info.PID {
+		if s.ownerPID(hwnd) != info.PID {
 			continue
 		}
 		fpl, err := winmgr.GetPlacement(hwnd)
@@ -300,7 +379,7 @@ func (s *SyncService) mirrorOnce(sess *syncSession) {
 		}
 		screen, placement := winmgr.PlanWindowMirror(pl, scr, fpl)
 		if screen != nil {
-			_ = winmgr.SetWindowRect(hwnd, *screen)
+			_ = s.applyWindowRect(hwnd, *screen)
 		} else if placement != nil {
 			_ = s.setWindowPlacement(hwnd, *placement)
 		}
