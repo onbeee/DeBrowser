@@ -13,6 +13,18 @@ export interface ApplySearchResult {
     "failedNodes": number;
 }
 
+/**
+ * BindingView is one instance's binding for display: the node
+ * it uses and the listener port dedicated to it.
+ */
+export interface BindingView {
+    "instanceId": string;
+    "nodeId": string;
+    "nodeName": string;
+    "sourceName": string;
+    "listenPort": number;
+}
+
 export interface BookmarkInstanceInfo {
     "id": string;
     "name": string;
@@ -83,6 +95,15 @@ export interface ClientEventInput {
     "status": string;
     "userMessage": string;
     "metadata": { [_ in string]?: string } | null;
+}
+
+/**
+ * CoreStatusView is the core's state for the page header.
+ */
+export interface CoreStatusView {
+    "running": boolean;
+    "version": string;
+    "message": string;
 }
 
 /**
@@ -207,6 +228,41 @@ export interface LogExportInfo {
      */
     "latestDate": string;
     "recordCount": number;
+}
+
+/**
+ * NodeTestResultView is one node's connectivity test outcome:
+ * OK with the measured delay, or not OK (unreachable or timed
+ * out). Results are display data only — nothing is persisted.
+ */
+export interface NodeTestResultView {
+    "nodeId": string;
+    "ok": boolean;
+    "delayMs": number;
+}
+
+/**
+ * NodeView is one node for the node list; the source name rides
+ * along so same-named nodes from different sources stay
+ * distinguishable.
+ */
+export interface NodeView {
+    "id": string;
+    "sourceId": string;
+    "sourceName": string;
+    "name": string;
+    "type": string;
+}
+
+/**
+ * SourceView is one imported source plus its node count.
+ */
+export interface SourceView {
+    "id": string;
+    "name": string;
+    "kind": string;
+    "nodeCount": number;
+    "createdAt": string;
 }
 
 /**

@@ -619,6 +619,20 @@ func (s *InstanceService) startInstance(id string, op *logging.Operation) error 
 	s.rtMu.Unlock()
 
 	args := []string{"--user-data-dir=" + launchDir}
+	// Proxy module: an instance bound to a proxy node launches
+	// with the core listener dedicated to it. The hook refuses
+	// the launch when the binding cannot be served (core not
+	// running, listener down) — a bound instance never silently
+	// falls back to a direct connection.
+	if s.ProxyPortFor != nil {
+		port, perr := s.ProxyPortFor(id)
+		if perr != nil {
+			return fail(perr)
+		}
+		if port > 0 {
+			args = append(args, "--proxy-server=http://127.0.0.1:"+strconv.Itoa(port))
+		}
+	}
 	// Stage 10: every launch asks the browser to open a
 	// debugging port bound to loopback only, so the instance
 	// CAN join multi-instance synchronization. Allocation or

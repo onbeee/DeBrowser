@@ -163,7 +163,7 @@ func run() error {
 	// the current scope reads or writes credentials through a
 	// user-facing service, and the file is never deleted or
 	// cleared by this cleanup.
-	_, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
+	vault, vaultRecovery, err := secrets.Open(cfg.Layout.SecretsFile)
 	if err != nil {
 		logger.Error("open credential vault failed", "error", err)
 		return failStart("打开凭据 Vault 失败", err)
@@ -191,7 +191,15 @@ func run() error {
 	syncService := service.NewSyncService(instanceService)
 	syncService.Auditor = logSystem
 
-	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, logger, assets)
+	// Proxy module (redesign): one service owns the core, the
+	// imported sources/nodes and the instance bindings; the
+	// instance service consults it at launch time through the
+	// ProxyPortFor hook.
+	proxyService := service.NewProxyService(db, cfg.Layout, vault, logger)
+	proxyService.Auditor = logSystem
+	instanceService.ProxyPortFor = proxyService.ProxyPortForInstance
+
+	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, proxyService, logger, assets)
 	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)
 	runErr := wailsApp.Run()
 	if runErr != nil {

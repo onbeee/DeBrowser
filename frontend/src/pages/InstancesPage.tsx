@@ -13,7 +13,10 @@ import {
 import {
   BrowserService,
   InstanceService,
+  ProxyService,
+  type BindingView,
   type BrowserView,
+  type NodeView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance, ProfileDirInfo } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { useAppStore } from "../stores/useAppStore";
@@ -21,6 +24,7 @@ import { notify, notifyError, notifySuccess } from "../stores/useNotificationSto
 import { classifyCounts } from "../lib/operationResult";
 import type { NotificationItem } from "../lib/notifications";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import ProxyNodePicker from "../components/ProxyNodePicker";
 import {
   kernelOptionLabels,
   planBatch,
@@ -75,9 +79,15 @@ interface FormState {
   // Edit: "rename" | "swap" (no default option on edit).
   profileMode: string;
   profileName: string;
+  // proxyNodeId is the ID of the proxy node this instance is
+  // bound to ("" = 不使用代理). The binding itself lives in
+  // the proxy module's single binding table: this form and the
+  // proxy page read and write the same relation through
+  // ProxyService.
+  proxyNodeId: string;
 }
 
-const EMPTY_FORM: FormState = { name: "", browserId: "", profileMode: "default", profileName: "" };
+const EMPTY_FORM: FormState = { name: "", browserId: "", profileMode: "default", profileName: "", proxyNodeId: "" };
 
 type PendingDelete = { instance: Instance; withProfile: boolean } | null;
 
@@ -163,6 +173,10 @@ export default function InstancesPage() {
   const [batchCreate, setBatchCreate] = useState<BatchCreateState | null>(null);
   const [batchCreateError, setBatchCreateError] = useState<string | null>(null);
   const [batchCreateBusy, setBatchCreateBusy] = useState(false);
+  // Proxy binding display + form data (from the proxy module's
+  // single binding relation; see FormState.proxyNodeId).
+  const [proxyNodes, setProxyNodes] = useState<NodeView[]>([]);
+  const [proxyBindings, setProxyBindings] = useState<BindingView[]>([]);
   // Instance-file picker state (inside the create/edit form).
   const [profilePicker, setProfilePicker] = useState<ProfilePickerState | null>(null);
   const [pickerBusy, setPickerBusy] = useState(false);
@@ -180,6 +194,14 @@ export default function InstancesPage() {
     } catch {
       // A failed background refresh keeps the last known list;
       // the next poll or action retries.
+    }
+    // Bindings changed on the proxy page show up here too:
+    // both pages read the same relation.
+    try {
+      const bds = await ProxyService.ListBindings();
+      setProxyBindings(bds ?? []);
+    } catch {
+      // Keep the last known bindings on failure.
     }
   }, []);
 
@@ -214,6 +236,16 @@ export default function InstancesPage() {
       // stays false, editing stays disabled, and nothing about
       // existing associations is inferred or touched.
       setBrowsersError(err instanceof Error ? err.message : String(err));
+    }
+    // Proxy nodes + bindings for the table column and the form
+    // selector. A failure here only empties the proxy display;
+    // it never touches instance or kernel data.
+    try {
+      const [nds, bds] = await Promise.all([ProxyService.ListNodes(), ProxyService.ListBindings()]);
+      setProxyNodes(nds ?? []);
+      setProxyBindings(bds ?? []);
+    } catch {
+      // Keep the last known proxy data.
     }
   }, []);
 
@@ -258,6 +290,10 @@ export default function InstancesPage() {
       browserId: browsers.some((b) => b.id === inst.kernelId) ? inst.kernelId : "",
       profileMode: "rename",
       profileName: profileFolderOf(inst),
+      // The current binding from the shared relation; a binding
+      // whose node has vanished cannot occur (the database
+      // cascades), so a missing entry simply means unbound.
+      proxyNodeId: proxyBindings.find((b) => b.instanceId === inst.id)?.nodeId ?? "",
     });
     setFormError(null);
     setProfileNote(null);
@@ -287,6 +323,7 @@ export default function InstancesPage() {
     setBusy(true);
     const opId = newOperationId();
     const action = form.id ? "instance.update" : "instance.create";
+    let savedInstanceID = "";
     try {
       if (form.id && editing) {
         // Translate the form's instance-file choice into a backend
@@ -311,6 +348,7 @@ export default function InstancesPage() {
         });
         notifySuccess(`实例已更新：${form.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已更新：${form.name}`, "浏览器实例", action);
+        savedInstanceID = form.id;
       } else {
         const created = await InstanceService.CreateInstance(opId, {
           name: form.name,
@@ -320,6 +358,27 @@ export default function InstancesPage() {
         });
         notifySuccess(`实例已创建：${created.name}`, { operationId: opId, important: true });
         recordOperationFeedback(opId, true, `实例已创建：${created.name}`, "浏览器实例", action);
+        savedInstanceID = created.id;
+      }
+      // Sync the proxy binding to the form's choice — the same
+      // single relation the proxy page writes. The instance
+      // itself is already saved; a binding failure is reported
+      // separately and never rolls the instance back.
+      const currentNodeID = proxyBindings.find((b) => b.instanceId === savedInstanceID)?.nodeId ?? "";
+      if (savedInstanceID && form.proxyNodeId !== currentNodeID) {
+        const bindOpId = newOperationId();
+        try {
+          if (form.proxyNodeId === "") {
+            await ProxyService.ClearBinding(bindOpId, savedInstanceID);
+          } else {
+            await ProxyService.SetBinding(bindOpId, savedInstanceID, form.proxyNodeId);
+          }
+          recordOperationFeedback(bindOpId, true, `实例代理已更新：${form.name}`, "代理", "proxy.binding_set");
+        } catch (bindErr) {
+          const message = bindErr instanceof Error ? bindErr.message : String(bindErr);
+          notifyError(`实例已保存，但代理设置失败：${message}`, { operationId: bindOpId, important: true });
+          recordOperationFeedback(bindOpId, false, `实例代理设置失败：${message}`, "代理", "proxy.binding_set");
+        }
       }
       setForm(null);
       setEditing(null);
@@ -720,7 +779,10 @@ export default function InstancesPage() {
                     </td>
                     <td className="px-4 py-2.5 font-medium">{inst.name}</td>
                     <td className="px-4 py-2.5 text-center text-(--text-dim)">
-                      {inst.proxyId ? "已设置（历史关联）" : "未设置"}
+                      {(() => {
+                        const b = proxyBindings.find((x) => x.instanceId === inst.id);
+                        return b ? `${b.nodeName}（${b.sourceName}）` : "未设置";
+                      })()}
                     </td>
                     <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       <span title={inst.kernelExecutablePath || undefined}>
@@ -854,6 +916,32 @@ export default function InstancesPage() {
                     （未关联登记内核）。不选择内核时此记录会保留；选择上方内核后将改为关联该登记。
                   </p>
                 ) : null}
+              </div>
+              <div>
+                <label className={labelCls}>代理节点</label>
+                <ProxyNodePicker
+                  nodes={proxyNodes}
+                  value={form.proxyNodeId}
+                  disabled={editingRunning}
+                  onChange={(nodeId) => setForm({ ...form, proxyNodeId: nodeId })}
+                  ariaLabel="代理节点"
+                />
+                {proxyNodes.length === 0 && (
+                  <p className="mt-1 text-xs text-(--text-faint)">
+                    尚未导入任何代理节点。
+                    <button
+                      type="button"
+                      className="text-(--accent) underline underline-offset-2"
+                      onClick={() => {
+                        setForm(null);
+                        setEditing(null);
+                        setPage("proxyconfig");
+                      }}
+                    >
+                      前往「代理配置」页面添加
+                    </button>
+                  </p>
+                )}
               </div>
               <div>
                 <label className={labelCls}>实例文件</label>

@@ -29,7 +29,7 @@
 
 ## 当前有效表
 
-当前产品实际使用的数据表共五张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`。
+当前产品实际使用的数据表共八张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`、`proxy_sources`、`proxy_nodes`、`instance_proxy_bindings`。
 
 ### `browser_instances`
 
@@ -51,6 +51,8 @@
 ### `bookmark_nodes`
 
 DeBrowser 书签资源库（migration 0014）：文件夹与书签组成的树。列：`id`、`kind`（CHECK：`bookmark` / `folder`）、`name`、`url`（文件夹为空串）、`parent_id`（外键 → `bookmark_nodes(id)`；NULL 表示根级）、`sort_order`、时间戳。`(parent_id, sort_order, created_at)` 索引供逐层有序读取。文件夹循环引用由服务层校验阻止（不得移入自身或其后代）；删除文件夹由服务层在事务内自底向上删除整个子树，外键保证不留孤儿。
+
+代理模块（migration 0015，重新设计）：三张小表。`proxy_sources` 是导入的配置来源（订阅或本地文件；订阅 URL 只存于凭据 Vault，本表只存 `secret_ref` 引用；本地文件存 DeBrowser 副本的文件名）。`proxy_nodes` 是导入时从来源中解析出的节点，节点完整定义以 JSON 原文存于 `config_json`，节点身份即行本身——不同来源的同名节点是不同行（`UNIQUE(source_id, name)`）。`instance_proxy_bindings` 是全产品唯一一份实例 → 节点绑定关系（代理页面与实例页面共用），`listen_port` 在绑定创建时分配并在绑定生命周期内保持不变；实例或节点被删除时绑定级联删除。历史代理表（`proxies`、`subscriptions`、`mihomo_configs` 等）与 `browser_instances.proxy_id` 遗留列保持原样，不被本模块读写。
 
 资源库与各实例 Profile 中的真实书签（Chromium `Bookmarks` 文件）完全独立：资源库的增删改不自动影响任何实例，实例书签的修改也不回写资源库；分发只通过同步操作显式进行。实例真实书签不进数据库，见 [ARCHITECTURE.md](ARCHITECTURE.md) 的书签机制说明。
 
@@ -119,6 +121,7 @@ migration 0003 的历史扁平书签表：`instance_id` 外键 → `browser_inst
 | 12 | `0012_external_browsers_path_only.sql` | 重建 `external_browsers` 为纯路径登记（去验证列，既有登记保留） |
 | 13 | `0013_instance_runtime.sql` | `instance_runtime` 与 `profile_counter` |
 | 14 | `0014_bookmark_library.sql` | `bookmark_nodes`（书签资源库树） |
+| 15 | `0015_proxy_module.sql` | `proxy_sources`、`proxy_nodes`、`instance_proxy_bindings`（代理模块重新设计） |
 
 涉及表重建的迁移（0005、0007、0012 等）在迁移事务内先抢救进入的链接再恢复，并由填充夹具的升级测试验证数据保留、`PRAGMA foreign_key_check` 与 `PRAGMA integrity_check`。
 

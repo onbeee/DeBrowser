@@ -62,6 +62,13 @@ type InstanceService struct {
 	// auditor, when set, receives one operation-audit record per
 	// user-initiated mutation (Stage 5B).
 	Auditor *logging.System
+	// ProxyPortFor resolves the loopback proxy port a starting
+	// instance must use (0 = direct connection), or an error
+	// refusing the launch when the instance is bound to a proxy
+	// node but the proxy core cannot serve it. Wired by main to
+	// the proxy service; nil means no proxy module, every
+	// instance connects directly.
+	ProxyPortFor func(instanceID string) (int, error)
 	// deleteRecord removes an instance row. It is a field so tests
 	// can inject a failure into the middle of
 	// DeleteInstanceAndProfile and verify the profile restore.
