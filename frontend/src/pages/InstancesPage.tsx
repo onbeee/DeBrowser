@@ -82,8 +82,10 @@ interface FormState {
   // Proxy binding (Stage 6C): proxyKey is "" for no proxy, else
   // "<sourceId><nodeName>" identifying one node of one source.
   // The binding is applied through ProxyService after the
-  // instance itself is saved.
+  // instance itself is saved. proxyRouteMode is the binding's
+  // routing mode ("rule" | "global" | "direct").
   proxyKey: string;
+  proxyRouteMode: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -92,7 +94,23 @@ const EMPTY_FORM: FormState = {
   profileMode: "default",
   profileName: "",
   proxyKey: "",
+  proxyRouteMode: "rule",
 };
+
+// The three routing modes of a proxy binding, in display order.
+const ROUTE_MODE_OPTIONS: { value: string; label: string; hint: string }[] = [
+  {
+    value: "rule",
+    label: "规则分流",
+    hint: "按规则分流：局域网与国内服务直连，广告等规则命中的流量被拦截，其余走所选节点。",
+  },
+  { value: "global", label: "全局代理", hint: "全部流量都走所选节点。" },
+  {
+    value: "direct",
+    label: "直连",
+    hint: "全部流量直连，不经过所选节点。绑定保留，之后切换模式即可恢复使用节点。",
+  },
+];
 
 // proxyNodeKey identifies one node of one source in the form's
 // select. Node names may contain almost anything, so the key uses
@@ -234,7 +252,11 @@ export default function InstancesPage() {
           setFormBinding(binding);
           setForm((current) =>
             current && current.id === instanceId
-              ? { ...current, proxyKey: proxyNodeKey(binding.sourceId, binding.nodeName) }
+              ? {
+                  ...current,
+                  proxyKey: proxyNodeKey(binding.sourceId, binding.nodeName),
+                  proxyRouteMode: binding.routeMode || "rule",
+                }
               : current,
           );
         } else {
@@ -358,6 +380,7 @@ export default function InstancesPage() {
       profileMode: "rename",
       profileName: profileFolderOf(inst),
       proxyKey: "",
+      proxyRouteMode: "rule",
     });
     setFormError(null);
     setProfileNote(null);
@@ -397,11 +420,20 @@ export default function InstancesPage() {
       try {
         if (!desired) {
           if (formBinding) await ProxyService.ClearBinding(opId, instanceId);
-        } else if (
-          !formBinding ||
-          proxyNodeKey(formBinding.sourceId, formBinding.nodeName) !== form.proxyKey
-        ) {
-          await ProxyService.SetBinding(opId, instanceId, desired.sourceId, desired.nodeName);
+        } else {
+          if (
+            !formBinding ||
+            proxyNodeKey(formBinding.sourceId, formBinding.nodeName) !== form.proxyKey
+          ) {
+            await ProxyService.SetBinding(opId, instanceId, desired.sourceId, desired.nodeName);
+          }
+          // SetBinding preserves the recorded mode (default rule
+          // for a new binding); apply the form's mode on top when
+          // it differs.
+          const currentMode = formBinding?.routeMode || "rule";
+          if (form.proxyRouteMode !== currentMode) {
+            await ProxyService.SetRouteMode(opId, instanceId, form.proxyRouteMode);
+          }
         }
         return null;
       } catch (e) {
@@ -1027,6 +1059,26 @@ export default function InstancesPage() {
                       name={formSelectedNode?.name ?? formSelectedProxy.nodeName}
                       state={formSelectedState}
                     />
+                  </div>
+                )}
+                {form.proxyKey && (
+                  <div className="mt-2">
+                    <div className={modeGroupCls} role="group" aria-label="路由模式">
+                      {ROUTE_MODE_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          aria-pressed={form.proxyRouteMode === opt.value}
+                          className={modeButtonCls(form.proxyRouteMode === opt.value)}
+                          onClick={() => setForm({ ...form, proxyRouteMode: opt.value })}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-1 text-xs text-(--text-faint)">
+                      {ROUTE_MODE_OPTIONS.find((o) => o.value === form.proxyRouteMode)?.hint}
+                    </p>
                   </div>
                 )}
                 {!proxyNodesLoaded ? (

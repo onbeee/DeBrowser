@@ -20,8 +20,8 @@ func TestMigration15ProxyTables(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 15 {
-		t.Fatalf("AppliedVersion = %d (err %v), want 15", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 16 {
+		t.Fatalf("AppliedVersion = %d (err %v), want 16", v, err)
 	}
 	for _, table := range []string{"proxy_sources", "instance_proxy_bindings"} {
 		var name string

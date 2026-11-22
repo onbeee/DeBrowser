@@ -43,8 +43,8 @@ func TestMigration14AddsBookmarkLibraryPreservingLegacyBookmarks(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 15 {
-		t.Fatalf("AppliedVersion = %d (err %v), want 15", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 16 {
+		t.Fatalf("AppliedVersion = %d (err %v), want 16", v, err)
 	}
 	var legacy string
 	if err := db.SQL().QueryRowContext(ctx,

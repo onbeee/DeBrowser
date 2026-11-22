@@ -19,7 +19,7 @@ func TestMigration10FreshDatabase(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 15 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 16 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 11", v, err)
 	}
 	var name string

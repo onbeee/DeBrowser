@@ -176,6 +176,7 @@ type BindingView struct {
 	SourceName    string `json:"sourceName"`
 	NodeName      string `json:"nodeName"`
 	Port          int    `json:"port"`
+	RouteMode     string `json:"routeMode"`     // "rule" | "global" | "direct"
 	NodeState     string `json:"nodeState"`     // "ok" | "down" | "missing" | "unknown"
 	ListenerState string `json:"listenerState"` // "ok" | "down" | "unknown"
 }
@@ -483,6 +484,7 @@ func (s *ProxyService) buildConfigInput(ctx context.Context, state proxyConfigSt
 			ProviderName: provider,
 			NodeName:     b.NodeName,
 			Port:         b.Port,
+			RouteMode:    b.RouteMode,
 		})
 	}
 	return input, nil
@@ -1220,7 +1222,10 @@ func (s *ProxyService) nodeState(ctx context.Context, b model.InstanceProxyBindi
 func (s *ProxyService) bindingView(ctx context.Context, b model.InstanceProxyBinding) BindingView {
 	view := BindingView{
 		InstanceID: b.InstanceID, SourceID: b.SourceID, NodeName: b.NodeName,
-		Port: b.Port, NodeState: "unknown", ListenerState: "unknown",
+		Port: b.Port, RouteMode: b.RouteMode, NodeState: "unknown", ListenerState: "unknown",
+	}
+	if view.RouteMode == "" {
+		view.RouteMode = model.RouteModeRule
 	}
 	providerName := ""
 	if src, err := s.store.GetProxySource(ctx, b.SourceID); err == nil {
@@ -1327,8 +1332,12 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 		}
 	}
 	port := 0
+	routeMode := model.RouteModeRule
 	if existing, err := s.store.GetBinding(ctx, instanceID); err == nil {
 		port = existing.Port // an instance keeps its listener port across changes
+		if existing.RouteMode != "" {
+			routeMode = existing.RouteMode // and its routing mode: re-binding a node never resets it
+		}
 	} else {
 		p, err := s.allocatePort(ctx)
 		if err != nil {
@@ -1338,6 +1347,7 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 	}
 	proposed := model.InstanceProxyBinding{
 		InstanceID: instanceID, SourceID: sourceID, NodeName: nodeName, Port: port,
+		RouteMode: routeMode,
 	}
 	state, err := s.loadConfigState(ctx)
 	if err != nil {
@@ -1421,6 +1431,64 @@ func (s *ProxyService) ClearBinding(operationID string, instanceID string) error
 	}()
 	finishOp(op, err)
 	return err
+}
+
+// SetRouteMode changes one bound instance's routing mode
+// (rule | global | direct). The mode is part of the binding
+// record; the generated configuration derives the instance's
+// sub-rules from it. Same consistency discipline as the other
+// binding mutations: the proposed configuration is applied
+// first (hot-reloaded into a running core, selections
+// re-applied), the record is written only after the core
+// accepted it, and a failed record write restores the previous
+// configuration.
+func (s *ProxyService) SetRouteMode(operationID string, instanceID string, routeMode string) (BindingView, error) {
+	op := beginOp(s.Auditor, operationID, "代理", "proxy.binding_route_mode", "browser_instance", instanceID)
+	view, err := s.setRouteMode(instanceID, routeMode)
+	finishOp(op, err)
+	return view, err
+}
+
+func (s *ProxyService) setRouteMode(instanceID string, routeMode string) (BindingView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	switch routeMode {
+	case model.RouteModeRule, model.RouteModeGlobal, model.RouteModeDirect:
+	default:
+		return BindingView{}, fmt.Errorf("无效的路由模式：%s", routeMode)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.store.GetBinding(ctx, instanceID)
+	if errors.Is(err, store.ErrNotFound) {
+		return BindingView{}, fmt.Errorf("该实例尚未绑定代理节点，无法设置路由模式")
+	}
+	if err != nil {
+		return BindingView{}, err
+	}
+	if b.RouteMode == routeMode {
+		return s.bindingView(ctx, b), nil
+	}
+	state, err := s.loadConfigState(ctx)
+	if err != nil {
+		return BindingView{}, err
+	}
+	for i := range state.bindings {
+		if state.bindings[i].InstanceID == instanceID {
+			state.bindings[i].RouteMode = routeMode
+		}
+	}
+	if err := s.regenerateState(ctx, state); err != nil {
+		return BindingView{}, fmt.Errorf("核心配置更新失败，路由模式未修改：%w", err)
+	}
+	if err := s.store.UpdateBindingRouteMode(ctx, instanceID, routeMode); err != nil {
+		if rerr := s.regenerate(ctx); rerr != nil {
+			return BindingView{}, fmt.Errorf("路由模式保存失败，且运行配置恢复失败（保存错误：%v；恢复错误：%v），请重启核心以恢复一致", err, rerr)
+		}
+		return BindingView{}, fmt.Errorf("路由模式保存失败，运行配置已恢复：%w", err)
+	}
+	b.RouteMode = routeMode
+	return s.bindingView(ctx, b), nil
 }
 
 // ProxyPortForInstance is the launch hook the instance service

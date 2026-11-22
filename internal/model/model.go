@@ -247,6 +247,14 @@ type ProxySource struct {
 	UpdatedAt    string `json:"updatedAt"`
 }
 
+// RouteMode values for InstanceProxyBinding.RouteMode: how one
+// bound instance's traffic is routed inside the core.
+const (
+	RouteModeRule   = "rule"   // per-instance sub-rules, bound node as fallback
+	RouteModeGlobal = "global" // everything via the bound node
+	RouteModeDirect = "direct" // everything direct
+)
+
 // InstanceProxyBinding is DeBrowser's own record of which proxy
 // node one browser instance uses (Stage 6C). The node is identified
 // by the source it belongs to plus the node's name inside that
@@ -259,6 +267,7 @@ type InstanceProxyBinding struct {
 	SourceID   string `json:"sourceId"`
 	NodeName   string `json:"nodeName"`
 	Port       int    `json:"port"`
+	RouteMode  string `json:"routeMode"`
 	CreatedAt  string `json:"createdAt"`
 	UpdatedAt  string `json:"updatedAt"`
 }

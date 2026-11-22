@@ -394,7 +394,12 @@ export default function ProxyConfigPage() {
                           <span className="text-(--text-faint)">→</span>
                           <NodeCapsule name={b.nodeName} state={asNodeState(b.nodeState)} />
                           <span className="text-xs text-(--text-faint)">
-                            {b.sourceName} · 本地端口 {b.port}
+                            {b.sourceName} · 本地端口 {b.port} ·{" "}
+                            {b.routeMode === "global"
+                              ? "全局代理"
+                              : b.routeMode === "direct"
+                                ? "直连"
+                                : "规则分流"}
                           </span>
                         </div>
                         {(b.nodeState === "missing" || b.nodeState === "down" || b.listenerState === "down") && (

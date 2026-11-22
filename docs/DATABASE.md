@@ -80,7 +80,7 @@ DeBrowser 重启后的重新识别逐项核验记录（PID 存在、创建时间
 
 ### `instance_proxy_bindings`
 
-实例代理绑定（Stage 6C，migration 0015）：每个使用代理的浏览器实例一行。列：`instance_id`（主键，外键 → `browser_instances(id)`，随实例删除级联）、`source_id`（外键 → `proxy_sources(id)`，无级联：有绑定的来源不能删除，服务层先行检查并明确提示）、`node_name`（节点在所属来源内的名称；节点身份由「来源 + 名称」共同确定，不同来源的同名节点不冲突）、`port`（该实例专属的本地监听端口，唯一）、时间戳。
+实例代理绑定（Stage 6C，migration 0015；`route_mode` 由 migration 0016 添加）：每个使用代理的浏览器实例一行。列：`instance_id`（主键，外键 → `browser_instances(id)`，随实例删除级联）、`source_id`（外键 → `proxy_sources(id)`，无级联：有绑定的来源不能删除，服务层先行检查并明确提示）、`node_name`（节点在所属来源内的名称；节点身份由「来源 + 名称」共同确定，不同来源的同名节点不冲突）、`port`（该实例专属的本地监听端口，唯一）、`route_mode`（路由模式，CHECK：`rule` / `global` / `direct`，默认 `rule`；决定生成的运行配置中该实例的子规则集内容）、时间戳。
 
 绑定是 DeBrowser 的业务数据，只存于本表，永不依赖 Mihomo 核心的 cache 保存；核心每次启动或配置重载后由服务按本表重新下达节点选择。订阅更新后原绑定节点消失时，绑定保留、界面标记不可用，永不静默回退到其他节点。
 

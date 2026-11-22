@@ -184,6 +184,21 @@ export function SetBinding(operationID: string, instanceID: string, sourceID: st
 }
 
 /**
+ * SetRouteMode changes one bound instance's routing mode
+ * (rule | global | direct). The mode is part of the binding
+ * record; the generated configuration derives the instance's
+ * sub-rules from it. Same consistency discipline as the other
+ * binding mutations: the proposed configuration is applied
+ * first (hot-reloaded into a running core, selections
+ * re-applied), the record is written only after the core
+ * accepted it, and a failed record write restores the previous
+ * configuration.
+ */
+export function SetRouteMode(operationID: string, instanceID: string, routeMode: string): $CancellablePromise<$models.BindingView> {
+    return $Call.ByID(698322929, operationID, instanceID, routeMode);
+}
+
+/**
  * StartCore starts the core. It is the ONLY way the core starts:
  * an explicit user action on the proxy page. DeBrowser startup
  * never starts the core, and no other operation starts it as a

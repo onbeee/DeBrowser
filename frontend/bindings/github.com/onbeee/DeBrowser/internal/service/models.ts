@@ -26,6 +26,11 @@ export interface BindingView {
     "port": number;
 
     /**
+     * "rule" | "global" | "direct"
+     */
+    "routeMode": string;
+
+    /**
      * "ok" | "down" | "missing" | "unknown"
      */
     "nodeState": string;

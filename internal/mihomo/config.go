@@ -33,12 +33,15 @@ type SourceInput struct {
 // BindingInput is one browser instance's proxy binding as the
 // generated configuration needs it: which provider its node comes
 // from, the node's name inside that provider and the loopback
-// listener port assigned to the instance.
+// listener port assigned to the instance. RouteMode is the
+// binding's recorded routing mode ("rule" | "global" | "direct";
+// empty means "rule"): it decides the instance's sub-rules.
 type BindingInput struct {
 	InstanceID   string
 	ProviderName string
 	NodeName     string
 	Port         int
+	RouteMode    string
 }
 
 // ConfigInput is everything Generate needs.
@@ -61,6 +64,78 @@ func shortID(id string) string {
 
 // GroupName is the per-instance proxy select group name.
 func GroupName(instanceID string) string { return "inst-" + shortID(instanceID) }
+
+// SubRuleName is the per-instance sub-rules set name: the
+// instance listener's `rule` target. Its final MATCH line lands
+// on the instance's own group (modes rule/global) or on DIRECT
+// (mode direct), so instances share the rule-providers but never
+// each other's routing decision.
+func SubRuleName(instanceID string) string { return "sub-" + GroupName(instanceID) }
+
+// ruleProviderDef is one shared rule-provider of the generated
+// configuration. The list is fixed by the product: every
+// rule-mode instance routes over the same providers (the core
+// downloads and caches them once, under ./rules/), and the
+// per-instance sub-rules differ only in which group their
+// proxy-bound sets and final MATCH point at.
+type ruleProviderDef struct {
+	Name string // provider name, referenced by RULE-SET lines
+	URL  string
+	File string // cache file basename under ./rules/
+}
+
+var sharedRuleProviders = []ruleProviderDef{
+	{"规则修正", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Direct/Direct.yaml", "direct"},
+	{"屏蔽服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/BlockHttpDNS/BlockHttpDNS.yaml", "block-http-dns"},
+	{"禁止广告", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/AdvertisingLite/AdvertisingLite_Classical.yaml", "advertising-lite"},
+	{"反劫服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Hijacking/Hijacking.yaml", "hijacking"},
+	{"隐私保护", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Privacy/Privacy_Classical.yaml", "privacy"},
+	{"智能服务", "https://raw.githubusercontent.com/KPP69/CF/main/Clash/Rule/Ai.yaml", "ai"},
+	{"谷歌服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml", "google"},
+	{"推特服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Twitter/Twitter.yaml", "twitter"},
+	{"飞机服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Telegram/Telegram.yaml", "telegram"},
+	{"加密服务", "https://raw.githubusercontent.com/KPP69/CF/main/Clash/Rule/Crypto.yaml", "crypto"},
+	{"微软服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Microsoft/Microsoft.yaml", "microsoft"},
+	{"国际服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Proxy/Proxy_Classical.yaml", "proxy"},
+	{"国内服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Classical.yaml", "china-max"},
+	{"局域网络", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml", "lan"},
+}
+
+// subRuleLines renders one instance's sub-rules from its routing
+// mode. In rule mode the shared sets run in their fixed order —
+// direct-fixes first, block sets next, the instance's group for
+// everything proxy-bound, China/LAN direct — and the final MATCH
+// lands on the instance's own group, so a request no set claims
+// still uses exactly the instance's bound node. Mode values are
+// model.RouteMode* (the database CHECK constrains them).
+func subRuleLines(b BindingInput) []string {
+	group := GroupName(b.InstanceID)
+	switch b.RouteMode {
+	case "global":
+		return []string{"MATCH," + group}
+	case "direct":
+		return []string{"MATCH,DIRECT"}
+	default: // "rule" (and the zero value)
+		return []string{
+			"RULE-SET,规则修正,DIRECT",
+			"RULE-SET,屏蔽服务,REJECT",
+			"RULE-SET,禁止广告,REJECT",
+			"RULE-SET,反劫服务,REJECT",
+			"RULE-SET,隐私保护,REJECT",
+			"RULE-SET,智能服务," + group,
+			"RULE-SET,谷歌服务," + group,
+			"RULE-SET,推特服务," + group,
+			"RULE-SET,飞机服务," + group,
+			"RULE-SET,加密服务," + group,
+			"RULE-SET,微软服务," + group,
+			"RULE-SET,国际服务," + group,
+			"RULE-SET,国内服务,DIRECT",
+			"RULE-SET,局域网络,DIRECT",
+			"GEOIP,CN,DIRECT,no-resolve",
+			"MATCH," + group,
+		}
+	}
+}
 
 // DelayGroupName is the hidden per-source select group used only
 // for node delay tests (it exists even when no instance is bound
@@ -98,6 +173,11 @@ func Generate(in ConfigInput) (string, error) {
 	for _, b := range bindings {
 		if b.Port <= 0 || b.Port > 65535 {
 			return "", fmt.Errorf("mihomo: listener port %d out of range", b.Port)
+		}
+		switch b.RouteMode {
+		case "", "rule", "global", "direct":
+		default:
+			return "", fmt.Errorf("mihomo: binding for instance %s has invalid route mode %q", b.InstanceID, b.RouteMode)
 		}
 	}
 
@@ -196,13 +276,42 @@ func Generate(in ConfigInput) (string, error) {
 		w.WriteString("listeners:\n")
 		for _, b := range bindings {
 			name := GroupName(b.InstanceID)
-			// The listener hands its traffic straight to the
-			// instance's own group: the simplest forwarding the
-			// core offers. DeBrowser keeps no rule set of its own;
-			// the group (REJECT by default, the bound node once
-			// DeBrowser applies it) is the whole routing decision.
-			fmt.Fprintf(&w, "  - name: %s\n    type: mixed\n    listen: \"127.0.0.1\"\n    port: %d\n    proxy: %s\n",
-				yq(name), b.Port, yq(name))
+			// The listener hands its traffic to the instance's
+			// own sub-rules (never straight to a group): the
+			// sub-rules are what makes the routing mode real —
+			// shared rule sets for mode rule, a single MATCH to
+			// the instance's group for mode global, a single
+			// MATCH,DIRECT for mode direct.
+			fmt.Fprintf(&w, "  - name: %s\n    type: mixed\n    listen: \"127.0.0.1\"\n    port: %d\n    rule: %s\n",
+				yq(name), b.Port, yq(SubRuleName(b.InstanceID)))
+		}
+	}
+
+	anyRuleMode := false
+	for _, b := range bindings {
+		if b.RouteMode == "" || b.RouteMode == "rule" {
+			anyRuleMode = true
+			break
+		}
+	}
+	if anyRuleMode {
+		// The shared rule-providers exist only when at least one
+		// instance can reference them; the core downloads and
+		// caches them once for all rule-mode instances.
+		w.WriteString("rule-providers:\n")
+		for _, rp := range sharedRuleProviders {
+			fmt.Fprintf(&w, "  %s:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    path: %s\n    interval: 86400\n",
+				yq(rp.Name), yq(rp.URL), yq("./rules/"+rp.File+".yaml"))
+		}
+	}
+
+	if len(bindings) > 0 {
+		w.WriteString("sub-rules:\n")
+		for _, b := range bindings {
+			fmt.Fprintf(&w, "  %s:\n", yq(SubRuleName(b.InstanceID)))
+			for _, line := range subRuleLines(b) {
+				fmt.Fprintf(&w, "    - %s\n", yq(line))
+			}
 		}
 	}
 

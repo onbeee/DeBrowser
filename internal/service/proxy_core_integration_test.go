@@ -163,11 +163,15 @@ func handleSocksConn(c net.Conn, echoPort int) {
 // probeVia fetches through an instance listener and returns the
 // echo tag that answered. A rejected/blocked route is an error.
 func probeVia(port int) (string, error) {
+	return probeViaURL(port, "http://127.0.0.1:9/")
+}
+
+func probeViaURL(port int, rawURL string) (string, error) {
 	tr := &http.Transport{
 		Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)}),
 	}
 	client := &http.Client{Transport: tr, Timeout: 6 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:9/")
+	resp, err := client.Get(rawURL)
 	if err != nil {
 		return "", err
 	}
@@ -186,11 +190,19 @@ func probeVia(port int) (string, error) {
 // "must be blocked") or the deadline passes.
 func probeWant(t *testing.T, port int, want string) {
 	t.Helper()
+	probeWantURL(t, port, "http://127.0.0.1:9/", want)
+}
+
+// probeWantURL is probeWant against an explicit target URL (the
+// route-mode test needs a target a DIRECT route can actually
+// reach, which the port-9 probe target is not).
+func probeWantURL(t *testing.T, port int, rawURL, want string) {
+	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
 	var last string
 	var lastErr error
 	for time.Now().Before(deadline) {
-		last, lastErr = probeVia(port)
+		last, lastErr = probeViaURL(port, rawURL)
 		if want == "" && lastErr != nil {
 			return
 		}
@@ -219,6 +231,13 @@ func writeSourceYAML(t *testing.T, path string, nodes ...string) []byte {
 func TestProxyCoreEndToEnd(t *testing.T) {
 	f := testProxyFixture(t)
 	f.installCore(t)
+	// Bindings default to route mode rule, so the generated
+	// configuration carries the shared rule-providers and a
+	// GEOIP sub-rule line: seed empty provider caches and the
+	// GeoIP database so this test's routing assertions depend
+	// only on group selection (every set empty → MATCH).
+	seedRuleCaches(t, f.cfg.Layout.Mihomo, false)
+	seedGeoIP(t, f.cfg.Layout.Mihomo)
 
 	echoA := startEcho(t, "VIA-A")
 	echoB := startEcho(t, "VIA-B")
@@ -934,4 +953,160 @@ func TestProxyAddFileSourceValidationFailureLeavesNothing(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("rejected import left files behind: %v", entries)
 	}
+}
+
+// seedRuleCaches pre-writes the shared rule-providers' cache
+// files in the core workdir so tests never depend on the
+// network or on whatever the live rule sets contain today.
+// Every set is empty; with lanLoopback the 局域网络 set also
+// claims 127.0.0.0/8 — the route-mode test uses that to prove a
+// rule-mode request to a loopback target goes DIRECT while a
+// global-mode request to the same target still uses its node.
+// Tests that only need the sub-rules to fall through to MATCH
+// pass false, keeping their routing independent of set content.
+func seedRuleCaches(t *testing.T, dir string, lanLoopback bool) {
+	t.Helper()
+	rulesDir := filepath.Join(dir, "rules")
+	if err := os.MkdirAll(rulesDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{"direct", "block-http-dns", "advertising-lite", "hijacking",
+		"privacy", "ai", "google", "twitter", "telegram", "crypto", "microsoft",
+		"proxy", "china-max", "lan"}
+	for _, name := range files {
+		content := "payload: []\n"
+		if name == "lan" && lanLoopback {
+			content = "payload:\n  - \"IP-CIDR,127.0.0.0/8\"\n"
+		}
+		if err := os.WriteFile(filepath.Join(rulesDir, name+".yaml"), []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// seedGeoIP makes sure the core workdir holds the GeoIP
+// database: a rule-mode sub-rules set contains a GEOIP line and
+// the core refuses to load the configuration at all without the
+// database. A copy provided via DEBROWSER_TEST_GEOIP wins;
+// otherwise the database is downloaded once from the same
+// release the core itself would use. When neither works the
+// test skips — the routing behaviour cannot be exercised
+// without it.
+func seedGeoIP(t *testing.T, dir string) {
+	t.Helper()
+	dst := filepath.Join(dir, "geoip.metadb")
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	if src := os.Getenv("DEBROWSER_TEST_GEOIP"); src != "" {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatalf("DEBROWSER_TEST_GEOIP unreadable: %v", err)
+		}
+		if err := os.WriteFile(dst, data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Skipf("geoip.metadb unavailable and download failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("geoip.metadb download: status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || len(data) < 1<<20 {
+		t.Skipf("geoip.metadb download incomplete: %d bytes, err %v", len(data), err)
+	}
+	if err := os.WriteFile(dst, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Per-instance routing modes against the real core: instance 1
+// in rule mode (loopback target claimed by the LAN set goes
+// DIRECT), instance 2 in global mode (same target goes through
+// its own node), instance 3 in direct mode — simultaneously,
+// each isolated from the others; then instance 2's mode is
+// switched live and its routing follows.
+func TestProxyCoreRouteModes(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	seedRuleCaches(t, f.cfg.Layout.Mihomo, true)
+	seedGeoIP(t, f.cfg.Layout.Mihomo)
+
+	echoA := startEcho(t, "VIA-A")
+	echoB := startEcho(t, "VIA-B")
+	targetPort := startEcho(t, "DIRECT-TARGET")
+	nodeA := startSocksNode(t, echoA)
+	nodeB := startSocksNode(t, echoB)
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d/", targetPort)
+
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "nodes.yaml")
+	writeSourceYAML(t, srcFile,
+		fmt.Sprintf("NodeA=%d", nodeA), fmt.Sprintf("NodeB=%d", nodeB))
+	f.svc.SourceFilePicker = func() (string, error) { return srcFile, nil }
+	srcView, err := f.svc.AddFileSource("op", "路由模式")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst1 := f.makeInstance(t, "实例一").ID
+	inst2 := f.makeInstance(t, "实例二").ID
+	inst3 := f.makeInstance(t, "实例三").ID
+	b1, err := f.svc.SetBinding("op", inst1, srcView.ID, "NodeA") // default: rule
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := f.svc.SetBinding("op", inst2, srcView.ID, "NodeB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.SetRouteMode("op", inst2, "global"); err != nil {
+		t.Fatal(err)
+	}
+	b3, err := f.svc.SetBinding("op", inst3, srcView.ID, "NodeA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.SetRouteMode("op", inst3, "direct"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatalf("StartCore with rule providers: %v", err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+
+	// The same loopback target, three modes, three outcomes —
+	// simultaneously.
+	probeWantURL(t, b1.Port, targetURL, "DIRECT-TARGET") // rule: LAN set → DIRECT
+	probeWantURL(t, b2.Port, targetURL, "VIA-B")         // global: everything via its node
+	probeWantURL(t, b3.Port, targetURL, "DIRECT-TARGET") // direct: never the node
+	// Node isolation on the classic probe target still holds:
+	// rule mode does not leak the LAN target to its node, and
+	// global mode reaches only its own node.
+	probeWant(t, b1.Port, "")
+	probeWant(t, b2.Port, "VIA-B")
+
+	// Switching instance 2 to direct while the core runs takes
+	// effect through the reload; switching back restores the
+	// node route.
+	if _, err := f.svc.SetRouteMode("op", inst2, "direct"); err != nil {
+		t.Fatal(err)
+	}
+	probeWantURL(t, b2.Port, targetURL, "DIRECT-TARGET")
+	if _, err := f.svc.SetRouteMode("op", inst2, "global"); err != nil {
+		t.Fatal(err)
+	}
+	probeWantURL(t, b2.Port, targetURL, "VIA-B")
 }

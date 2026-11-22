@@ -57,13 +57,31 @@ func TestGenerateShape(t *testing.T) {
 		"\"inst-111111112222\"",
 		"\"inst-666666667777\"",
 		"proxies:\n      - REJECT",
-		// Listeners hand their traffic straight to the instance's
-		// own group.
+		// Listeners hand their traffic to the instance's own
+		// sub-rules, never straight to a group.
 		"type: mixed",
 		"port: 21001",
 		"port: 21002",
-		"proxy: \"inst-111111112222\"",
-		"proxy: \"inst-666666667777\"",
+		"rule: \"sub-inst-111111112222\"",
+		"rule: \"sub-inst-666666667777\"",
+		// Both sample bindings are route-mode rule: the shared
+		// rule-providers and per-instance sub-rules are emitted.
+		"rule-providers:",
+		"\"规则修正\":\n    type: http\n    behavior: classical\n    format: yaml",
+		"url: \"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Direct/Direct.yaml\"",
+		"path: \"./rules/direct.yaml\"",
+		"\"局域网络\":",
+		"path: \"./rules/lan.yaml\"",
+		"interval: 86400",
+		"sub-rules:",
+		"\"sub-inst-111111112222\":",
+		"\"RULE-SET,规则修正,DIRECT\"",
+		"\"RULE-SET,禁止广告,REJECT\"",
+		"\"RULE-SET,智能服务,inst-111111112222\"",
+		"\"RULE-SET,国际服务,inst-111111112222\"",
+		"\"RULE-SET,国内服务,DIRECT\"",
+		"\"RULE-SET,局域网络,DIRECT\"",
+		"\"GEOIP,CN,DIRECT,no-resolve\"",
 		// Top-level fallback is DIRECT, never REJECT.
 		"rules:\n  - \"MATCH,DIRECT\"",
 	}
@@ -72,10 +90,27 @@ func TestGenerateShape(t *testing.T) {
 			t.Errorf("generated config missing %q\n---\n%s", want, out)
 		}
 	}
-	// DeBrowser keeps no rule set of its own: no sub-rules, no
-	// built-in direct/bypass rule lines anywhere. The system DNS
-	// resolver must not reappear as an upstream either.
-	for _, banned := range []string{"sub-rules:", "IP-CIDR", "DOMAIN-SUFFIX", "\n    rule: ", "- system"} {
+	// All fourteen shared rule-providers, by name.
+	for _, name := range []string{"规则修正", "屏蔽服务", "禁止广告", "反劫服务", "隐私保护", "智能服务", "谷歌服务", "推特服务", "飞机服务", "加密服务", "微软服务", "国际服务", "国内服务", "局域网络"} {
+		if !strings.Contains(out, "\""+name+"\":") {
+			t.Errorf("generated config missing rule-provider %q\n---\n%s", name, out)
+		}
+	}
+	// The rule-mode sub-rules end on the instance's own group.
+	idx := strings.Index(out, "\"sub-inst-666666667777\":")
+	if idx < 0 {
+		t.Fatalf("sub-rules for the second instance missing\n---\n%s", out)
+	}
+	block := out[idx:]
+	if !strings.HasPrefix(block, "\"sub-inst-666666667777\":\n    - \"RULE-SET,规则修正,DIRECT\"") {
+		t.Errorf("rule-mode sub-rules must start with the direct-fix set\n---\n%s", block)
+	}
+	if !strings.Contains(block, "- \"MATCH,inst-666666667777\"") {
+		t.Errorf("rule-mode sub-rules must end on the instance group\n---\n%s", block)
+	}
+	// Listeners must not bypass the sub-rules via proxy:, and the
+	// system DNS resolver must not reappear as an upstream.
+	for _, banned := range []string{"proxy: \"inst-", "- system"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("generated config must not contain %q\n---\n%s", banned, out)
 		}
@@ -125,7 +160,54 @@ func TestGenerateEmpty(t *testing.T) {
 	if strings.Contains(out, "proxy-providers:") || strings.Contains(out, "listeners:") {
 		t.Errorf("empty input must not emit providers or listeners\n%s", out)
 	}
+	if strings.Contains(out, "rule-providers:") || strings.Contains(out, "sub-rules:") {
+		t.Errorf("empty input must not emit rule-providers or sub-rules\n%s", out)
+	}
 	if !strings.Contains(out, "\"MATCH,DIRECT\"") {
 		t.Errorf("empty config still needs the top-level fallback\n%s", out)
+	}
+}
+
+func TestGenerateRouteModes(t *testing.T) {
+	in := sampleInput()
+	in.Bindings[0].RouteMode = "global"
+	in.Bindings[1].RouteMode = "direct"
+	out, err := Generate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No rule-mode instance: the shared rule-providers are not
+	// emitted at all.
+	if strings.Contains(out, "rule-providers:") {
+		t.Errorf("no rule-mode binding must not emit rule-providers\n%s", out)
+	}
+	// Global: the sub-rules are exactly the single MATCH to the
+	// instance's own group.
+	if !strings.Contains(out, "\"sub-inst-111111112222\":\n    - \"MATCH,inst-111111112222\"\n") {
+		t.Errorf("global-mode sub-rules wrong\n%s", out)
+	}
+	// Direct: exactly MATCH,DIRECT.
+	if !strings.Contains(out, "\"sub-inst-666666667777\":\n    - \"MATCH,DIRECT\"\n") {
+		t.Errorf("direct-mode sub-rules wrong\n%s", out)
+	}
+	if strings.Contains(out, "RULE-SET") {
+		t.Errorf("global/direct sub-rules must not reference rule sets\n%s", out)
+	}
+
+	// One rule-mode instance among others brings the shared
+	// providers back.
+	in.Bindings[1].RouteMode = "rule"
+	out, err = Generate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "rule-providers:") || !strings.Contains(out, "\"RULE-SET,局域网络,DIRECT\"") {
+		t.Errorf("one rule-mode binding must emit the shared rule-providers\n%s", out)
+	}
+
+	// An invalid mode is rejected, never silently mapped.
+	in.Bindings[1].RouteMode = "bogus"
+	if _, err := Generate(in); err == nil {
+		t.Error("invalid route mode must fail")
 	}
 }

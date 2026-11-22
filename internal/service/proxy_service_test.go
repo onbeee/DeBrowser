@@ -169,16 +169,21 @@ func TestURLSourceVaultAndBindingFlow(t *testing.T) {
 		"url: \"" + testSubURL + "\"",
 		"port: 21001",
 		"port: 21002",
-		"proxy: \"inst-",
+		"rule: \"sub-inst-",
 		"- REJECT",
 		"proxy: DIRECT",
+		// Bindings default to route mode rule: the shared
+		// rule-providers and per-instance sub-rules are emitted.
+		"rule-providers:",
+		"sub-rules:",
+		"\"RULE-SET,局域网络,DIRECT\"",
 	} {
 		if !strings.Contains(cfgText, want) {
 			t.Errorf("generated config missing %q\n---\n%s", want, cfgText)
 		}
 	}
-	if strings.Contains(cfgText, "sub-rules:") {
-		t.Errorf("generated config must not contain sub-rules\n%s", cfgText)
+	if strings.Contains(cfgText, "proxy: \"inst-") {
+		t.Errorf("listeners must route via sub-rules, not a direct group proxy\n%s", cfgText)
 	}
 
 	// A source with bindings cannot be deleted.
@@ -429,6 +434,70 @@ func TestGateHealSkipsGroupsThatAreNotRejected(t *testing.T) {
 	}
 	if selects != 0 {
 		t.Fatal("no re-application may happen for a healthy or unreadable group")
+	}
+}
+
+func TestSetRouteModeFlow(t *testing.T) {
+	f, b := gateHealFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.svc.SetRouteMode("op", b.InstanceID, "bogus"); err == nil {
+		t.Fatal("invalid route mode must fail")
+	}
+	if _, err := f.svc.SetRouteMode("op", "no-such-instance", "global"); err == nil {
+		t.Fatal("route mode for an unbound instance must fail")
+	}
+
+	// Default is rule: the generated config carries the shared
+	// rule-providers and the full sub-rules.
+	cfgBytes, err := os.ReadFile(f.svc.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfgBytes), "rule-providers:") {
+		t.Fatal("default rule mode must generate rule-providers")
+	}
+
+	view, err := f.svc.SetRouteMode("op", b.InstanceID, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.RouteMode != "global" {
+		t.Fatalf("view route mode = %q, want global", view.RouteMode)
+	}
+	if got, err := f.store.GetBinding(ctx, b.InstanceID); err != nil || got.RouteMode != "global" {
+		t.Fatalf("stored route mode = %+v, %v; want global", got, err)
+	}
+	cfgBytes, err = os.ReadFile(f.svc.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgText := string(cfgBytes)
+	if strings.Contains(cfgText, "rule-providers:") {
+		t.Error("global-only bindings must not generate rule-providers")
+	}
+	if !strings.Contains(cfgText, "- \"MATCH,"+"inst-") {
+		t.Error("global mode must generate the single-MATCH sub-rules")
+	}
+
+	// Re-binding a node preserves the recorded mode.
+	if _, err := f.svc.SetBinding("op", b.InstanceID, b.SourceID, "NodeB"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.store.GetBinding(ctx, b.InstanceID); err != nil || got.RouteMode != "global" || got.NodeName != "NodeB" {
+		t.Fatalf("binding after re-bind = %+v, %v; want NodeB + global kept", got, err)
+	}
+
+	// Back to rule: providers return.
+	if _, err := f.svc.SetRouteMode("op", b.InstanceID, "rule"); err != nil {
+		t.Fatal(err)
+	}
+	cfgBytes, err = os.ReadFile(f.svc.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfgBytes), "rule-providers:") {
+		t.Error("switching back to rule must regenerate the rule-providers")
 	}
 }
 

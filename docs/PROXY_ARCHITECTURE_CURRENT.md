@@ -44,7 +44,7 @@
 核心事实：
 
 - **一个 Mihomo 核心进程**服务全部浏览器实例（`internal/mihomo/manager.go` 的 `Manager` 只持有一个子进程）。
-- 每个已绑定实例在核心内有：一个 `mixed` Listener（独立回环端口）+ 一个专属 `select` 组。Listener 的 `proxy` 字段直接指向该组，流量不经过顶层规则（见第 7 节）。
+- 每个已绑定实例在核心内有：一个 `mixed` Listener（独立回环端口）+ 一个专属 `select` 组 + 一份专属 sub-rules。Listener 的 `rule` 字段指向该实例的 sub-rules，流量按实例的路由模式（规则分流 / 全局代理 / 直连）经 sub-rules 决策，不经过顶层规则（见第 7、8 节）。
 - 节点全部经核心原生 **proxy-provider** 机制加载；生成的配置里**没有任何节点定义**（`internal/mihomo/config.go` 文件头注释即此约定）。
 - 实例与节点的绑定关系是 DeBrowser 的业务数据，存 SQLite，**不依赖核心的 cache.db**（生成配置含 `profile.store-selected: false`）。
 - 核心只由用户在代理页**手动开启**；DeBrowser 启动不自动开启，无任何后台自启路径。
@@ -255,8 +255,10 @@
 1. 校验实例存在、来源存在、节点名非空；
 2. 核心运行时：先读该来源当前节点列表，**节点不存在直接拒绝**（核心未运行时无法校验，绑定先按用户选择存档，待核心启动后由 `applySelections` 与状态派生处理，见第 10 节限制）；
 3. 分配或复用端口；
-4. 一致性顺序：先把含提议绑定的配置生成并热重载入核心（`regenerateState`），核心接受后才 `UpsertBinding` 写 DB；写 DB 失败则重新生成恢复旧配置，恢复失败明确报错；
-5. 返回 `BindingView`（含派生状态与 Listener 探测结果）。
+4. 一致性顺序：先把含提议绑定的配置生成并热重载入核心（`regenerateState`），核心接受后才 `UpsertBinding` 写 DB；写 DB 失败则重新生成恢复旧配置，恢复失败明确报错。新绑定的 `route_mode` 默认 `rule`；换绑已有实例时保留其已记录的模式（改节点不重置模式）；
+5. 返回 `BindingView`（含路由模式、派生状态与 Listener 探测结果）。
+
+路由模式单独修改走 `SetRouteMode`：校验模式值与绑定存在后，按同一一致性顺序（先以提议模式 `regenerateState`，再 `UpdateBindingRouteMode` 落库，落库失败重新生成恢复），核心运行中即时生效；模式未变化时为空操作。
 
 ### 流程 3：实例启动
 
@@ -266,11 +268,11 @@
 2. 有绑定：`coreRunning` 为假 → 返回错误「已绑定代理但核心尚未开启」，**拒绝启动**，不自动开启核心；
 3. 核心在运行：读实例组当前选择（`GET /proxies/{组}` 的 `now`）。若为 REJECT（例如核心定时刷新 provider 后节点已回归但选择未恢复），门禁重新下发一次全部记录选择并复检：恢复为绑定节点则继续；仍为 REJECT（节点确实不在或选择无法应用）→ 返回错误并**拒绝启动**（提示确认节点状态或更换节点），不启动一个流量必然被拒绝的浏览器。选择读取失败本身不阻断（按原逻辑继续第 4 步）；
 4. `ProbePort(绑定端口)` 探测 Listener 是否应答，无应答 → 返回错误并拒绝启动（提示检查核心状态）；
-5. 正常：返回端口，启动参数追加 `--proxy-server=http://127.0.0.1:{port}`，浏览器流量进入该实例的 Listener → 实例组 → 绑定节点。
+5. 正常：返回端口，启动参数追加 `--proxy-server=http://127.0.0.1:{port}`，浏览器流量进入该实例的 Listener → 该实例 sub-rules（按路由模式决策）→ 命中代理目标时经实例组到绑定节点。
 
 ### 流程 4：实例更换节点
 
-同流程 2（`SetBinding` 覆盖同一行；端口不变）。换绑会立即把新配置重载入核心并由 `applySelections` 更新该实例组的选择。已启动的浏览器仍连在同一个 Listener 上，而 Listener 的下一跳就是该实例组，因此**换绑后已启动浏览器的出站节点随组选择即时改变**（新连接起）；端口与 Listener 本身不变。未启动的实例则在下次启动时按新绑定工作。
+同流程 2（`SetBinding` 覆盖同一行；端口不变，路由模式保留）。换绑会立即把新配置重载入核心并由 `applySelections` 更新该实例组的选择。已启动的浏览器仍连在同一个 Listener 上，sub-rules 的代理目标就是该实例组，因此**换绑后已启动浏览器的出站节点随组选择即时改变**（新连接起）；端口与 Listener 本身不变。未启动的实例则在下次启动时按新绑定工作。
 
 ### 流程 5：实例清除绑定（`ClearBinding`）
 
@@ -349,7 +351,35 @@ listeners:
     type: mixed
     listen: "127.0.0.1"
     port: 21001
-    proxy: "inst-<实例ID前12位>"
+    rule: "sub-inst-<实例ID前12位>"
+rule-providers:                       # 仅当至少一个实例为 rule 模式时生成；14 个共享集
+  "规则修正":
+    type: http
+    behavior: classical
+    format: yaml
+    url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Direct/Direct.yaml"
+    path: "./rules/direct.yaml"
+    interval: 86400
+  "屏蔽服务": { … }  # 其余 13 个同构：屏蔽服务/禁止广告/反劫服务/隐私保护/智能服务/谷歌服务/
+                     # 推特服务/飞机服务/加密服务/微软服务/国际服务/国内服务/局域网络
+sub-rules:
+  "sub-inst-<实例ID前12位>":           # rule 模式的完整形态；global 为 [MATCH,<组>]，direct 为 [MATCH,DIRECT]
+    - "RULE-SET,规则修正,DIRECT"
+    - "RULE-SET,屏蔽服务,REJECT"
+    - "RULE-SET,禁止广告,REJECT"
+    - "RULE-SET,反劫服务,REJECT"
+    - "RULE-SET,隐私保护,REJECT"
+    - "RULE-SET,智能服务,inst-<实例ID前12位>"
+    - "RULE-SET,谷歌服务,inst-<实例ID前12位>"
+    - "RULE-SET,推特服务,inst-<实例ID前12位>"
+    - "RULE-SET,飞机服务,inst-<实例ID前12位>"
+    - "RULE-SET,加密服务,inst-<实例ID前12位>"
+    - "RULE-SET,微软服务,inst-<实例ID前12位>"
+    - "RULE-SET,国际服务,inst-<实例ID前12位>"
+    - "RULE-SET,国内服务,DIRECT"
+    - "RULE-SET,局域网络,DIRECT"
+    - "GEOIP,CN,DIRECT,no-resolve"
+    - "MATCH,inst-<实例ID前12位>"
 rules:
   - "MATCH,DIRECT"
 ```
@@ -359,7 +389,7 @@ rules:
 | 字段 | 来源 | 用途 |
 |---|---|---|
 | `log-level: warning` | 固定 | 核心日志级别；核心日志写 `core.log` |
-| `mode: rule` | 固定 | 核心运行模式（实例流量实际不经规则，见 7.3） |
+| `mode: rule` | 固定 | 核心运行模式（实例流量经各自 sub-rules 决策，不经顶层 rules，见 7.3） |
 | `ipv6: false` | 固定 | 关闭 IPv6 |
 | `external-controller` / `secret` | 固定端口 19097 + Vault 外的本地密钥文件 | REST API 入口与 Bearer 认证，仅回环 |
 | `profile.store-selected: false` | 固定 | 禁止核心持久化组选择；选择真源是 DeBrowser 的 DB |
@@ -369,16 +399,18 @@ rules:
 | `health-check` | 固定参数 | 见第 5 节 |
 | `proxy-groups`（delay-*） | 每来源一条 | 测速专用隐藏组 |
 | `proxy-groups`（inst-*） | 每绑定一条 | 实例专属选择组：`proxies: [REJECT]` + `use: [绑定来源]` |
-| `listeners` | 每绑定一条 | mixed 监听（HTTP/SOCKS 同端口）、仅 127.0.0.1、`proxy` 指向本实例组 |
-| `rules` | 固定一条 `MATCH,DIRECT` | 仅作用于核心自身经规则的流量（如未被 provider 固定的抓取）；实例流量不经此表 |
+| `listeners` | 每绑定一条 | mixed 监听（HTTP/SOCKS 同端口）、仅 127.0.0.1、`rule` 指向本实例的 sub-rules |
+| `rule-providers` | 固定 14 个共享集（仅当至少一个绑定为 rule 模式时生成） | 全部 `type: http`、`behavior: classical`、`format: yaml`、`interval: 86400`，各自缓存到 `./rules/<英文名>.yaml`；核心统一下载与缓存，全部 rule 模式实例共享 |
+| `sub-rules` | 每绑定一份 | 由绑定的 `route_mode` 派生：rule = 14 条 RULE-SET（顺序固定：直连修正 → 四个 REJECT 集 → 七个走实例组的服务集 → 国内/局域直连）+ `GEOIP,CN,DIRECT,no-resolve` + `MATCH,<实例组>`；global = 仅 `MATCH,<实例组>`；direct = 仅 `MATCH,DIRECT` |
+| `rules` | 固定一条 `MATCH,DIRECT` | 仅作用于核心自身经规则的流量（如未被 provider 固定的抓取、规则集下载）；实例流量不经此表 |
 
 ### 7.3 关键问答（按代码）
 
-- **一个实例几个 Listener、几个组？** 恰好各一个。Listener 名与组名相同（`inst-<实例ID前12位十六进制>`）。
-- **Listener 用 `proxy` 还是 `rule`？** 只用 `proxy`（直指本实例组）。没有生成任何 listener `rule`（sub-rules）。
-- **实例流量是否经过顶层 rules？** 否。Listener `proxy` 直绑在核心语义上绕过规则引擎；顶层 `rules` 只有一条 `MATCH,DIRECT`，与实例流量无关。
-- **是否支持每实例独立规则？** **未实现。** 每实例的全部路由决策就是其组的选择（绑定节点或 REJECT）。
-- **节点绑定如何影响出站？** DB 绑定 → 生成组与 Listener → 核心启动/重载后 `applySelections` 用 `PUT /proxies/{组名}` 把组选择设为绑定节点；浏览器流量经 Listener 到组，按组当前选择出站。
+- **一个实例几个 Listener、几个组？** 恰好各一个，外加一份同名 sub-rules。Listener 名与组名相同（`inst-<实例ID前12位十六进制>`），sub-rules 名为 `sub-inst-<实例ID前12位十六进制>`。
+- **Listener 用 `proxy` 还是 `rule`？** 只用 `rule`（指向本实例的 sub-rules）。sub-rules 的最终 MATCH 落到本实例组（rule/global 模式）或 DIRECT（direct 模式），因此节点选择仍只由本实例组决定。
+- **实例流量是否经过顶层 rules？** 否。实例流量只经自己的 sub-rules；顶层 `rules` 只有一条 `MATCH,DIRECT`，只作用于核心自身流量，与实例流量无关。
+- **是否支持每实例独立规则？** 支持**每实例独立路由模式**（绑定上的 `route_mode`：rule/global/direct，migration 0016）：rule 模式实例之间共享同一组 rule-providers，但各自的 sub-rules 把代理目标指向自己的组，互不影响；规则集内容本身是产品固定的 14 个共享集，不支持用户编辑或按实例增删。
+- **节点绑定如何影响出站？** DB 绑定（含 route_mode）→ 生成组、Listener 与 sub-rules → 核心启动/重载后 `applySelections` 用 `PUT /proxies/{组名}` 把组选择设为绑定节点；浏览器流量经 Listener 进入 sub-rules，按模式与规则集决策出站（命中代理目标时经本实例组到绑定节点）。
 - **更新配置是否需要重启核心？** 不需要。`PUT /configs?force=true` 热重载（`regenerateState`）；仅当核心未运行时，配置只写文件，待下次手动启动加载。
 - 组选择的易失性：`store-selected: false` + 热重载会重置组选择，因此**每次**启动与重载后都必须 `applySelections`——代码中所有触发重载的路径（StartCore、regenerateState 内部）都串联了它。
 
@@ -391,17 +423,19 @@ rules:
 | 问题 | 现状 |
 |---|---|
 | 是否读取订阅原始 rules | **未实现**（不读取；订阅只作 provider 载荷，核心只提取节点） |
-| 是否读取 rule-providers | **未实现** |
+| 是否读取 rule-providers | 仅 DeBrowser 生成的 14 个固定共享集（见 7.2）；订阅自带的 rule-providers **不读取** |
 | 是否支持订阅中的 proxy-groups | **未实现**（不合并；运行配置中的组全部由 DeBrowser 按来源/绑定生成） |
 | 是否支持完整 Mihomo 配置导入并生效 | **未实现**（完整配置可被导入，但只有其 `proxies:` 节点被使用，其余内容被忽略，不报错也不生效） |
-| 实例流量是否经过规则匹配 | **否**（Listener 直绑实例组，绕过规则引擎） |
-| DIRECT 如何处理 | 仅出现在两处：provider 抓取固定 `proxy: DIRECT`；顶层兜底规则 `MATCH,DIRECT`（只作用于核心自身流量） |
-| REJECT 如何处理 | 作为每实例组的首成员与安全回落目标：节点未选/消失/选择失败时流量被拒绝；它是运行时安全目标，**从不写入 DB 冒充绑定** |
-| MATCH 如何处理 | 只有顶层一条 `MATCH,DIRECT` |
-| 规则策略页面是否有真实执行能力 | **没有规则页面**。代理页顶部曾有过的规则集 UI 已在开发期删除；当前 UI 无任何规则开关，代码中无 DeBrowser 规则集、规则启停或规则编辑逻辑 |
+| 实例流量是否经过规则匹配 | **是**（经该实例自己的 sub-rules；不经顶层 rules）。模式决定 sub-rules 内容：rule = 共享集全序 + GEOIP + MATCH 到本组；global = 仅 MATCH 到本组；direct = 仅 MATCH,DIRECT |
+| DIRECT 如何处理 | 出现在：provider 抓取固定 `proxy: DIRECT`；顶层兜底 `MATCH,DIRECT`（核心自身流量）；sub-rules 中规则修正/国内服务/局域网络/GEOIP,CN 的目标；direct 模式的 MATCH 目标 |
+| REJECT 如何处理 | 两处：每实例组的首成员与安全回落目标（节点未选/消失/选择失败时流量被拒绝，从不写入 DB 冒充绑定）；sub-rules 中屏蔽服务/禁止广告/反劫服务/隐私保护四个规则集的目标 |
+| MATCH 如何处理 | 顶层一条 `MATCH,DIRECT`（核心自身流量）；每份 sub-rules 的收尾 MATCH（rule/global → 本实例组，direct → DIRECT） |
+| 规则策略页面是否有真实执行能力 | **没有规则编辑/启停页面**。用户可控的只有实例级的路由模式三选一（实例新建/编辑表单；代理页绑定总览只读显示模式）。规则集清单固定在 `internal/mihomo/config.go`，UI 无规则集开关 |
+| 规则集的更新与失败 | 核心按 `interval: 86400` 自动刷新各 rule-provider 并缓存到 `data/mihomo/rules/`；单个集下载失败只记核心日志、该集暂为空（不匹配任何流量），不阻止核心启动；本地已有缓存时启动直接用缓存 |
+| GeoIP 数据库依赖 | rule 模式 sub-rules 含 `GEOIP,CN` 一行，核心加载配置时**必须**有 GeoIP 数据库（`data/mihomo/geoip.metadb`）：首次启动核心时核心自动从 GitHub 下载（约 8 MB）并缓存在工作目录；**若数据库缺失且下载失败，核心拒绝加载配置、启动失败**（真实核心已验证）。global/direct 模式的 sub-rules 不含 GEOIP，但只要有一个 rule 模式绑定存在，整份配置就需要该数据库 |
 | 核心的 `/rules/disable` 等 API | 不使用（客户端 `client.go` 未实现这些端点） |
 
-一句话：**DeBrowser 当前没有规则系统**；路由 = 每实例组的选择（绑定节点 / REJECT），这是全部。
+一句话：路由 = 每实例 sub-rules（按其路由模式生成）+ 共享固定规则集 + 每实例组的选择（绑定节点 / REJECT）；订阅规则仍不导入，用户不能编辑规则集，只能为每个实例选模式。
 
 ---
 
@@ -446,6 +480,7 @@ rules:
 
 ### 10.3 代码可确认的限制与缺陷
 
+- **GeoIP 数据库是首次开启核心的硬依赖（仅因 rule 模式）**：任一绑定为 rule 模式（默认）时，生成配置含 `GEOIP,CN` 子规则，核心加载配置必须有 `data/mihomo/geoip.metadb`；首次开启核心时核心会尝试从 GitHub 下载（约 8 MB），下载失败则核心启动失败、代理整体不可用（真实核心已验证该失败模式；规则集下载失败则不影响启动）。数据库一旦缓存成功，后续启动不再依赖网络。缓解方向（未实现）：由 DeBrowser 像核心二进制一样预下载并校验该数据库。
 - **删除实例后的运行配置清理依赖删除钩子**：绑定行被外键级联删除后，删除钩子在核心运行时立即重载配置清除残留的组与 Listener（第 6 节流程 6）；钩子刷新失败时（只记日志）残留会延续到下一次成功重载或核心重启。影响有界：无浏览器再使用该端口；端口再分配有实时探测兜底。
 - **核心未运行时 SetBinding 不校验节点存在性**：离线绑定按用户所选存档；若节点名已不存在，核心启动后该实例进入 REJECT + 黄色「已不存在」状态，需用户改绑或等节点回归。
 - **核心定时刷新后的选择恢复缺口（已在启动路径自愈）**：http provider 每 86400 秒由核心自行刷新；若绑定节点在该次刷新中消失又回归，组选择停留在 REJECT，直到下一次 DeBrowser 侧触发 `applySelections` 才恢复——现在启动门禁就是这样一个触发点：启动已绑定实例时若组在 REJECT，门禁先重下发一次选择，节点已回归即恢复放行；实例不启动期间不做后台恢复（无 Watchdog）。手动刷新订阅无此问题（刷新后必重下达选择）。
@@ -458,7 +493,7 @@ rules:
 
 ### 10.4 未实现的功能（明确清单）
 
-- 规则系统（规则集、规则启停、规则编辑、订阅规则/rule-providers 导入）：未实现；
+- 规则集的用户编辑/启停、订阅规则导入：未实现（已实现的是固定共享规则集 + 每实例路由模式，见第 8 节）；
 - TUN、系统代理设置：未实现（且不在产品范围内）；
 - 实际连接测试（经 Listener 的真实请求测试）：未实现；
 - 节点手动添加/编辑、节点参数查看（服务器/密码等）：未实现（节点参数只在核心内）；
@@ -496,7 +531,8 @@ rules:
 | 节点恢复自动续绑 | 已实现 | 限 DeBrowser 触发的重下达时机（见 10.3） |
 | 节点状态胶囊（四态） | 已实现 | 三处 UI 共用组件 |
 | 代理设置弹窗 | 已实现 | 只读信息，无可调参数 |
-| 规则系统 | **未实现** | 见第 8 节 |
+| 每实例路由模式（rule/global/direct） | 已实现 | 绑定字段 route_mode（migration 0016）+ 实例表单三选一 + 代理页只读显示；真实核心集成测试覆盖三模式并行隔离与运行中切换 |
+| 共享规则集（14 个 rule-providers） | 已实现 | 核心下载/缓存/每日刷新；内容固定，不可编辑/启停；GeoIP 数据库为首次启动硬依赖（见 10.3） |
 | TUN / 系统代理 | **未实现** | 不在产品范围 |
 | 实际连接测试 | **未实现** | — |
 | 自动测速 | **未实现** | — |
@@ -508,7 +544,7 @@ rules:
 
 | 文件 | 内容 |
 |---|---|
-| `internal/mihomo/config.go` | 配置生成 `Generate`、组名/测速组名派生、YAML 标量转义 |
+| `internal/mihomo/config.go` | 配置生成 `Generate`、组名/测速组名/sub-rules 名派生、共享 rule-providers 清单与 sub-rules 渲染、YAML 标量转义 |
 | `internal/mihomo/client.go` | 核心 REST 客户端（Version / ProviderProxies / RefreshProvider / GroupDelay / SelectNode / GroupNow / ReloadConfig） |
 | `internal/mihomo/manager.go` | 核心进程管理（EnsureBinary 双哈希、Start/Stop/abortStart、opMu 串行化）、版本与资产锁定 |
 | `internal/mihomo/child.go`、`child_unix.go`、`child_windows.go` | 子进程抽象与平台实现（Windows：Job Object + 挂起创建 + 句柄列表 + DuplicateHandle 副本；`StartProcess` 供一次性验证核心复用） |

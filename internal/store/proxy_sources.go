@@ -85,26 +85,57 @@ func (s *Store) DeleteProxySource(ctx context.Context, id string) error {
 func scanBinding(row interface{ Scan(...any) error }) (model.InstanceProxyBinding, error) {
 	var b model.InstanceProxyBinding
 	err := row.Scan(&b.InstanceID, &b.SourceID, &b.NodeName, &b.Port,
-		&b.CreatedAt, &b.UpdatedAt)
+		&b.RouteMode, &b.CreatedAt, &b.UpdatedAt)
 	return b, err
 }
 
-const bindingColumns = `instance_id, source_id, node_name, port, created_at, updated_at`
+const bindingColumns = `instance_id, source_id, node_name, port, route_mode, created_at, updated_at`
 
 // UpsertBinding creates or replaces the binding of one instance.
+// An empty RouteMode means the default ('rule') for a new binding
+// and "keep the recorded mode" for an existing one: re-binding a
+// node never silently resets the instance's routing mode.
 func (s *Store) UpsertBinding(ctx context.Context, b model.InstanceProxyBinding) (model.InstanceProxyBinding, error) {
+	if b.RouteMode == "" {
+		if old, err := s.GetBinding(ctx, b.InstanceID); err == nil {
+			b.RouteMode = old.RouteMode
+		} else {
+			b.RouteMode = model.RouteModeRule
+		}
+	}
 	if _, err := s.q.ExecContext(ctx,
-		`INSERT INTO instance_proxy_bindings (instance_id, source_id, node_name, port)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO instance_proxy_bindings (instance_id, source_id, node_name, port, route_mode)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (instance_id) DO UPDATE SET
 		   source_id = excluded.source_id,
 		   node_name = excluded.node_name,
 		   port = excluded.port,
+		   route_mode = excluded.route_mode,
 		   updated_at = datetime('now')`,
-		b.InstanceID, b.SourceID, b.NodeName, b.Port); err != nil {
+		b.InstanceID, b.SourceID, b.NodeName, b.Port, b.RouteMode); err != nil {
 		return model.InstanceProxyBinding{}, fmt.Errorf("store: upsert proxy binding: %w", err)
 	}
 	return s.GetBinding(ctx, b.InstanceID)
+}
+
+// UpdateBindingRouteMode changes only the routing mode of one
+// instance's binding (ErrNotFound when the instance has none).
+func (s *Store) UpdateBindingRouteMode(ctx context.Context, instanceID, routeMode string) error {
+	res, err := s.q.ExecContext(ctx,
+		`UPDATE instance_proxy_bindings
+		 SET route_mode = ?, updated_at = datetime('now')
+		 WHERE instance_id = ?`, routeMode, instanceID)
+	if err != nil {
+		return fmt.Errorf("store: update binding route mode: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: update binding route mode: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetBinding returns the binding of one instance (ErrNotFound when
