@@ -224,6 +224,121 @@ func TestFetchSubscriptionErrorHasNoURL(t *testing.T) {
 	}
 }
 
+// --- node connectivity test ---
+
+func TestTestNodesGuards(t *testing.T) {
+	f := testProxyFixture(t)
+	// Empty selection is a no-op, not an error.
+	results, err := f.svc.TestNodes("op", nil)
+	if err != nil || len(results) != 0 {
+		t.Fatalf("empty test = %v, %v", results, err)
+	}
+	// Core stopped: a clear refusal, never a fake result.
+	f.pickFile(t, twoNodeYAML)
+	view, err := f.svc.AddFileSource("op", "本地配置")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := f.svc.ListNodes()
+	if err != nil || len(nodes) != 2 {
+		t.Fatalf("nodes = %v, %v", nodes, err)
+	}
+	_ = view
+	if _, err := f.svc.TestNodes("op", []string{nodes[0].ID}); err == nil ||
+		!strings.Contains(err.Error(), "未启动") {
+		t.Fatalf("want core-not-running error, got %v", err)
+	}
+}
+
+func TestRunNodeDelayTests(t *testing.T) {
+	ids := []string{"a", "b", "c"}
+	results := make([]NodeTestResultView, len(ids))
+	for i, id := range ids {
+		results[i].NodeID = id
+	}
+	delay := func(_ context.Context, coreName string) (int, error) {
+		if coreName == "n-b" {
+			return 0, errors.New("timeout")
+		}
+		return 42, nil
+	}
+	runNodeDelayTests(ids, []int{0, 1, 2}, delay, results)
+	if !results[0].OK || results[0].DelayMs != 42 {
+		t.Fatalf("node a = %+v", results[0])
+	}
+	if results[1].OK {
+		t.Fatalf("node b must be not-OK: %+v", results[1])
+	}
+	if !results[2].OK || results[2].DelayMs != 42 {
+		t.Fatalf("node c = %+v", results[2])
+	}
+}
+
+// --- file reimport (local source update) ---
+
+const reimportYAML = `
+proxies:
+  - {name: NodeC, type: socks5, server: 127.0.0.1, port: 18103}
+`
+
+func TestReimportFileSourceReplacesNodes(t *testing.T) {
+	f := testProxyFixture(t)
+	f.pickFile(t, twoNodeYAML)
+	view, err := f.svc.AddFileSource("op", "本地配置")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pickFile(t, reimportYAML)
+	got, err := f.svc.ReimportFileSource("op", view.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NodeCount != 1 {
+		t.Fatalf("view = %+v", got)
+	}
+	nodes, err := f.svc.ListNodes()
+	if err != nil || len(nodes) != 1 || nodes[0].Name != "NodeC" {
+		t.Fatalf("nodes = %+v, %v", nodes, err)
+	}
+	// The stored copy now holds the new content.
+	src, err := f.store.GetProxySource(context.Background(), view.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(f.svc.sourcesDir(), src.FileName))
+	if err != nil || !strings.Contains(string(raw), "NodeC") {
+		t.Fatalf("stored copy not refreshed: %v", err)
+	}
+}
+
+func TestReimportFileSourceFailuresKeepNodes(t *testing.T) {
+	f := testProxyFixture(t)
+	f.pickFile(t, twoNodeYAML)
+	view, err := f.svc.AddFileSource("op", "本地配置")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Invalid new file: old nodes stay.
+	f.pickFile(t, "proxies: []\n")
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err == nil {
+		t.Fatal("want parse failure")
+	}
+	// Picker cancelled: old nodes stay.
+	f.svc.SourceFilePicker = func() (string, error) { return "", nil }
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err == nil {
+		t.Fatal("want cancel error")
+	}
+	nodes, err := f.svc.ListNodes()
+	if err != nil || len(nodes) != 2 {
+		t.Fatalf("nodes must be untouched: %+v, %v", nodes, err)
+	}
+	// Subscriptions cannot be reimported from a file.
+	sub := f.addSubscriptionOK(t)
+	if _, err := f.svc.ReimportFileSource("op", sub.ID); err == nil {
+		t.Fatal("want kind error for subscription")
+	}
+}
+
 // --- file import ---
 
 func (f *proxyFixture) pickFile(t *testing.T, content string) {

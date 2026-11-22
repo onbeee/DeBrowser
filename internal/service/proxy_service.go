@@ -56,6 +56,13 @@ const (
 	proxyMaxSourceBytes  = 32 << 20
 	proxyMaxFetchedBytes = 16 << 20
 	proxyMaxNodes        = 2000
+
+	// Node connectivity test: one fixed public target, one
+	// fixed timeout, a small fixed parallelism. No settings —
+	// the test answers "can this node connect right now".
+	nodeTestURL         = "http://www.gstatic.com/generate_204"
+	nodeTestTimeoutMs   = 5000
+	nodeTestConcurrency = 8
 )
 
 // ProxyService runs the proxy module. Its exported methods are
@@ -83,16 +90,24 @@ type ProxyService struct {
 	// fetchSubscription downloads a subscription body; a field
 	// so tests can serve fixtures without a network.
 	fetchSubscription func(ctx context.Context, rawURL string) ([]byte, error)
+
+	// delayNode measures one node's delay through the running
+	// core; a field so tests can fake the core's answers.
+	delayNode func(ctx context.Context, coreName string) (int, error)
 }
 
 func NewProxyService(db *database.DB, layout paths.Layout, vault *secrets.Store, log *slog.Logger) *ProxyService {
-	return &ProxyService{
+	s := &ProxyService{
 		store:             store.New(db),
 		layout:            layout,
 		log:               log,
 		vault:             vault,
 		fetchSubscription: fetchSubscriptionHTTP,
 	}
+	s.delayNode = func(ctx context.Context, coreName string) (int, error) {
+		return s.client().Delay(ctx, coreName, nodeTestURL, nodeTestTimeoutMs)
+	}
+	return s
 }
 
 // ServiceShutdown stops the managed core when DeBrowser exits.
@@ -144,6 +159,15 @@ type BindingView struct {
 	NodeName   string `json:"nodeName"`
 	SourceName string `json:"sourceName"`
 	ListenPort int    `json:"listenPort"`
+}
+
+// NodeTestResultView is one node's connectivity test outcome:
+// OK with the measured delay, or not OK (unreachable or timed
+// out). Results are display data only — nothing is persisted.
+type NodeTestResultView struct {
+	NodeID  string `json:"nodeId"`
+	OK      bool   `json:"ok"`
+	DelayMs int    `json:"delayMs"`
 }
 
 // --- core lifecycle ---
@@ -587,6 +611,75 @@ func (s *ProxyService) RefreshSource(operationID, id string) (SourceView, error)
 	return view, err
 }
 
+// ReimportFileSource is the local-file counterpart of
+// RefreshSource: the user picks the (possibly updated) file
+// again and its nodes replace the source's current nodes.
+// The file is read and parsed completely before anything is
+// written, so cancelling the picker or picking an invalid
+// file leaves the source exactly as it was.
+func (s *ProxyService) ReimportFileSource(operationID, id string) (SourceView, error) {
+	op := beginOp(s.Auditor, operationID, "代理", "proxy.source_reimport", "proxy_source", id)
+	view, err := s.reimportFileSource(id)
+	finishOp(op, err)
+	return view, err
+}
+
+func (s *ProxyService) reimportFileSource(id string) (SourceView, error) {
+	ctx := context.Background()
+	src, err := s.store.GetProxySource(ctx, id)
+	if err != nil {
+		return SourceView{}, fmt.Errorf("配置不存在")
+	}
+	if src.Kind != model.ProxySourceKindFile {
+		return SourceView{}, fmt.Errorf("订阅请使用「更新」在线刷新")
+	}
+	if s.SourceFilePicker == nil {
+		return SourceView{}, fmt.Errorf("文件选择不可用")
+	}
+	path, err := s.SourceFilePicker()
+	if err != nil {
+		return SourceView{}, fmt.Errorf("选择文件失败：%w", err)
+	}
+	if path == "" {
+		return SourceView{}, fmt.Errorf("未选择文件")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SourceView{}, fmt.Errorf("读取文件失败：%w", err)
+	}
+	if len(data) == 0 {
+		return SourceView{}, fmt.Errorf("选择的文件为空")
+	}
+	if len(data) > proxyMaxSourceBytes {
+		return SourceView{}, fmt.Errorf("选择的文件过大（上限 32 MB）")
+	}
+	nodes, err := parseProxyNodes(data)
+	if err != nil {
+		return SourceView{}, fmt.Errorf("解析配置文件失败（已保留原有节点）：%w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.replaceNodesLocked(ctx, id, nodes); err != nil {
+		return SourceView{}, err
+	}
+	// Refresh the stored copy so it matches the nodes now in
+	// use. The database is the runtime truth; a copy that
+	// cannot be rewritten is logged, not fatal.
+	if err := os.MkdirAll(s.sourcesDir(), 0o750); err == nil {
+		tmp := filepath.Join(s.sourcesDir(), src.FileName+".tmp")
+		if err := os.WriteFile(tmp, data, 0o640); err == nil {
+			if err := os.Rename(tmp, filepath.Join(s.sourcesDir(), src.FileName)); err != nil {
+				_ = os.Remove(tmp)
+				s.log.Warn("proxy: refresh source file copy", "source", id, "error", err)
+			}
+		}
+	}
+	if err := s.reloadLocked(ctx); err != nil {
+		return SourceView{}, err
+	}
+	return SourceView{ID: src.ID, Name: src.Name, Kind: src.Kind, NodeCount: len(nodes)}, nil
+}
+
 func (s *ProxyService) refreshSource(id string) (SourceView, error) {
 	ctx := context.Background()
 	src, err := s.store.GetProxySource(ctx, id)
@@ -594,7 +687,7 @@ func (s *ProxyService) refreshSource(id string) (SourceView, error) {
 		return SourceView{}, fmt.Errorf("配置不存在")
 	}
 	if src.Kind != model.ProxySourceKindSubscription {
-		return SourceView{}, fmt.Errorf("本地配置文件不能在线更新，请删除后重新添加")
+		return SourceView{}, fmt.Errorf("本地配置文件请使用「更新」重新选择文件")
 	}
 	if s.vault == nil || src.SecretRef == "" {
 		return SourceView{}, fmt.Errorf("订阅地址不可用（凭据 Vault 中缺失）")
@@ -615,8 +708,24 @@ func (s *ProxyService) refreshSource(id string) (SourceView, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err = s.store.WithTx(ctx, func(tx *store.Store) error {
-		if err := tx.DeleteProxyNodesOfSource(ctx, id); err != nil {
+	if err := s.replaceNodesLocked(ctx, id, nodes); err != nil {
+		return SourceView{}, err
+	}
+	if err := s.reloadLocked(ctx); err != nil {
+		return SourceView{}, err
+	}
+	return SourceView{ID: src.ID, Name: src.Name, Kind: src.Kind, NodeCount: len(nodes)}, nil
+}
+
+// replaceNodesLocked swaps one source's whole node set for
+// the parsed nodes in a single transaction. Caller holds
+// s.mu and has fully parsed the new content already, so a
+// failed update never reaches this point and the old nodes
+// stay untouched. Bindings to vanished nodes cascade away
+// with them.
+func (s *ProxyService) replaceNodesLocked(ctx context.Context, sourceID string, nodes []parsedNode) error {
+	return s.store.WithTx(ctx, func(tx *store.Store) error {
+		if err := tx.DeleteProxyNodesOfSource(ctx, sourceID); err != nil {
 			return err
 		}
 		for _, n := range nodes {
@@ -629,20 +738,13 @@ func (s *ProxyService) refreshSource(id string) (SourceView, error) {
 				return err
 			}
 			if err := tx.CreateProxyNode(ctx, model.ProxyNode{
-				ID: nid, SourceID: id, Name: n.name, ConfigJSON: string(cfgJSON),
+				ID: nid, SourceID: sourceID, Name: n.name, ConfigJSON: string(cfgJSON),
 			}); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		return SourceView{}, err
-	}
-	if err := s.reloadLocked(ctx); err != nil {
-		return SourceView{}, err
-	}
-	return SourceView{ID: src.ID, Name: src.Name, Kind: src.Kind, NodeCount: len(nodes)}, nil
 }
 
 // DeleteSource removes a source, its nodes and any bindings to
@@ -743,6 +845,76 @@ func (s *ProxyService) ListNodes() ([]NodeView, error) {
 // ListBindings returns every instance binding with display
 // names resolved. This is the single binding read both pages
 // use.
+// TestNodes runs a one-off connectivity test for the given
+// nodes through the running core, using the core's native
+// per-proxy delay measurement against one fixed target. It
+// only answers when the user clicks 测速 — nothing runs in
+// the background — and it changes no data: results go back
+// to the caller for display only.
+func (s *ProxyService) TestNodes(operationID string, nodeIDs []string) ([]NodeTestResultView, error) {
+	op := beginOp(s.Auditor, operationID, "代理", "proxy.node_test", "proxy_node", "")
+	results, err := s.testNodes(nodeIDs)
+	finishOp(op, err)
+	return results, err
+}
+
+func (s *ProxyService) testNodes(nodeIDs []string) ([]NodeTestResultView, error) {
+	results := make([]NodeTestResultView, len(nodeIDs))
+	for i, id := range nodeIDs {
+		results[i].NodeID = id
+	}
+	if len(nodeIDs) == 0 {
+		return results, nil
+	}
+	// Snapshot what the tests need, then release the lock:
+	// a full run can take seconds and must not stall other
+	// proxy operations behind it.
+	s.mu.Lock()
+	if err := s.initCoreLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	running := s.coreRunningLocked()
+	delay := s.delayNode
+	s.mu.Unlock()
+	if !running {
+		return nil, fmt.Errorf("代理核心未启动，无法测速。请先启动代理核心")
+	}
+	ctx := context.Background()
+	valid := make([]int, 0, len(nodeIDs))
+	for i, id := range nodeIDs {
+		if _, err := s.store.GetProxyNode(ctx, id); err == nil {
+			valid = append(valid, i)
+		} // unknown node: result stays not-OK
+	}
+	runNodeDelayTests(nodeIDs, valid, delay, results)
+	return results, nil
+}
+
+// runNodeDelayTests measures the delay of the nodes at the
+// given result indexes with bounded parallelism and fills
+// their results in place.
+func runNodeDelayTests(nodeIDs []string, indexes []int, delay func(ctx context.Context, coreName string) (int, error), results []NodeTestResultView) {
+	sem := make(chan struct{}, nodeTestConcurrency)
+	var wg sync.WaitGroup
+	for _, i := range indexes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			tctx, cancel := context.WithTimeout(context.Background(), time.Duration(nodeTestTimeoutMs)*time.Millisecond+5*time.Second)
+			defer cancel()
+			ms, err := delay(tctx, coreNodeName(nodeIDs[i]))
+			if err == nil {
+				results[i].OK = true
+				results[i].DelayMs = ms
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
 func (s *ProxyService) ListBindings() ([]BindingView, error) {
 	ctx := context.Background()
 	bindings, err := s.store.ListProxyBindings(ctx)

@@ -63,11 +63,6 @@ export function GetCoreStatus(): $CancellablePromise<$models.CoreStatusView> {
     return $Call.ByID(2607189824);
 }
 
-/**
- * ListBindings returns every instance binding with display
- * names resolved. This is the single binding read both pages
- * use.
- */
 export function ListBindings(): $CancellablePromise<$models.BindingView[] | null> {
     return $Call.ByID(1519141597);
 }
@@ -110,6 +105,18 @@ export function RefreshSource(operationID: string, id: string): $CancellableProm
 }
 
 /**
+ * ReimportFileSource is the local-file counterpart of
+ * RefreshSource: the user picks the (possibly updated) file
+ * again and its nodes replace the source's current nodes.
+ * The file is read and parsed completely before anything is
+ * written, so cancelling the picker or picking an invalid
+ * file leaves the source exactly as it was.
+ */
+export function ReimportFileSource(operationID: string, id: string): $CancellablePromise<$models.SourceView> {
+    return $Call.ByID(3052492324, operationID, id);
+}
+
+/**
  * SetBinding binds an instance to a node (or moves it to a new
  * node). An existing binding keeps its listener port; a new
  * binding gets a fresh allocation. This is the single binding
@@ -132,4 +139,19 @@ export function StartCore(operationID: string): $CancellablePromise<$models.Core
  */
 export function StopCore(operationID: string): $CancellablePromise<$models.CoreStatusView> {
     return $Call.ByID(105252808, operationID);
+}
+
+/**
+ * ListBindings returns every instance binding with display
+ * names resolved. This is the single binding read both pages
+ * use.
+ * TestNodes runs a one-off connectivity test for the given
+ * nodes through the running core, using the core's native
+ * per-proxy delay measurement against one fixed target. It
+ * only answers when the user clicks 测速 — nothing runs in
+ * the background — and it changes no data: results go back
+ * to the caller for display only.
+ */
+export function TestNodes(operationID: string, nodeIDs: string[] | null): $CancellablePromise<$models.NodeTestResultView[] | null> {
+    return $Call.ByID(3895242532, operationID, nodeIDs);
 }

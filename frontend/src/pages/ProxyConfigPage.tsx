@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Gauge, Loader2, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
 import {
   InstanceService,
   ProxyService,
   type BindingView,
   type CoreStatusView,
+  type NodeTestResultView,
   type NodeView,
   type SourceView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import type { Instance } from "../../bindings/github.com/onbeee/DeBrowser/internal/model";
 import { notifyError, notifySuccess } from "../stores/useNotificationStore";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import ProxyNodePicker from "../components/ProxyNodePicker";
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -41,6 +43,18 @@ export default function ProxyConfigPage() {
   const [addURL, setAddURL] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
   const [confirmDeleteSource, setConfirmDeleteSource] = useState<SourceView | null>(null);
+  // 代理源区域分页（每页 3 行）。
+  const [sourcePage, setSourcePage] = useState(0);
+  // 节点筛选：输入框/下拉是草稿，点「搜索」后才应用；
+  // 「重置」清空草稿与已应用条件。筛选只影响显示。
+  const [filterSourceDraft, setFilterSourceDraft] = useState("");
+  const [filterQueryDraft, setFilterQueryDraft] = useState("");
+  const [appliedSource, setAppliedSource] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState("");
+  // 测速：仅在用户点击时对当前筛选结果逐个测试，结果只
+  // 用于本页显示，不保存、不影响绑定。
+  const [testing, setTesting] = useState(false);
+  const [testResults, setTestResults] = useState<Record<string, NodeTestResultView>>({});
   const loadedRef = useRef(false);
 
   const reload = useCallback(async (): Promise<string | null> => {
@@ -97,6 +111,98 @@ export default function ProxyConfigPage() {
     }
     return map;
   }, [nodes]);
+
+  // 当前筛选条件下的可见来源与节点（筛选只影响显示）。
+  const visibleSources = useMemo(
+    () => (appliedSource ? sources.filter((s) => s.id === appliedSource) : sources),
+    [sources, appliedSource],
+  );
+  const visibleNodesBySource = useMemo(() => {
+    const q = appliedQuery.trim().toLowerCase();
+    const map = new Map<string, NodeView[]>();
+    for (const src of visibleSources) {
+      map.set(
+        src.id,
+        (nodesBySource.get(src.id) ?? []).filter((n) => !q || n.name.toLowerCase().includes(q)),
+      );
+    }
+    return map;
+  }, [visibleSources, nodesBySource, appliedQuery]);
+  const visibleNodeIds = useMemo(
+    () => visibleSources.flatMap((src) => (visibleNodesBySource.get(src.id) ?? []).map((n) => n.id)),
+    [visibleSources, visibleNodesBySource],
+  );
+
+  // 代理源区域分页（每页 3 行，左右翻页）。
+  const sourcePageCount = Math.max(1, Math.ceil(sources.length / 3));
+  const currentSourcePage = Math.min(sourcePage, sourcePageCount - 1);
+  const pagedSources = sources.slice(currentSourcePage * 3, currentSourcePage * 3 + 3);
+
+  const applyFilter = () => {
+    setAppliedSource(filterSourceDraft);
+    setAppliedQuery(filterQueryDraft);
+  };
+  const resetFilter = () => {
+    setFilterSourceDraft("");
+    setFilterQueryDraft("");
+    setAppliedSource("");
+    setAppliedQuery("");
+  };
+
+  const runTest = async () => {
+    if (testing || visibleNodeIds.length === 0) return;
+    setTesting(true);
+    const opId = newOperationId();
+    try {
+      const results = await ProxyService.TestNodes(opId, visibleNodeIds);
+      setTestResults((prev) => {
+        const next = { ...prev };
+        for (const r of results ?? []) next[r.nodeId] = r;
+        return next;
+      });
+      const okCount = (results ?? []).filter((r) => r.ok).length;
+      notifySuccess(`测速完成：${okCount}/${visibleNodeIds.length} 个节点可用`, {
+        operationId: opId,
+        important: true,
+      });
+      recordOperationFeedback(opId, true, "节点测速完成", "代理", "proxy.node_test");
+    } catch (e) {
+      const message = errText(e);
+      notifyError(`测速失败：${message}`, { operationId: opId, important: true });
+      recordOperationFeedback(opId, false, `测速失败：${message}`, "代理", "proxy.node_test");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const updateSource = (src: SourceView) => {
+    if (src.kind === "subscription") {
+      void run(`refresh-${src.id}`, "proxy.source_refresh", `订阅「${src.name}」已更新`, async (opId) => {
+        await ProxyService.RefreshSource(opId, src.id);
+      });
+      return;
+    }
+    // 本地文件：重新选择文件更新；取消选择静默结束。
+    if (busy) return;
+    setBusy(`refresh-${src.id}`);
+    const opId = newOperationId();
+    void (async () => {
+      try {
+        await ProxyService.ReimportFileSource(opId, src.id);
+        notifySuccess(`本地配置「${src.name}」已更新`, { operationId: opId, important: true });
+        recordOperationFeedback(opId, true, `本地配置「${src.name}」已更新`, "代理", "proxy.source_reimport");
+      } catch (e) {
+        const message = errText(e);
+        if (message !== PICKER_CANCELLED) {
+          notifyError(`更新本地配置失败：${message}`, { operationId: opId, important: true });
+          recordOperationFeedback(opId, false, `更新本地配置失败：${message}`, "代理", "proxy.source_reimport");
+        }
+      } finally {
+        setBusy(null);
+        await reload();
+      }
+    })();
+  };
 
   const run = async (key: string, action: string, label: string, fn: (opId: string) => Promise<void>) => {
     if (busy) return;
@@ -227,37 +333,45 @@ export default function ProxyConfigPage() {
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 border-t border-(--border)">
-          {/* 左侧：节点列表（按来源分组，独立滚动） */}
+          {/* 左侧：代理源区域 + 代理节点区域（独立滚动） */}
           <div className="flex min-w-0 flex-1 flex-col border-r border-(--border)">
-            <h3 className="border-b border-(--border) px-5 py-2.5 text-sm font-medium">代理节点</h3>
-            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+            {/* 代理源区域：每页最多 3 行，左右翻页；更新与
+                删除统一在这里，节点列表不再带来源操作。 */}
+            <div className="border-b border-(--border) px-5 py-3">
+              <h3 className="mb-2 text-sm font-medium">代理源</h3>
               {sources.length === 0 ? (
                 <p className="text-sm text-(--text-faint)">尚未添加任何代理配置。点击上方「添加」导入订阅或本地配置文件。</p>
               ) : (
-                <div className="space-y-5">
-                  {sources.map((src) => (
-                    <div key={src.id}>
-                      <div className="mb-2 flex items-center gap-2">
-                        <span className="text-sm font-medium">{src.name}</span>
-                        <span className="text-xs text-(--text-faint)">
-                          {src.kind === "subscription" ? "订阅" : "本地文件"} · {src.nodeCount} 个节点
+                <>
+                  <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_4.5rem_4.5rem_10rem] items-center gap-2 border-b border-(--border) pb-1.5 text-center text-xs text-(--text-faint)">
+                    <span>名称</span>
+                    <span>节点数</span>
+                    <span>来源</span>
+                    <span>状态</span>
+                    <span>操作</span>
+                  </div>
+                  <div>
+                    {pagedSources.map((src) => (
+                      <div
+                        key={src.id}
+                        className="grid grid-cols-[minmax(0,1fr)_4.5rem_4.5rem_4.5rem_10rem] items-center gap-2 border-b border-(--border) py-1.5 text-center last:border-b-0"
+                      >
+                        <span className="truncate text-sm font-medium" title={src.name}>
+                          {src.name}
                         </span>
-                        <span className="ml-auto flex items-center gap-1.5">
-                          {src.kind === "subscription" && (
-                            <button
-                              type="button"
-                              className={btnSmall}
-                              disabled={busy !== null}
-                              onClick={() =>
-                                void run(`refresh-${src.id}`, "proxy.source_refresh", `订阅「${src.name}」已更新`, async (opId) => {
-                                  await ProxyService.RefreshSource(opId, src.id);
-                                })
-                              }
-                            >
-                              <RefreshCw size={12} />
-                              更新
-                            </button>
-                          )}
+                        <span className="text-sm">{src.nodeCount}</span>
+                        <span className="text-sm">{src.kind === "subscription" ? "订阅" : "本地"}</span>
+                        <span className="text-sm">{src.nodeCount > 0 ? "正常" : "无节点"}</span>
+                        <span className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            className={btnSmall}
+                            disabled={busy !== null}
+                            onClick={() => updateSource(src)}
+                          >
+                            <RefreshCw size={12} />
+                            更新
+                          </button>
                           <button
                             type="button"
                             className={btnSmall}
@@ -269,19 +383,130 @@ export default function ProxyConfigPage() {
                           </button>
                         </span>
                       </div>
-                      <div className="space-y-1.5">
-                        {(nodesBySource.get(src.id) ?? []).map((n) => (
-                          <div key={n.id} className="flex items-center gap-2 rounded-md border border-(--border) bg-(--panel-bg) px-3 py-2">
-                            <span className="min-w-0 flex-1 truncate text-sm">{n.name}</span>
-                            <span className="shrink-0 text-xs text-(--text-faint)">{n.type}</span>
-                          </div>
-                        ))}
-                        {(nodesBySource.get(src.id) ?? []).length === 0 && (
-                          <p className="text-xs text-(--text-faint)">该配置暂无节点。</p>
-                        )}
-                      </div>
+                    ))}
+                  </div>
+                  {sourcePageCount > 1 && (
+                    <div className="flex items-center justify-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        className={btnSmall}
+                        disabled={currentSourcePage === 0}
+                        onClick={() => setSourcePage(currentSourcePage - 1)}
+                        aria-label="上一页"
+                      >
+                        <ChevronLeft size={13} />
+                      </button>
+                      <span className="text-xs text-(--text-dim)">
+                        {currentSourcePage + 1} / {sourcePageCount}
+                      </span>
+                      <button
+                        type="button"
+                        className={btnSmall}
+                        disabled={currentSourcePage >= sourcePageCount - 1}
+                        onClick={() => setSourcePage(currentSourcePage + 1)}
+                        aria-label="下一页"
+                      >
+                        <ChevronRight size={13} />
+                      </button>
                     </div>
-                  ))}
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* 代理节点区域：第一行标题 + 测速（最右），
+                第二行筛选控件 + 重置（最右，与测速同宽、
+                右边缘对齐）。 */}
+            <div className="flex items-center gap-3 px-5 pt-3">
+              <h3 className="min-w-0 flex-1 text-sm font-medium">代理节点</h3>
+              <button
+                type="button"
+                className={`${btnSmall} w-20 shrink-0 justify-center`}
+                disabled={testing || busy !== null || visibleNodeIds.length === 0}
+                onClick={() => void runTest()}
+              >
+                {testing ? <Loader2 size={13} className="animate-spin" /> : <Gauge size={13} />}
+                测速
+              </button>
+            </div>
+            <div className="flex items-center gap-2 px-5 pt-2">
+              <select
+                className="w-40 shrink-0 rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
+                value={filterSourceDraft}
+                onChange={(e) => setFilterSourceDraft(e.target.value)}
+                aria-label="按代理源筛选"
+              >
+                <option value="">全部代理源</option>
+                {sources.map((src) => (
+                  <option key={src.id} value={src.id}>
+                    {src.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="w-44 min-w-0 rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)"
+                placeholder="搜索节点名称"
+                value={filterQueryDraft}
+                onChange={(e) => setFilterQueryDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyFilter();
+                }}
+              />
+              <button type="button" className={`${btnSmall} shrink-0`} onClick={applyFilter}>
+                搜索
+              </button>
+              <span className="min-w-0 flex-1" />
+              <button
+                type="button"
+                className={`${btnSmall} w-20 shrink-0 justify-center`}
+                onClick={resetFilter}
+              >
+                重置
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+              {sources.length === 0 ? (
+                <p className="text-sm text-(--text-faint)">暂无节点。</p>
+              ) : visibleSources.length === 0 || visibleNodeIds.length === 0 ? (
+                <p className="text-sm text-(--text-faint)">没有符合筛选条件的节点。</p>
+              ) : (
+                <div className="space-y-5">
+                  {visibleSources.map((src) => {
+                    const list = visibleNodesBySource.get(src.id) ?? [];
+                    if (list.length === 0) return null;
+                    return (
+                      <div key={src.id}>
+                        <div className="mb-2 flex items-center gap-2">
+                          <span className="text-sm font-medium">{src.name}</span>
+                          <span className="text-xs text-(--text-faint)">
+                            {src.kind === "subscription" ? "订阅" : "本地文件"} · {list.length} 个节点
+                          </span>
+                        </div>
+                        <div className="space-y-1.5">
+                          {list.map((n) => {
+                            const result = testResults[n.id];
+                            return (
+                              <div
+                                key={n.id}
+                                className="flex items-center gap-2 rounded-md border border-(--border) bg-(--panel-bg) px-3 py-2"
+                              >
+                                <span className="min-w-0 flex-1 truncate text-sm">{n.name}</span>
+                                {result &&
+                                  (result.ok ? (
+                                    <span className="shrink-0 text-xs text-(--accent)">
+                                      可用 · {result.delayMs} ms
+                                    </span>
+                                  ) : (
+                                    <span className="shrink-0 text-xs text-(--danger)">不可用</span>
+                                  ))}
+                                <span className="shrink-0 text-xs text-(--text-faint)">{n.type}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -300,24 +525,15 @@ export default function ProxyConfigPage() {
                     return (
                       <div key={inst.id} className="flex items-center gap-3 rounded-md border border-(--border) bg-(--panel-bg) px-3 py-2">
                         <span className="min-w-0 flex-1 truncate text-sm font-medium">{inst.name}</span>
-                        <select
-                          className="w-56 shrink-0 rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
-                          value={binding?.nodeId ?? ""}
-                          disabled={busy !== null}
-                          onChange={(e) => changeBinding(inst, e.target.value)}
-                          aria-label={`实例 ${inst.name} 的代理节点`}
-                        >
-                          <option value="">不使用代理</option>
-                          {sources.map((src) => (
-                            <optgroup key={src.id} label={src.name}>
-                              {(nodesBySource.get(src.id) ?? []).map((n) => (
-                                <option key={n.id} value={n.id}>
-                                  {n.name}
-                                </option>
-                              ))}
-                            </optgroup>
-                          ))}
-                        </select>
+                        <div className="w-56 shrink-0">
+                          <ProxyNodePicker
+                            nodes={nodes}
+                            value={binding?.nodeId ?? ""}
+                            disabled={busy !== null}
+                            onChange={(nodeId) => changeBinding(inst, nodeId)}
+                            ariaLabel={`实例 ${inst.name} 的代理节点`}
+                          />
+                        </div>
                         <span className="w-16 shrink-0 text-right text-xs text-(--text-faint)">
                           {binding ? `端口 ${binding.listenPort}` : "未设置"}
                         </span>

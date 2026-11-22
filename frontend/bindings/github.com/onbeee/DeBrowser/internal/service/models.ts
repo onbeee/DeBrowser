@@ -231,6 +231,17 @@ export interface LogExportInfo {
 }
 
 /**
+ * NodeTestResultView is one node's connectivity test outcome:
+ * OK with the measured delay, or not OK (unreachable or timed
+ * out). Results are display data only — nothing is persisted.
+ */
+export interface NodeTestResultView {
+    "nodeId": string;
+    "ok": boolean;
+    "delayMs": number;
+}
+
+/**
  * NodeView is one node for the node list; the source name rides
  * along so same-named nodes from different sources stay
  * distinguishable.

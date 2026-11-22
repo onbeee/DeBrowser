@@ -35,6 +35,7 @@ export type {
     ExportSummary,
     LogCapacityView,
     LogExportInfo,
+    NodeTestResultView,
     NodeView,
     SourceView,
     Status,

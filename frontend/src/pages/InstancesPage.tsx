@@ -24,6 +24,7 @@ import { notify, notifyError, notifySuccess } from "../stores/useNotificationSto
 import { classifyCounts } from "../lib/operationResult";
 import type { NotificationItem } from "../lib/notifications";
 import { newOperationId, recordOperationFeedback } from "../lib/operations";
+import ProxyNodePicker from "../components/ProxyNodePicker";
 import {
   kernelOptionLabels,
   planBatch,
@@ -918,25 +919,13 @@ export default function InstancesPage() {
               </div>
               <div>
                 <label className={labelCls}>代理节点</label>
-                <select
-                  className={inputCls}
+                <ProxyNodePicker
+                  nodes={proxyNodes}
                   value={form.proxyNodeId}
                   disabled={editingRunning}
-                  onChange={(e) => setForm({ ...form, proxyNodeId: e.target.value })}
-                >
-                  <option value="">不使用代理</option>
-                  {[...new Set(proxyNodes.map((n) => n.sourceName))].map((srcName) => (
-                    <optgroup key={srcName} label={srcName}>
-                      {proxyNodes
-                        .filter((n) => n.sourceName === srcName)
-                        .map((n) => (
-                          <option key={n.id} value={n.id}>
-                            {n.name}
-                          </option>
-                        ))}
-                    </optgroup>
-                  ))}
-                </select>
+                  onChange={(nodeId) => setForm({ ...form, proxyNodeId: nodeId })}
+                  ariaLabel="代理节点"
+                />
                 {proxyNodes.length === 0 && (
                   <p className="mt-1 text-xs text-(--text-faint)">
                     尚未导入任何代理节点。

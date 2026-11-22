@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -68,6 +70,52 @@ func (c *Client) Version(ctx context.Context) error {
 		return fmt.Errorf("GET /version: status %d", status)
 	}
 	return nil
+}
+
+// doRead is doBody but returns the response body (bounded).
+func (c *Client) doRead(ctx context.Context, method, path string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if c.secret != "" {
+		req.Header.Set("Authorization", "Bearer "+c.secret)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, body, nil
+}
+
+// Delay measures the named proxy's connection delay against
+// testURL via the core's native per-proxy delay endpoint: the
+// core dials the target THROUGH that proxy, so a returned
+// delay proves the node itself can carry a connection.
+// timeoutMs bounds the core-side measurement.
+func (c *Client) Delay(ctx context.Context, name, testURL string, timeoutMs int) (int, error) {
+	q := url.Values{}
+	q.Set("url", testURL)
+	q.Set("timeout", strconv.Itoa(timeoutMs))
+	status, body, err := c.doRead(ctx, http.MethodGet, "/proxies/"+url.PathEscape(name)+"/delay?"+q.Encode())
+	if err != nil {
+		return 0, err
+	}
+	if status != http.StatusOK {
+		return 0, fmt.Errorf("GET /proxies delay: status %d", status)
+	}
+	var out struct {
+		Delay int `json:"delay"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("GET /proxies delay: %w", err)
+	}
+	return out.Delay, nil
 }
 
 // ReloadConfig asks the running core to load the given
