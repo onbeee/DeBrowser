@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Gauge, Loader2, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
+import { Gauge, Loader2, Play, Plus, RefreshCw, Square, Trash2 } from "lucide-react";
 import {
   InstanceService,
   ProxyService,
@@ -22,10 +22,10 @@ function errText(err: unknown): string {
 // 返回。这不是错误：静默结束，不显示任何提示。
 const PICKER_CANCELLED = "未选择文件";
 
-// 代理配置页面（重新设计）：单页完成全部代理操作——
-// 顶部启动/关闭核心与添加配置；下方左右分栏，左侧是全部
-// 已导入节点（按来源分组显示），右侧是全部浏览器实例，
-// 每张实例卡片可直接选择代理节点或「不使用代理」。
+// 代理配置页面：单页完成全部代理操作。布局自上而下为
+// 顶部操作区（启动在左、添加在右）、独占一行的代理源
+// 卡片、下方左右并排的代理节点卡片与实例列表卡片；
+// 三个列表都是标题固定、内容独立纵向滚动，无任何分页。
 // 绑定数据只有一份：本页与浏览器实例页面读写同一个
 // ProxyService 绑定关系。
 export default function ProxyConfigPage() {
@@ -43,8 +43,6 @@ export default function ProxyConfigPage() {
   const [addURL, setAddURL] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
   const [confirmDeleteSource, setConfirmDeleteSource] = useState<SourceView | null>(null);
-  // 代理源区域分页（每页 3 行）。
-  const [sourcePage, setSourcePage] = useState(0);
   // 节点筛选：输入框/下拉是草稿，点「搜索」后才应用；
   // 「重置」清空草稿与已应用条件。筛选只影响显示。
   const [filterSourceDraft, setFilterSourceDraft] = useState("");
@@ -133,10 +131,11 @@ export default function ProxyConfigPage() {
     [visibleSources, visibleNodesBySource],
   );
 
-  // 代理源区域分页（每页 3 行，左右翻页）。
-  const sourcePageCount = Math.max(1, Math.ceil(sources.length / 3));
-  const currentSourcePage = Math.min(sourcePage, sourcePageCount - 1);
-  const pagedSources = sources.slice(currentSourcePage * 3, currentSourcePage * 3 + 3);
+  // 当前筛选下可见的节点（平铺展示，不显示来源分组）。
+  const visibleNodes = useMemo(
+    () => visibleSources.flatMap((src) => visibleNodesBySource.get(src.id) ?? []),
+    [visibleSources, visibleNodesBySource],
+  );
 
   const applyFilter = () => {
     setAppliedSource(filterSourceDraft);
@@ -297,27 +296,17 @@ export default function ProxyConfigPage() {
     "inline-flex h-9 items-center gap-1.5 rounded-md bg-(--danger) px-3 text-sm font-medium text-(--danger-contrast) transition hover:opacity-90 disabled:opacity-50";
 
   return (
-    <div className="flex h-full flex-col">
-      {/* 顶部工具栏：启动/关闭 + 添加 */}
-      <div className="flex flex-wrap items-center gap-3 px-5 py-3">
-        <div className="flex items-center gap-2">
-          <button type="button" className={status?.running ? btnSecondary : btnPrimary} disabled={busy !== null || !status} onClick={toggleCore}>
-            {busy === "core" ? <Loader2 size={15} className="animate-spin" /> : status?.running ? <Square size={15} /> : <Play size={15} />}
-            {status?.running ? "关闭" : "启动"}
-          </button>
-          <button type="button" className={btnSecondary} disabled={busy !== null} onClick={() => { setAddError(null); setAddOpen(true); }}>
-            <Plus size={15} />
-            添加
-          </button>
-        </div>
-        <span className="text-sm text-(--text-dim)">
-          {status === null
-            ? "正在读取核心状态…"
-            : status.running
-              ? `代理核心运行中（Mihomo ${status.version}）`
-              : "代理核心未启动"}
-        </span>
-        {status?.message && <span className="text-sm text-(--danger)">{status.message}</span>}
+    <div className="flex h-full flex-col gap-4 p-5">
+      {/* 顶部操作区：启动在左，添加在右 */}
+      <div className="flex shrink-0 items-center justify-between">
+        <button type="button" className={status?.running ? btnSecondary : btnPrimary} disabled={busy !== null || !status} onClick={toggleCore}>
+          {busy === "core" ? <Loader2 size={15} className="animate-spin" /> : status?.running ? <Square size={15} /> : <Play size={15} />}
+          {status?.running ? "关闭" : "启动"}
+        </button>
+        <button type="button" className={btnSecondary} disabled={busy !== null} onClick={() => { setAddError(null); setAddOpen(true); }}>
+          <Plus size={15} />
+          添加
+        </button>
       </div>
 
       {loading && !loadedRef.current ? (
@@ -332,219 +321,159 @@ export default function ProxyConfigPage() {
           </button>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 border-t border-(--border)">
-          {/* 左侧：代理源区域 + 代理节点区域（独立滚动） */}
-          <div className="flex min-w-0 flex-1 flex-col border-r border-(--border)">
-            {/* 代理源区域：每页最多 3 行，左右翻页；更新与
-                删除统一在这里，节点列表不再带来源操作。 */}
-            <div className="border-b border-(--border) px-5 py-3">
-              <h3 className="mb-2 text-sm font-medium">代理源</h3>
-              {sources.length === 0 ? (
-                <p className="text-sm text-(--text-faint)">尚未添加任何代理配置。点击上方「添加」导入订阅或本地配置文件。</p>
-              ) : (
-                <>
-                  <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_4.5rem_4.5rem_10rem] items-center gap-2 border-b border-(--border) pb-1.5 text-center text-xs text-(--text-faint)">
-                    <span>名称</span>
-                    <span>节点数</span>
-                    <span>来源</span>
-                    <span>状态</span>
-                    <span>操作</span>
-                  </div>
-                  <div>
-                    {pagedSources.map((src) => (
-                      <div
-                        key={src.id}
-                        className="grid grid-cols-[minmax(0,1fr)_4.5rem_4.5rem_4.5rem_10rem] items-center gap-2 border-b border-(--border) py-1.5 text-center last:border-b-0"
-                      >
-                        <span className="truncate text-sm font-medium" title={src.name}>
-                          {src.name}
-                        </span>
-                        <span className="text-sm">{src.nodeCount}</span>
-                        <span className="text-sm">{src.kind === "subscription" ? "订阅" : "本地"}</span>
-                        <span className="text-sm">{src.nodeCount > 0 ? "正常" : "无节点"}</span>
-                        <span className="flex items-center justify-center gap-1.5">
-                          <button
-                            type="button"
-                            className={btnSmall}
-                            disabled={busy !== null}
-                            onClick={() => updateSource(src)}
-                          >
-                            <RefreshCw size={12} />
-                            更新
-                          </button>
-                          <button
-                            type="button"
-                            className={btnSmall}
-                            disabled={busy !== null}
-                            onClick={() => setConfirmDeleteSource(src)}
-                          >
-                            <Trash2 size={12} />
-                            删除
-                          </button>
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  {sourcePageCount > 1 && (
-                    <div className="flex items-center justify-center gap-2 pt-2">
-                      <button
-                        type="button"
-                        className={btnSmall}
-                        disabled={currentSourcePage === 0}
-                        onClick={() => setSourcePage(currentSourcePage - 1)}
-                        aria-label="上一页"
-                      >
-                        <ChevronLeft size={13} />
-                      </button>
-                      <span className="text-xs text-(--text-dim)">
-                        {currentSourcePage + 1} / {sourcePageCount}
+        <>
+          {/* 代理源卡片：独占一行；标题与表头固定，
+              数据行内部纵向滚动（无分页）。 */}
+          <section className="flex shrink-0 flex-col overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+            <h3 className="shrink-0 border-b border-(--border) px-4 py-2.5 text-[15px] font-semibold">代理源</h3>
+            {sources.length === 0 ? (
+              <p className="px-4 py-3 text-sm text-(--text-faint)">尚未添加任何代理配置。点击右上方「添加」导入订阅或本地配置文件。</p>
+            ) : (
+              <>
+                <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_5rem_5.5rem_5rem_10rem] items-center gap-2 border-b border-(--border) px-4 py-2 text-center text-xs text-(--text-faint)">
+                  <span>名称</span>
+                  <span>节点数</span>
+                  <span>来源</span>
+                  <span>状态</span>
+                  <span>操作</span>
+                </div>
+                <div className="max-h-40 overflow-y-auto px-4">
+                  {sources.map((src) => (
+                    <div
+                      key={src.id}
+                      className="grid grid-cols-[minmax(0,1fr)_5rem_5.5rem_5rem_10rem] items-center gap-2 border-b border-(--border) py-2 text-center last:border-b-0"
+                    >
+                      <span className="truncate text-sm font-medium" title={src.name}>
+                        {src.name}
                       </span>
-                      <button
-                        type="button"
-                        className={btnSmall}
-                        disabled={currentSourcePage >= sourcePageCount - 1}
-                        onClick={() => setSourcePage(currentSourcePage + 1)}
-                        aria-label="下一页"
-                      >
-                        <ChevronRight size={13} />
-                      </button>
+                      <span className="text-sm">{src.nodeCount} 个</span>
+                      <span className="text-sm">{src.kind === "subscription" ? "订阅" : "本地文件"}</span>
+                      <span className="text-sm">{src.nodeCount > 0 ? "正常" : "无节点"}</span>
+                      <span className="flex items-center justify-center gap-1.5">
+                        <button type="button" className={btnSmall} disabled={busy !== null} onClick={() => updateSource(src)}>
+                          <RefreshCw size={12} />
+                          更新
+                        </button>
+                        <button type="button" className={btnSmall} disabled={busy !== null} onClick={() => setConfirmDeleteSource(src)}>
+                          <Trash2 size={12} />
+                          删除
+                        </button>
+                      </span>
                     </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* 代理节点区域：第一行标题 + 测速（最右），
-                第二行筛选控件 + 重置（最右，与测速同宽、
-                右边缘对齐）。 */}
-            <div className="flex items-center gap-3 px-5 pt-3">
-              <h3 className="min-w-0 flex-1 text-sm font-medium">代理节点</h3>
-              <button
-                type="button"
-                className={`${btnSmall} w-20 shrink-0 justify-center`}
-                disabled={testing || busy !== null || visibleNodeIds.length === 0}
-                onClick={() => void runTest()}
-              >
-                {testing ? <Loader2 size={13} className="animate-spin" /> : <Gauge size={13} />}
-                测速
-              </button>
-            </div>
-            <div className="flex items-center gap-2 px-5 pt-2">
-              <select
-                className="w-40 shrink-0 rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
-                value={filterSourceDraft}
-                onChange={(e) => setFilterSourceDraft(e.target.value)}
-                aria-label="按代理源筛选"
-              >
-                <option value="">全部代理源</option>
-                {sources.map((src) => (
-                  <option key={src.id} value={src.id}>
-                    {src.name}
-                  </option>
-                ))}
-              </select>
-              <input
-                className="w-44 min-w-0 rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)"
-                placeholder="搜索节点名称"
-                value={filterQueryDraft}
-                onChange={(e) => setFilterQueryDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") applyFilter();
-                }}
-              />
-              <button type="button" className={`${btnSmall} shrink-0`} onClick={applyFilter}>
-                搜索
-              </button>
-              <span className="min-w-0 flex-1" />
-              <button
-                type="button"
-                className={`${btnSmall} w-20 shrink-0 justify-center`}
-                onClick={resetFilter}
-              >
-                重置
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
-              {sources.length === 0 ? (
-                <p className="text-sm text-(--text-faint)">暂无节点。</p>
-              ) : visibleSources.length === 0 || visibleNodeIds.length === 0 ? (
-                <p className="text-sm text-(--text-faint)">没有符合筛选条件的节点。</p>
-              ) : (
-                <div className="space-y-5">
-                  {visibleSources.map((src) => {
-                    const list = visibleNodesBySource.get(src.id) ?? [];
-                    if (list.length === 0) return null;
-                    return (
-                      <div key={src.id}>
-                        <div className="mb-2 flex items-center gap-2">
-                          <span className="text-sm font-medium">{src.name}</span>
-                          <span className="text-xs text-(--text-faint)">
-                            {src.kind === "subscription" ? "订阅" : "本地文件"} · {list.length} 个节点
-                          </span>
-                        </div>
-                        <div className="space-y-1.5">
-                          {list.map((n) => {
-                            const result = testResults[n.id];
-                            return (
-                              <div
-                                key={n.id}
-                                className="flex items-center gap-2 rounded-md border border-(--border) bg-(--panel-bg) px-3 py-2"
-                              >
-                                <span className="min-w-0 flex-1 truncate text-sm">{n.name}</span>
-                                {result &&
-                                  (result.ok ? (
-                                    <span className="shrink-0 text-xs text-(--accent)">
-                                      可用 · {result.delayMs} ms
-                                    </span>
-                                  ) : (
-                                    <span className="shrink-0 text-xs text-(--danger)">不可用</span>
-                                  ))}
-                                <span className="shrink-0 text-xs text-(--text-faint)">{n.type}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
+                  ))}
                 </div>
-              )}
-            </div>
-          </div>
+              </>
+            )}
+          </section>
 
-          {/* 右侧：实例列表（独立滚动） */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <h3 className="border-b border-(--border) px-5 py-2.5 text-sm font-medium">浏览器实例</h3>
-            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
-              {instances.length === 0 ? (
-                <p className="text-sm text-(--text-faint)">尚未创建任何浏览器实例。</p>
-              ) : (
-                <div className="space-y-1.5">
-                  {instances.map((inst) => {
-                    const binding = bindingByInstance.get(inst.id);
-                    return (
-                      <div key={inst.id} className="flex items-center gap-3 rounded-md border border-(--border) bg-(--panel-bg) px-3 py-2">
-                        <span className="min-w-0 flex-1 truncate text-sm font-medium">{inst.name}</span>
-                        <div className="w-56 shrink-0">
-                          <ProxyNodePicker
-                            nodes={nodes}
-                            value={binding?.nodeId ?? ""}
-                            disabled={busy !== null}
-                            onChange={(nodeId) => changeBinding(inst, nodeId)}
-                            ariaLabel={`实例 ${inst.name} 的代理节点`}
-                          />
+          {/* 下方左右并排：代理节点卡片与实例列表卡片，
+              等高，各自内部纵向滚动（无分页）。 */}
+          <div className="flex min-h-0 flex-1 gap-4">
+            {/* 代理节点卡片：标题栏（标题 + 测速）与筛选
+                工具栏固定，只有节点列表滚动。 */}
+            <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+              <div className="flex shrink-0 items-center gap-3 border-b border-(--border) px-4 py-2.5">
+                <h3 className="min-w-0 flex-1 text-[15px] font-semibold">代理节点</h3>
+                <button
+                  type="button"
+                  className={`${btnSmall} w-20 shrink-0 justify-center`}
+                  disabled={testing || busy !== null || visibleNodeIds.length === 0}
+                  onClick={() => void runTest()}
+                >
+                  {testing ? <Loader2 size={13} className="animate-spin" /> : <Gauge size={13} />}
+                  测速
+                </button>
+              </div>
+              <div className="flex shrink-0 items-center gap-2 border-b border-(--border) px-4 py-2.5">
+                <select
+                  className="w-40 shrink-0 rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
+                  value={filterSourceDraft}
+                  onChange={(e) => setFilterSourceDraft(e.target.value)}
+                  aria-label="按代理源筛选"
+                >
+                  <option value="">全部代理源</option>
+                  {sources.map((src) => (
+                    <option key={src.id} value={src.id}>
+                      {src.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="min-w-0 flex-1 rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)"
+                  placeholder="搜索节点名称"
+                  value={filterQueryDraft}
+                  onChange={(e) => setFilterQueryDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") applyFilter();
+                  }}
+                />
+                <button type="button" className={`${btnSmall} w-20 shrink-0 justify-center`} onClick={applyFilter}>
+                  搜索
+                </button>
+                <button type="button" className={`${btnSmall} w-20 shrink-0 justify-center`} onClick={resetFilter}>
+                  重置
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
+                {sources.length === 0 ? (
+                  <p className="py-1 text-sm text-(--text-faint)">暂无节点。</p>
+                ) : visibleNodes.length === 0 ? (
+                  <p className="py-1 text-sm text-(--text-faint)">没有符合筛选条件的节点。</p>
+                ) : (
+                  <div>
+                    {visibleNodes.map((n) => {
+                      const result = testResults[n.id];
+                      return (
+                        <div key={n.id} className="flex items-center gap-2 border-b border-(--border) py-2 last:border-b-0">
+                          <span className="min-w-0 flex-1 truncate text-sm">{n.name}</span>
+                          {result ? (
+                            result.ok ? (
+                              <span className="shrink-0 text-xs text-(--accent)">{result.delayMs} ms</span>
+                            ) : (
+                              <span className="shrink-0 text-xs text-(--danger)">不可用</span>
+                            )
+                          ) : (
+                            <span className="shrink-0 text-xs text-(--text-faint)">未测试</span>
+                          )}
                         </div>
-                        <span className="w-16 shrink-0 text-right text-xs text-(--text-faint)">
-                          {binding ? `端口 ${binding.listenPort}` : "未设置"}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* 实例列表卡片：标题固定，实例行内部滚动。 */}
+            <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+              <h3 className="shrink-0 border-b border-(--border) px-4 py-2.5 text-[15px] font-semibold">实例列表</h3>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
+                {instances.length === 0 ? (
+                  <p className="py-1 text-sm text-(--text-faint)">尚未创建任何浏览器实例。</p>
+                ) : (
+                  <div>
+                    {instances.map((inst) => {
+                      const binding = bindingByInstance.get(inst.id);
+                      return (
+                        <div key={inst.id} className="flex items-center gap-3 border-b border-(--border) py-2 last:border-b-0">
+                          <span className="min-w-0 flex-1 truncate text-sm font-medium">{inst.name}</span>
+                          <div className="w-56 shrink-0">
+                            <ProxyNodePicker
+                              nodes={nodes}
+                              value={binding?.nodeId ?? ""}
+                              disabled={busy !== null}
+                              onChange={(nodeId) => changeBinding(inst, nodeId)}
+                              ariaLabel={`实例 ${inst.name} 的代理节点`}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
-        </div>
+        </>
       )}
 
       {/* 添加弹窗 */}
