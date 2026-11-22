@@ -348,3 +348,96 @@ func TestCoreNeverStartsImplicitly(t *testing.T) {
 		t.Fatalf("core state at end = %q, want stopped", st.State)
 	}
 }
+
+// gateHealFixture builds one URL source and one instance bound
+// to NodeA, entirely with the core stopped (the state the launch
+// gate's healing logic starts from).
+func gateHealFixture(t *testing.T) (*proxyFixture, model.InstanceProxyBinding) {
+	t.Helper()
+	f := testProxyFixture(t)
+	src, err := f.svc.AddURLSource("op", "机场", testSubURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := f.makeInstance(t, "实例一")
+	if _, err := f.svc.SetBinding("op", inst.ID, src.ID, "NodeA"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.store.GetBinding(context.Background(), inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, b
+}
+
+func TestGateHealReappliesRecordedSelection(t *testing.T) {
+	f, b := gateHealFixture(t)
+	var selects []string
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error {
+		selects = append(selects, group+"="+node)
+		return nil
+	}
+	// After the re-application the core reports the group serving
+	// its recorded node again: the heal succeeds. (The provider
+	// read inside applySelections fails against the not-running
+	// controller here, which only decides WHICH select is issued;
+	// the groupNowOverride is the heal's verdict input.)
+	f.svc.groupNowOverride = func(ctx context.Context, group string) (string, error) {
+		return "NodeA", nil
+	}
+	if err := f.svc.reapplySelectionForBinding(context.Background(), b); err != nil {
+		t.Fatalf("heal = %v, want nil", err)
+	}
+	if len(selects) == 0 {
+		t.Fatal("the heal must re-apply the recorded selections (no select call recorded)")
+	}
+}
+
+func TestGateHealRefusesWhenNodeStaysRejected(t *testing.T) {
+	f, b := gateHealFixture(t)
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error { return nil }
+	f.svc.groupNowOverride = func(ctx context.Context, group string) (string, error) {
+		return "REJECT", nil
+	}
+	err := f.svc.reapplySelectionForBinding(context.Background(), b)
+	if err == nil || !strings.Contains(err.Error(), "NodeA") {
+		t.Fatalf("heal = %v, want a refusal naming the bound node", err)
+	}
+}
+
+func TestGateHealSkipsGroupsThatAreNotRejected(t *testing.T) {
+	f, b := gateHealFixture(t)
+	selects := 0
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error {
+		selects++
+		return nil
+	}
+	// A group already serving its node: nothing to heal.
+	f.svc.groupNowOverride = func(ctx context.Context, group string) (string, error) {
+		return "NodeA", nil
+	}
+	if err := f.svc.healRejectedGroup(context.Background(), b); err != nil {
+		t.Fatalf("healthy group heal = %v, want nil", err)
+	}
+	// A selection that cannot even be read (core hiccup) must not
+	// block the launch either; the listener probe stays in charge.
+	f.svc.groupNowOverride = func(ctx context.Context, group string) (string, error) {
+		return "", errors.New("core hiccup")
+	}
+	if err := f.svc.healRejectedGroup(context.Background(), b); err != nil {
+		t.Fatalf("unreadable group heal = %v, want nil", err)
+	}
+	if selects != 0 {
+		t.Fatal("no re-application may happen for a healthy or unreadable group")
+	}
+}
+
+func TestRefreshAfterInstanceDeletedWithoutCore(t *testing.T) {
+	f := testProxyFixture(t)
+	// Core stopped: the deletion hook is a no-op — above all it
+	// must not start the core implicitly.
+	f.svc.RefreshAfterInstanceDeleted("no-such-instance")
+	if st := f.svc.GetCoreStatus(); st.State != "stopped" {
+		t.Fatalf("core state after deletion hook = %q, want stopped", st.State)
+	}
+}

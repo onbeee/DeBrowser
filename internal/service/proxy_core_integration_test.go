@@ -307,6 +307,36 @@ func TestProxyCoreEndToEnd(t *testing.T) {
 	}
 	probeWant(t, b1.Port, "VIA-A")
 
+	// Launch-gate self-heal: park inst1's group on REJECT directly
+	// in the core — the drift a core-side provider auto-refresh
+	// can leave behind although NodeA exists. The gate must
+	// re-apply the recorded selection and hand out the port.
+	if err := f.svc.client.SelectNode(context.Background(), mihomo.GroupName(inst1.ID), "REJECT"); err != nil {
+		t.Fatalf("park group on REJECT: %v", err)
+	}
+	probeWant(t, b1.Port, "")
+	port, err = f.svc.ProxyPortForInstance(inst1.ID)
+	if err != nil || port != b1.Port {
+		t.Fatalf("gate after drift = %d, %v; want %d, nil (healed)", port, err, b1.Port)
+	}
+	probeWant(t, b1.Port, "VIA-A")
+
+	// A group whose node is genuinely gone refuses the launch
+	// after the failed heal, instead of starting a browser whose
+	// traffic would only be rejected.
+	pick = fileV2
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err != nil {
+		t.Fatalf("reimport v2 (gate refusal setup): %v", err)
+	}
+	if _, err := f.svc.ProxyPortForInstance(inst1.ID); err == nil {
+		t.Fatal("bound instance with a missing node must not get a port")
+	}
+	pick = fileV1
+	if _, err := f.svc.ReimportFileSource("op", view.ID); err != nil {
+		t.Fatalf("reimport v1 (gate refusal restore): %v", err)
+	}
+	probeWant(t, b1.Port, "VIA-A")
+
 	// Reimporting a broken file fails, keeps the stored copy
 	// byte-identical and keeps the old nodes serving.
 	pick = fileBad
@@ -323,6 +353,26 @@ func TestProxyCoreEndToEnd(t *testing.T) {
 	}
 	if string(stored) != string(v1Bytes) {
 		t.Fatal("stored copy changed after a failed reimport")
+	}
+	probeWant(t, b1.Port, "VIA-A")
+
+	// Deleting an instance drops its listener and group from the
+	// running core at once: the record deletion cascade-removes
+	// the binding row, and the deletion hook regenerates and
+	// reloads the core configuration.
+	if err := f.store.DeleteInstance(context.Background(), inst2.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.RefreshAfterInstanceDeleted(inst2.ID)
+	if mihomo.ProbePort(b2.Port) {
+		t.Fatal("deleted instance's listener still answers in the running core")
+	}
+	cfgBytes, err := os.ReadFile(f.svc.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfgBytes), mihomo.GroupName(inst2.ID)) {
+		t.Fatal("generated config still contains the deleted instance's group")
 	}
 	probeWant(t, b1.Port, "VIA-A")
 

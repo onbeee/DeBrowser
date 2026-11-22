@@ -264,8 +264,9 @@
 
 1. 查绑定：无绑定 → `(0, nil)`，不追加代理参数，与无代理时完全一致（直连）；
 2. 有绑定：`coreRunning` 为假 → 返回错误「已绑定代理但核心尚未开启」，**拒绝启动**，不自动开启核心；
-3. 核心在运行：`ProbePort(绑定端口)` 探测 Listener 是否应答，无应答 → 返回错误并拒绝启动（提示检查核心状态）；
-4. 正常：返回端口，启动参数追加 `--proxy-server=http://127.0.0.1:{port}`，浏览器流量进入该实例的 Listener → 实例组 → 当前选择节点（或 REJECT）。
+3. 核心在运行：读实例组当前选择（`GET /proxies/{组}` 的 `now`）。若为 REJECT（例如核心定时刷新 provider 后节点已回归但选择未恢复），门禁重新下发一次全部记录选择并复检：恢复为绑定节点则继续；仍为 REJECT（节点确实不在或选择无法应用）→ 返回错误并**拒绝启动**（提示确认节点状态或更换节点），不启动一个流量必然被拒绝的浏览器。选择读取失败本身不阻断（按原逻辑继续第 4 步）；
+4. `ProbePort(绑定端口)` 探测 Listener 是否应答，无应答 → 返回错误并拒绝启动（提示检查核心状态）；
+5. 正常：返回端口，启动参数追加 `--proxy-server=http://127.0.0.1:{port}`，浏览器流量进入该实例的 Listener → 实例组 → 绑定节点。
 
 ### 流程 4：实例更换节点
 
@@ -277,13 +278,13 @@
 
 ### 流程 6：实例删除
 
-`InstanceService.DeleteInstance` 只删实例记录（Profile 目录保留；`DeleteInstanceAndProfile` 才删 Profile）。绑定行由外键 `ON DELETE CASCADE` 随实例行一并删除，**但实例服务不通知代理服务**：运行中的核心配置不会因此立即重载，被删实例的 Listener 与组会残留在运行配置中，直到下一次任何来源/绑定操作触发 `regenerate` 或核心重启（见第 10 节）。端口因 DB 行已删可被新绑定重新分配，但 `allocatePort` 的实时探测会跳过仍被残留 Listener 占用的端口。
+`InstanceService.DeleteInstance` 只删实例记录（Profile 目录保留；`DeleteInstanceAndProfile` 才删 Profile）。绑定行由外键 `ON DELETE CASCADE` 随实例行一并删除；记录删除成功后实例服务经 `ProxyInstanceDeleted` 钩子通知代理服务（`main.go` 接线至 `ProxyService.RefreshAfterInstanceDeleted`）：核心运行时立即重新生成配置并重载，被删实例的 Listener 与组随之从运行配置消失，其余实例的选择由重载后的 `applySelections` 恢复；核心未运行时无需处理（下次启动按 DB 生成）。该刷新为尽力而为：失败只记日志，删除本身不受影响。
 
 ### 节点失效与消失时的实例行为
 
 - 节点连接失败（节点仍在）：绑定与组选择不变，流量继续走该节点（失败由节点本身呈现），状态显示红色；
 - 节点从来源消失：组的选择在核心内回落到首成员 **REJECT**（实测行为），流量被拒绝，不会改走其他节点；DeBrowser 在每次 `applySelections` 时对缺失节点显式再选 REJECT 并保持 DB 绑定原样；
-- 节点恢复出现：下一次 `applySelections`（核心启动、手动刷新来源、重新导入、任一绑定/来源变更触发）时自动重新选回原节点，无需用户重选。核心自身的 provider 定时刷新（86400 秒）**不触发** DeBrowser 的重新选择（见第 10 节）。
+- 节点恢复出现：下一次 `applySelections`（核心启动、手动刷新来源、重新导入、任一绑定/来源变更触发）时自动重新选回原节点，无需用户重选。核心自身的 provider 定时刷新（86400 秒）**不触发** DeBrowser 的重新选择；为此启动门禁带一次自愈：门禁发现实例组当前选在 REJECT 时，先重新下发一次选择并复检——节点已回归则正常放行启动，节点确实不在则明确拒绝启动并提示（不再启动一个流量必然被拒绝的浏览器）。无后台 Watchdog（见第 10 节）。
 
 ---
 
@@ -299,6 +300,8 @@
 log-level: warning
 mode: rule
 ipv6: false
+tcp-concurrent: true
+unified-delay: true
 external-controller: "127.0.0.1:19097"
 secret: "<控制器随机密钥>"
 profile:
@@ -307,8 +310,15 @@ dns:
   enable: true
   ipv6: false
   enhanced-mode: redir-host
+  default-nameserver:
+    - "223.5.5.5"
+    - "223.6.6.6"
+  proxy-server-nameserver:
+    - "https://223.5.5.5/dns-query"
+    - "https://223.6.6.6/dns-query"
   nameserver:
-    - system
+    - "https://223.5.5.5/dns-query"
+    - "https://223.6.6.6/dns-query"
 proxy-providers:
   src-xxxxxxxx:                      # URL 来源
     type: http
@@ -353,7 +363,8 @@ rules:
 | `ipv6: false` | 固定 | 关闭 IPv6 |
 | `external-controller` / `secret` | 固定端口 19097 + Vault 外的本地密钥文件 | REST API 入口与 Bearer 认证，仅回环 |
 | `profile.store-selected: false` | 固定 | 禁止核心持久化组选择；选择真源是 DeBrowser 的 DB |
-| `dns` | 固定 | 核心 DNS：启用、redir-host 模式、上游为系统解析器。DeBrowser 只下发这组最小配置，解析行为全在核心 |
+| `dns` | 固定 | 核心 DNS：启用、redir-host 模式、上游为 DoH（`default-nameserver` 223.5.5.5/223.6.6.6、`proxy-server-nameserver` 与 `nameserver` 均为其 DoH 端点）。不再使用系统解析器：redir-host 下系统解析器可能使首次查询长时间阻塞（MetaCubeX/mihomo#1185），与测速超时现象相关。DeBrowser 只下发这组最小配置，解析行为全在核心 |
+| `tcp-concurrent` / `unified-delay` | 固定 `true` | 并发竞速拨号避免单个坏地址拖垮连接与测速；统一延迟口径去掉测速的额外握手往返 |
 | `proxy-providers.*` | 每来源一条 | http：订阅地址（Vault 解出）、每日自动刷新、抓取固定直连、缓存路径；file：指向 DeBrowser 的副本文件 |
 | `health-check` | 固定参数 | 见第 5 节 |
 | `proxy-groups`（delay-*） | 每来源一条 | 测速专用隐藏组 |
@@ -429,15 +440,15 @@ rules:
 
 ### 10.2 实机已报告现象与代码层面的对应（根因均标注状态）
 
-1. **同一订阅在 Clash Verge 全部节点可用，DeBrowser 约 1/3 节点测速超时** — 根因**待验证**。代码可确认的我方参数：测速超时固定 **5000 ms**；测速 URL 为 `https://www.gstatic.com/generate_204`；每来源一次 group delay 调用、组内节点由核心并发测试；DNS 为 redir-host + 系统解析器。这些参数与常见 Clash 客户端的默认值并不完全相同（超时、DNS 模式、并发方式都可能影响慢节点的测速结果），但仅凭代码不能断定是哪一项造成差异，需实机对照实验（同一节点分别用不同 timeout/URL 复测）才能定位。
+1. **同一订阅在 Clash Verge 全部节点可用，DeBrowser 约 1/3 节点测速超时** — 根因**待验证**。代码可确认的我方参数：测速超时固定 **5000 ms**；测速 URL 为 `https://www.gstatic.com/generate_204`；每来源一次 group delay 调用、组内节点由核心并发测试。已针对最可疑因素做收敛修复（待实机对照确认）：DNS 由 redir-host + 系统解析器改为 DoH 上游（系统解析器在 redir-host 下可阻塞首次查询，见 MetaCubeX/mihomo#1185），并开启 `tcp-concurrent` 与 `unified-delay`。修复是否消除超时率差异，以 Windows 11 实机同订阅对照测速为准。
 2. **曾出现 Listener 本地端口无响应** — 代码可确认的机制：核心在 Listener 端口冲突时**不退出**，只在 `core.log` 记录并丢弃该 Listener，进程存活与控制器应答都正常，因此「核心运行中」与「某 Listener 已死」可以并存。DeBrowser 的发现手段是探测：绑定列表的 Listener 状态、实例启动门禁都会 `ProbePort` 并在无响应时明确提示/拒绝。至于该次实机事件是否即此机制（或端口被其他程序占用、重载瞬间窗口），**待验证**（需当时的 `core.log`）。
 3. **曾出现配置更新失败** — 代码路径明确：热重载被核心拒绝时 `regenerateState` 恢复旧文件并返回错误，操作不假报成功。何种配置内容会触发核心拒绝（生成配置为程序渲染，顶层字段固定），**待验证**（需当时的错误文本与 `core.log`）。
 
 ### 10.3 代码可确认的限制与缺陷
 
-- **删除实例不立即清理运行配置**：绑定行被外键级联删除，但运行核心中的组与 Listener 残留到下一次配置重载或核心重启（第 6 节流程 6）。影响有界：无浏览器再使用该端口；端口再分配有实时探测兜底。
+- **删除实例后的运行配置清理依赖删除钩子**：绑定行被外键级联删除后，删除钩子在核心运行时立即重载配置清除残留的组与 Listener（第 6 节流程 6）；钩子刷新失败时（只记日志）残留会延续到下一次成功重载或核心重启。影响有界：无浏览器再使用该端口；端口再分配有实时探测兜底。
 - **核心未运行时 SetBinding 不校验节点存在性**：离线绑定按用户所选存档；若节点名已不存在，核心启动后该实例进入 REJECT + 黄色「已不存在」状态，需用户改绑或等节点回归。
-- **核心定时刷新后的选择恢复缺口**：http provider 每 86400 秒由核心自行刷新；若绑定节点在该次刷新中消失又回归，组选择停留在 REJECT，直到下一次 DeBrowser 侧触发 `applySelections`（启动核心、手动刷新、重新导入、任一来源/绑定变更）才恢复。手动刷新订阅无此问题（刷新后必重下达选择）。
+- **核心定时刷新后的选择恢复缺口（已在启动路径自愈）**：http provider 每 86400 秒由核心自行刷新；若绑定节点在该次刷新中消失又回归，组选择停留在 REJECT，直到下一次 DeBrowser 侧触发 `applySelections` 才恢复——现在启动门禁就是这样一个触发点：启动已绑定实例时若组在 REJECT，门禁先重下发一次选择，节点已回归即恢复放行；实例不启动期间不做后台恢复（无 Watchdog）。手动刷新订阅无此问题（刷新后必重下达选择）。
 - **applySelections 的读失败即拒绝**：某绑定的 provider 暂时读失败时，该实例被显式置 REJECT（fail-closed 设计），瞬时 API 故障会让实例暂时断流，直到下一次重下达；不会误走其他节点。
 - **测速结果不可分辨失败原因**：超时、连接失败、DNS 失败在测速结果中同为 -1，无细分。
 - **健康状态依赖检查历史**：`lazy: true` 下未被使用过的节点长期为「未检查」；绑定状态的颜色只有在节点被测速或被实际使用后才有意义。
@@ -498,7 +509,7 @@ rules:
 | 文件 | 内容 |
 |---|---|
 | `internal/mihomo/config.go` | 配置生成 `Generate`、组名/测速组名派生、YAML 标量转义 |
-| `internal/mihomo/client.go` | 核心 REST 客户端（Version / ProviderProxies / RefreshProvider / GroupDelay / SelectNode / ReloadConfig） |
+| `internal/mihomo/client.go` | 核心 REST 客户端（Version / ProviderProxies / RefreshProvider / GroupDelay / SelectNode / GroupNow / ReloadConfig） |
 | `internal/mihomo/manager.go` | 核心进程管理（EnsureBinary 双哈希、Start/Stop/abortStart、opMu 串行化）、版本与资产锁定 |
 | `internal/mihomo/child.go`、`child_unix.go`、`child_windows.go` | 子进程抽象与平台实现（Windows：Job Object + 挂起创建 + 句柄列表 + DuplicateHandle 副本；`StartProcess` 供一次性验证核心复用） |
 | `internal/service/proxy_service.go` | 代理业务服务全部逻辑（来源、节点、测速、绑定、配置生成协调、启动门禁 `ProxyPortForInstance`） |

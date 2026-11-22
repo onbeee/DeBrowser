@@ -51,6 +51,13 @@ type InstanceService struct {
 	// plain function so the instance service never depends on the
 	// proxy service's type.
 	ProxyPortFor func(instanceID string) (int, error)
+	// ProxyInstanceDeleted, when set, is notified after an
+	// instance record has been deleted (Stage 6C): the proxy
+	// layer refreshes a running core so the deleted instance's
+	// listener and group do not linger in it. Best effort by
+	// contract — the deletion has already committed when this
+	// runs, so the hook takes the ID and reports nothing back.
+	ProxyInstanceDeleted func(instanceID string)
 	// Runtime tracking (Stage 9B), guarded by rtMu: procs holds
 	// the verified live process of each running instance;
 	// transient holds the in-flight starting/stopping state of an
@@ -616,8 +623,17 @@ func (s *InstanceService) deleteInstance(id string) error {
 		}
 		return err
 	}
+	s.proxyInstanceDeleted(id)
 	s.log.Info("instance metadata deleted (profile files kept)", "id", id)
 	return nil
+}
+
+// proxyInstanceDeleted notifies the proxy layer (when wired)
+// that an instance record is gone.
+func (s *InstanceService) proxyInstanceDeleted(id string) {
+	if s.ProxyInstanceDeleted != nil {
+		s.ProxyInstanceDeleted(id)
+	}
 }
 
 // DeleteInstanceAndProfile is the explicit, destructive counterpart
@@ -682,6 +698,7 @@ func (s *InstanceService) deleteInstanceAndProfile(id string, op *logging.Operat
 			}
 			return err
 		}
+		s.proxyInstanceDeleted(id)
 		op.Step("删除数据库记录", logging.StatusSuccess, nil)
 		s.log.Info("instance deleted (no profile directory on disk)", "id", id)
 		return nil
@@ -714,6 +731,7 @@ func (s *InstanceService) deleteInstanceAndProfile(id string, op *logging.Operat
 		}
 		return err
 	}
+	s.proxyInstanceDeleted(id)
 	op.Step("删除数据库记录", logging.StatusSuccess, nil)
 	wipe := s.wipeQuarantine
 	if wipe == nil {

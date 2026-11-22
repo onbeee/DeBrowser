@@ -196,6 +196,7 @@ func run() error {
 	proxyService := service.NewProxyService(db, cfg.Layout, vaultStore, logger)
 	proxyService.Auditor = logSystem
 	instanceService.ProxyPortFor = proxyService.ProxyPortForInstance
+	instanceService.ProxyInstanceDeleted = proxyService.RefreshAfterInstanceDeleted
 
 	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, proxyService, logger, assets)
 	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)

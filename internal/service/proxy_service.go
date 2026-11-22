@@ -77,6 +77,11 @@ type ProxyService struct {
 	// exercised deterministically.
 	refreshOverride func(ctx context.Context, provider string) error
 	selectOverride  func(ctx context.Context, group, node string) error
+	// groupNowOverride, when set, replaces the group-selection
+	// read. Test seam only (nil in production), same rationale:
+	// a group parked on REJECT by core-side drift cannot be
+	// provoked deterministically from outside the core.
+	groupNowOverride func(ctx context.Context, group string) (string, error)
 }
 
 // refreshProvider asks the core to re-fetch one proxy-provider.
@@ -93,6 +98,15 @@ func (s *ProxyService) selectNode(ctx context.Context, group, node string) error
 		return s.selectOverride(ctx, group, node)
 	}
 	return s.client.SelectNode(ctx, group, node)
+}
+
+// groupNow reads one group's currently selected member from the
+// core: the bound node's name, or REJECT while it is unavailable.
+func (s *ProxyService) groupNow(ctx context.Context, group string) (string, error) {
+	if s.groupNowOverride != nil {
+		return s.groupNowOverride(ctx, group)
+	}
+	return s.client.GroupNow(ctx, group)
 }
 
 const (
@@ -1429,8 +1443,87 @@ func (s *ProxyService) ProxyPortForInstance(instanceID string) (int, error) {
 	if !s.coreRunning(ctx) {
 		return 0, fmt.Errorf("该实例已绑定代理节点，但代理核心尚未开启。请先在「代理配置」页面手动开启代理，再启动该实例")
 	}
+	if err := s.healRejectedGroup(ctx, b); err != nil {
+		return 0, err
+	}
 	if !mihomo.ProbePort(b.Port) {
 		return 0, fmt.Errorf("该实例的代理监听端口 127.0.0.1:%d 无响应，实例未启动。请检查「代理配置」页面的核心状态后重试", b.Port)
 	}
 	return b.Port, nil
+}
+
+// healRejectedGroup is the launch gate's one-shot self-healing
+// for an instance group the core has parked on REJECT. The core
+// refreshes http providers on its own schedule (interval 86400),
+// outside DeBrowser's operations: a node that disappears and
+// returns inside that cycle leaves its group on REJECT even
+// though the recorded binding is servable again, because
+// applySelections normally runs only on DeBrowser-side
+// operations. Instead of polling in the background (there is no
+// watchdog, by design), the launch gate checks the group's
+// current selection: REJECT triggers exactly one re-application
+// of the recorded selections and a re-check.
+//
+// Outcomes: the group serves its bound node (already, or healed)
+// → nil and the launch proceeds. Still REJECT after re-applying
+// → the bound node is genuinely unavailable in its source right
+// now, and the launch is refused with a clear message instead of
+// starting a browser whose traffic the core would only reject.
+// A selection read that fails outright (a core hiccup) does not
+// block the launch: the listener probe in the caller remains the
+// authority, exactly as before this check existed.
+func (s *ProxyService) healRejectedGroup(ctx context.Context, b model.InstanceProxyBinding) error {
+	now, err := s.groupNow(ctx, mihomo.GroupName(b.InstanceID))
+	if err != nil || now != "REJECT" {
+		return nil
+	}
+	hctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.coreRunning(hctx) {
+		return nil // raced with a core stop; the gate's own checks decide
+	}
+	return s.reapplySelectionForBinding(hctx, b)
+}
+
+// reapplySelectionForBinding re-applies the recorded selections
+// once and reports whether the binding's group now serves its
+// recorded node. Callers hold s.mu and have established that the
+// core is running.
+func (s *ProxyService) reapplySelectionForBinding(ctx context.Context, b model.InstanceProxyBinding) error {
+	applyErr := s.applySelections(ctx)
+	now, err := s.groupNow(ctx, mihomo.GroupName(b.InstanceID))
+	if err == nil && now == b.NodeName {
+		return nil
+	}
+	if applyErr != nil {
+		return fmt.Errorf("该实例绑定的代理节点「%s」当前无法应用到核心，实例未启动：%w", b.NodeName, applyErr)
+	}
+	return fmt.Errorf("该实例绑定的代理节点「%s」已不在其来源中或当前不可用，实例未启动。请在「代理配置」页面确认节点状态，或为该实例更换节点", b.NodeName)
+}
+
+// RefreshAfterInstanceDeleted is the deletion hook the instance
+// service calls after an instance record is gone (its binding row
+// went with it, via the schema cascade). A running core would
+// otherwise keep serving the deleted instance's listener and
+// group until the next unrelated reload or a core restart;
+// regenerating here drops them immediately, and the regeneration
+// re-applies the surviving instances' selections. A stopped core
+// needs nothing: the next start generates from the database
+// anyway. Failures are logged, never returned — the deletion has
+// already committed, and the residue degrades to the pre-hook
+// behaviour (cleaned up by the next successful regeneration).
+func (s *ProxyService) RefreshAfterInstanceDeleted(instanceID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.coreRunning(ctx) {
+		return
+	}
+	if err := s.regenerate(ctx); err != nil {
+		s.log.Warn("proxy configuration refresh after instance deletion failed; the deleted instance's listener is removed on the next reload or core restart",
+			"instance", instanceID, "error", err)
+	}
 }

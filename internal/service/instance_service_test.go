@@ -541,3 +541,38 @@ func TestStartupReconcilesRunningToStopped(t *testing.T) {
 		t.Errorf("status after startup reconciliation = %q, want stopped", got.Status)
 	}
 }
+
+func TestDeleteInstanceNotifiesProxyHook(t *testing.T) {
+	svc, cfg := testInstanceService(t)
+	db, err := database.Open(cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	st := store.New(db)
+	id, err := store.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateInstance(t.Context(), model.Instance{
+		ID: id, Name: "待删实例", UserDataDir: "profiles/" + id,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var notified []string
+	svc.ProxyInstanceDeleted = func(got string) { notified = append(notified, got) }
+	if err := svc.DeleteInstance("op", id); err != nil {
+		t.Fatal(err)
+	}
+	if len(notified) != 1 || notified[0] != id {
+		t.Fatalf("proxy hook notifications = %v, want [%s]", notified, id)
+	}
+	// A failed delete (the record is already gone) must not
+	// notify again.
+	if err := svc.DeleteInstance("op", id); err == nil {
+		t.Fatal("deleting a missing instance must fail")
+	}
+	if len(notified) != 1 {
+		t.Fatalf("proxy hook notifications after failed delete = %v, want exactly one", notified)
+	}
+}

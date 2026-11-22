@@ -27,9 +27,19 @@ func TestGenerateShape(t *testing.T) {
 	}
 	mustContain := []string{
 		"mode: rule\n",
+		"ipv6: false\n",
+		"tcp-concurrent: true\n",
+		"unified-delay: true\n",
 		"external-controller: \"127.0.0.1:19097\"",
 		"secret: \"test-secret\"",
 		"store-selected: false",
+		// DNS: redir-host with DoH upstreams; the system resolver
+		// must not come back (it stalls first queries under
+		// redir-host and fails concurrent delay tests).
+		"enhanced-mode: redir-host",
+		"default-nameserver:\n    - \"223.5.5.5\"\n    - \"223.6.6.6\"",
+		"proxy-server-nameserver:\n    - \"https://223.5.5.5/dns-query\"\n    - \"https://223.6.6.6/dns-query\"",
+		"nameserver:\n    - \"https://223.5.5.5/dns-query\"\n    - \"https://223.6.6.6/dns-query\"",
 		// URL source: http provider, fetch pinned to DIRECT.
 		"src-aaaa1111:\n    type: http",
 		"proxy: DIRECT",
@@ -63,8 +73,9 @@ func TestGenerateShape(t *testing.T) {
 		}
 	}
 	// DeBrowser keeps no rule set of its own: no sub-rules, no
-	// built-in direct/bypass rule lines anywhere.
-	for _, banned := range []string{"sub-rules:", "IP-CIDR", "DOMAIN-SUFFIX", "\n    rule: "} {
+	// built-in direct/bypass rule lines anywhere. The system DNS
+	// resolver must not reappear as an upstream either.
+	for _, banned := range []string{"sub-rules:", "IP-CIDR", "DOMAIN-SUFFIX", "\n    rule: ", "- system"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("generated config must not contain %q\n---\n%s", banned, out)
 		}

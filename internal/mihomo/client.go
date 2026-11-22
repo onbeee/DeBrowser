@@ -160,6 +160,24 @@ func (c *Client) SelectNode(ctx context.Context, group, node string) error {
 	return err
 }
 
+// GroupNow returns a proxy group's currently selected member
+// (the "now" field of the core's per-proxy view). For an instance
+// group that is the bound node's name, or REJECT while the bound
+// node is unavailable.
+func (c *Client) GroupNow(ctx context.Context, group string) (string, error) {
+	data, err := c.do(ctx, http.MethodGet, "/proxies/"+url.PathEscape(group), nil)
+	if err != nil {
+		return "", err
+	}
+	var g struct {
+		Now string `json:"now"`
+	}
+	if err := json.Unmarshal(data, &g); err != nil {
+		return "", fmt.Errorf("mihomo api group now: %w", err)
+	}
+	return g.Now, nil
+}
+
 // ReloadConfig hot-reloads the core from a configuration file
 // path (PUT /configs). A payload the core rejects leaves the
 // previously running configuration untouched.

@@ -129,6 +129,23 @@ export function ProxyPortForInstance(instanceID: string): $CancellablePromise<nu
 }
 
 /**
+ * RefreshAfterInstanceDeleted is the deletion hook the instance
+ * service calls after an instance record is gone (its binding row
+ * went with it, via the schema cascade). A running core would
+ * otherwise keep serving the deleted instance's listener and
+ * group until the next unrelated reload or a core restart;
+ * regenerating here drops them immediately, and the regeneration
+ * re-applies the surviving instances' selections. A stopped core
+ * needs nothing: the next start generates from the database
+ * anyway. Failures are logged, never returned — the deletion has
+ * already committed, and the residue degrades to the pre-hook
+ * behaviour (cleaned up by the next successful regeneration).
+ */
+export function RefreshAfterInstanceDeleted(instanceID: string): $CancellablePromise<void> {
+    return $Call.ByID(653567272, instanceID);
+}
+
+/**
  * RefreshSource re-fetches a subscription through the core. The
  * core keeps the previous nodes when the fetch fails, and
  * instance bindings are never changed by an update; afterwards

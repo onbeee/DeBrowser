@@ -107,6 +107,14 @@ func Generate(in ConfigInput) (string, error) {
 	w.WriteString("log-level: warning\n")
 	w.WriteString("mode: rule\n")
 	w.WriteString("ipv6: false\n")
+	// tcp-concurrent races a hostname's addresses instead of
+	// dialing them one by one, so one dead address cannot stall a
+	// connection (or a delay test) until timeout. unified-delay
+	// drops the extra handshake round trip from delay measurement,
+	// keeping measured delays comparable with other Mihomo
+	// clients.
+	w.WriteString("tcp-concurrent: true\n")
+	w.WriteString("unified-delay: true\n")
 	fmt.Fprintf(&w, "external-controller: %s\n", yq(fmt.Sprintf("127.0.0.1:%d", in.ControllerPort)))
 	fmt.Fprintf(&w, "secret: %s\n", yq(in.Secret))
 	// DeBrowser owns instance->node selections in its database;
@@ -114,8 +122,18 @@ func Generate(in ConfigInput) (string, error) {
 	w.WriteString("profile:\n  store-selected: false\n")
 	// DNS is the core's job. redir-host keeps name resolution
 	// semantics unsurprising for browsers that hand hostnames to
-	// the proxy; the system resolver is the default upstream.
-	w.WriteString("dns:\n  enable: true\n  ipv6: false\n  enhanced-mode: redir-host\n  nameserver:\n    - system\n")
+	// the proxy. The upstreams are DoH endpoints, NOT the system
+	// resolver: under redir-host the system resolver can stall
+	// the first query for a name badly enough to fail concurrent
+	// delay tests (MetaCubeX/mihomo#1185). default-nameserver
+	// resolves the DoH servers' own hostnames (plain IPs here,
+	// so bootstrap needs no resolution); proxy-server-nameserver
+	// resolves proxy node hostnames, so node dialing never
+	// depends on the general nameserver path.
+	w.WriteString("dns:\n  enable: true\n  ipv6: false\n  enhanced-mode: redir-host\n")
+	w.WriteString("  default-nameserver:\n    - \"223.5.5.5\"\n    - \"223.6.6.6\"\n")
+	w.WriteString("  proxy-server-nameserver:\n    - \"https://223.5.5.5/dns-query\"\n    - \"https://223.6.6.6/dns-query\"\n")
+	w.WriteString("  nameserver:\n    - \"https://223.5.5.5/dns-query\"\n    - \"https://223.6.6.6/dns-query\"\n")
 
 	if len(sources) > 0 {
 		w.WriteString("proxy-providers:\n")
