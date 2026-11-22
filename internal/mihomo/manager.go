@@ -240,6 +240,13 @@ type Manager struct {
 	client  *Client
 	port    int
 
+	// opMu serializes Start and Stop as whole operations. The
+	// child check in Start and the child assignment are far
+	// apart (binary preparation and process creation sit
+	// between them), so without this mutex two concurrent
+	// Starts could both pass the check and spawn two cores,
+	// the second assignment orphaning the first process.
+	opMu  sync.Mutex
 	mu    sync.Mutex
 	child childProcess
 	done  chan struct{}
@@ -294,6 +301,8 @@ func (m *Manager) WaitErr() error {
 // controller port occupied by anyone else is a reported conflict
 // — the external core is never adopted, reconfigured or stopped.
 func (m *Manager) Start(ctx context.Context) error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	m.mu.Lock()
 	if m.child != nil {
 		select {
@@ -400,6 +409,8 @@ func (m *Manager) abortStart(child childProcess, done chan struct{}) {
 // kept: Stop never reports success while its core is still
 // running.
 func (m *Manager) Stop() error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	m.mu.Lock()
 	child, done := m.child, m.done
 	m.mu.Unlock()

@@ -3,8 +3,16 @@ package mihomo
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -261,5 +269,93 @@ func TestAbortStartKeepsTrackingWhenExitUnconfirmed(t *testing.T) {
 	m.mu.Unlock()
 	if tracked != nil {
 		t.Fatal("abortStart must clear tracking once the exit is confirmed")
+	}
+}
+
+// Concurrent Start calls must spawn exactly ONE core: Start's
+// already-running check and its child assignment are separated
+// by slow preparation work, so without whole-operation
+// serialization two Starts could both spawn and the second
+// assignment would orphan the first process. All callers get
+// success (a running core is what they asked for), and Stop
+// afterwards works on the single tracked child.
+func TestManagerConcurrentStartSpawnsOneCore(t *testing.T) {
+	genuine := os.Getenv("DEBROWSER_TEST_MIHOMO")
+	if genuine == "" {
+		t.Skip("DEBROWSER_TEST_MIHOMO not set; genuine-binary acceptance not checked")
+	}
+	// A stand-in controller that answers /version, so Start's
+	// readiness check succeeds for the fake child.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"v-test"}`))
+	}))
+	defer srv.Close()
+	srvURL, _ := url.Parse(srv.URL)
+	srvPort, _ := strconv.Atoi(srvURL.Port())
+
+	workdir := t.TempDir()
+	data, err := os.ReadFile(genuine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(BinaryPath(workdir), data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(workdir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: rule\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// A free port for the conflict probe (nothing may answer).
+	probeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probePort := probeLn.Addr().(*net.TCPAddr).Port
+	_ = probeLn.Close()
+
+	m := NewManager(workdir, cfgPath, NewClient(srvPort, ""), probePort)
+	m.readyTimeout = 5 * time.Second
+
+	var spawns atomic.Int32
+	orig := startCoreChild
+	startCoreChild = func(bin string, args []string, dir string, logFile *os.File) (childProcess, error) {
+		spawns.Add(1)
+		fc := newFakeChild()
+		go func() {
+			<-fc.killed
+			close(fc.waitRelease)
+		}()
+		return fc, nil
+	}
+	defer func() { startCoreChild = orig }()
+
+	const callers = 8
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = m.Start(context.Background())
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Start caller %d: %v", i, err)
+		}
+	}
+	if got := spawns.Load(); got != 1 {
+		t.Fatalf("concurrent Starts spawned %d cores, want exactly 1", got)
+	}
+	if !m.Running() {
+		t.Fatal("manager must report running after concurrent Starts")
+	}
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop after concurrent Starts: %v", err)
+	}
+	if m.Running() {
+		t.Fatal("manager must not report running after Stop")
 	}
 }
