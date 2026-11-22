@@ -36,7 +36,7 @@ type App struct {
 
 // New builds the Wails application around the given services. The
 // assets filesystem holds the embedded frontend build (frontend/dist).
-func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, diagnosticsService *service.DiagnosticsService, browserService *service.BrowserService, bookmarkService *service.BookmarkService, syncService *service.SyncService, log *slog.Logger, assets fs.FS) *App {
+func New(cfg config.Config, appService *service.AppService, instanceService *service.InstanceService, diagnosticsService *service.DiagnosticsService, browserService *service.BrowserService, bookmarkService *service.BookmarkService, syncService *service.SyncService, proxyService *service.ProxyService, log *slog.Logger, assets fs.FS) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{cancel: cancel, log: log}
 
@@ -61,6 +61,16 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 		dlg.AddFilter("可执行文件", "*.exe")
 		return dlg.PromptForSingleSelection()
 	}
+
+	// Local proxy configuration import picks a Clash/Mihomo YAML
+	// file through the native open-file dialog.
+	proxyService.SourceFilePicker = func() (string, error) {
+		dlg := application.Get().Dialog.OpenFile()
+		dlg.SetTitle("选择代理配置文件")
+		dlg.AddFilter("Clash/Mihomo 配置", "*.yaml;*.yml")
+		dlg.AddFilter("全部文件", "*.*")
+		return dlg.PromptForSingleSelection()
+	}
 	a.wails = application.New(application.Options{
 		Name:        version.Name,
 		Description: "Local-first multi-profile browser manager",
@@ -71,6 +81,7 @@ func New(cfg config.Config, appService *service.AppService, instanceService *ser
 			application.NewService(browserService),
 			application.NewService(bookmarkService),
 			application.NewService(syncService),
+			application.NewService(proxyService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

@@ -6,6 +6,7 @@ import * as BookmarkService from "./bookmarkservice.js";
 import * as BrowserService from "./browserservice.js";
 import * as DiagnosticsService from "./diagnosticsservice.js";
 import * as InstanceService from "./instanceservice.js";
+import * as ProxyService from "./proxyservice.js";
 import * as SyncService from "./syncservice.js";
 export {
     AppService,
@@ -13,17 +14,20 @@ export {
     BrowserService,
     DiagnosticsService,
     InstanceService,
+    ProxyService,
     SyncService
 };
 
 export type {
     ApplySearchResult,
+    BindingView,
     BookmarkInstanceInfo,
     BookmarkSearchGroup,
     BookmarkSearchResult,
     BrowserView,
     CategoryView,
     ClientEventInput,
+    CoreStatusView,
     CreateInstanceInput,
     CreateLibraryNodeInput,
     DiagnosticsView,
@@ -31,6 +35,8 @@ export type {
     ExportSummary,
     LogCapacityView,
     LogExportInfo,
+    NodeView,
+    SourceView,
     Status,
     SyncBookmarksResult,
     SyncCandidate,

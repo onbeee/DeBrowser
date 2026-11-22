@@ -34,8 +34,9 @@ func (s *Store) SecretRefInUse(ctx context.Context, ref string) (bool, error) {
 	if err := s.q.QueryRowContext(ctx,
 		`SELECT (SELECT COUNT(1) FROM proxies WHERE secret_ref = ?) +
 		        (SELECT COUNT(1) FROM subscriptions WHERE secret_ref = ?) +
-		        (SELECT COUNT(1) FROM mihomo_configs WHERE secret_ref = ?)`,
-		ref, ref, ref).Scan(&n); err != nil {
+		        (SELECT COUNT(1) FROM mihomo_configs WHERE secret_ref = ?) +
+		        (SELECT COUNT(1) FROM proxy_sources WHERE secret_ref = ?)`,
+		ref, ref, ref, ref).Scan(&n); err != nil {
 		return false, fmt.Errorf("store: secret ref in use: %w", err)
 	}
 	return n > 0, nil

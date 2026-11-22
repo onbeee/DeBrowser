@@ -239,3 +239,59 @@ type Bookmark struct {
 	CreatedAt  string  `json:"createdAt"`
 	UpdatedAt  string  `json:"updatedAt"`
 }
+
+// --- Proxy module (redesign) ---
+//
+// The types below are the complete data model of the redesigned
+// proxy module. They are unrelated to the historical Proxy /
+// Subscription types above, which describe the dormant
+// pre-redesign compatibility data and are not used here.
+
+// ProxySource kinds: how a configuration source was imported.
+const (
+	ProxySourceKindSubscription = "subscription"
+	ProxySourceKindFile         = "file"
+)
+
+// ProxySource is one imported configuration source: a
+// subscription or a local file. A subscription's URL is never
+// part of this record — it lives in the credential vault and
+// SecretRef is the opaque reference to it (never serialized).
+// A file source's FileName names DeBrowser's own copy of the
+// imported file under data/mihomo/sources/.
+type ProxySource struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"` // ProxySourceKindSubscription | ProxySourceKindFile
+	SecretRef string `json:"-"`
+	FileName  string `json:"-"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// ProxyNode is one proxy node parsed out of a source. Its full
+// definition is kept verbatim as JSON (ConfigJSON) so the core
+// configuration can be generated from the database alone. The
+// row is the node's identity: nodes with the same name from
+// different sources are different nodes.
+type ProxyNode struct {
+	ID         string `json:"id"`
+	SourceID   string `json:"sourceId"`
+	Name       string `json:"name"`
+	ConfigJSON string `json:"-"`
+	CreatedAt  string `json:"createdAt"`
+}
+
+// InstanceProxyBinding is THE one authoritative binding of a
+// browser instance to a proxy node, shared by the proxy page
+// and the instance pages. ListenPort is allocated when the
+// binding is created and kept for its lifetime: it is the
+// loopback port of the core listener that serves exactly this
+// instance through its bound node.
+type InstanceProxyBinding struct {
+	InstanceID string `json:"instanceId"`
+	NodeID     string `json:"nodeId"`
+	ListenPort int    `json:"listenPort"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+}

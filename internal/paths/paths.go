@@ -51,6 +51,10 @@ type Layout struct {
 	// proxy credential and subscription URL lives there, encrypted;
 	// SQLite holds only opaque references to its entries.
 	SecretsFile string // <root>/data/secrets.vault
+	// Mihomo is the proxy core's working directory: the core
+	// binary, its generated configuration, imported file copies
+	// and the core's own log all live here.
+	Mihomo string // <root>/data/mihomo
 }
 
 // Resolve builds the portable layout for an application root directory.
@@ -82,6 +86,7 @@ func Resolve(root string) (Layout, error) {
 		InstanceLock:   filepath.Join(data, "app.lock"),
 		ActivationFile: filepath.Join(data, "activate.request"),
 		SecretsFile:    filepath.Join(data, "secrets.vault"),
+		Mihomo:         filepath.Join(data, "mihomo"),
 	}, nil
 }
 
