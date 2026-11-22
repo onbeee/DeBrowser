@@ -34,11 +34,6 @@ export default function Sidebar() {
             >
               <Icon size={17} strokeWidth={2} />
               <span className="flex-1">{item.label}</span>
-              {item.key !== "settings" && (
-                <span className="rounded bg-(--badge-bg) px-1.5 py-0.5 text-[10px] text-(--text-faint)">
-                  {item.stage}
-                </span>
-              )}
             </button>
           );
         })}

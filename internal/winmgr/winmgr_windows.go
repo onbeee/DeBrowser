@@ -18,10 +18,8 @@ var (
 	procSetWindowPlacement       = user32.NewProc("SetWindowPlacement")
 	procGetWindowRect            = user32.NewProc("GetWindowRect")
 	procSetWindowPos             = user32.NewProc("SetWindowPos")
-	procGetForegroundWindow      = user32.NewProc("GetForegroundWindow")
 	procEnumDisplayMonitors      = user32.NewProc("EnumDisplayMonitors")
 	procGetMonitorInfoW          = user32.NewProc("GetMonitorInfoW")
-	procGetDpiForWindow          = user32.NewProc("GetDpiForWindow")
 	procGetClassNameW            = user32.NewProc("GetClassNameW")
 	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
 )
@@ -64,31 +62,6 @@ type windowPlacement struct {
 // Compile-time size guard: this assignment only compiles while
 // windowPlacement is exactly 44 bytes.
 var _ [unsafe.Sizeof(windowPlacement{})]byte = [44]byte{}
-
-func processWindows(pid int) ([]uintptr, error) {
-	if pid <= 0 {
-		return nil, fmt.Errorf("进程号无效")
-	}
-	var handles []uintptr
-	cb := syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
-		var owner uint32
-		_, _, _ = procGetWindowThreadProcessID.Call(hwnd, uintptr(unsafe.Pointer(&owner)))
-		if int(owner) != pid {
-			return 1
-		}
-		visible, _, _ := procIsWindowVisible.Call(hwnd)
-		if visible == 0 {
-			return 1
-		}
-		handles = append(handles, hwnd)
-		return 1
-	})
-	ret, _, err := procEnumWindows.Call(cb, 0)
-	if ret == 0 {
-		return nil, fmt.Errorf("枚举窗口失败：%w", err)
-	}
-	return handles, nil
-}
 
 func getPlacement(hwnd uintptr) (Placement, error) {
 	wp := windowPlacement{Length: uint32(unsafe.Sizeof(windowPlacement{}))}
@@ -150,11 +123,6 @@ func setWindowRect(hwnd uintptr, r Rect) error {
 	return nil
 }
 
-func foregroundWindow() uintptr {
-	hwnd, _, _ := procGetForegroundWindow.Call()
-	return hwnd
-}
-
 func windowOwnerPID(hwnd uintptr) int {
 	if hwnd == 0 {
 		return 0
@@ -195,20 +163,7 @@ func listMonitors() ([]Monitor, error) {
 	if ret == 0 {
 		return nil, fmt.Errorf("枚举显示器失败：%w", err)
 	}
-	// DPI is per-window; report the primary monitor's windows'
-	// DPI via the foreground window when available, else 96.
-	// Callers that need a specific window's DPI use
-	// DPIForWindow.
 	return monitors, nil
-}
-
-// DPIForWindow returns the window's effective DPI (96 = 100%).
-func DPIForWindow(hwnd uintptr) uint32 {
-	dpi, _, _ := procGetDpiForWindow.Call(hwnd)
-	if dpi == 0 {
-		return 96
-	}
-	return uint32(dpi)
 }
 
 func listProcessWindows(pid int) ([]WindowInfo, error) {

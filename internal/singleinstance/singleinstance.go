@@ -67,12 +67,6 @@ type Lock struct {
 	err  error
 }
 
-// Path returns the lock file location.
-func (l *Lock) Path() string { return l.path }
-
-// PID returns this process's PID as recorded in the lock.
-func (l *Lock) PID() int { return l.pid }
-
 // Acquire takes the single-instance lock at lockFile, or returns an
 // *AlreadyRunningError naming the current holder.
 func Acquire(lockFile string) (*Lock, error) {

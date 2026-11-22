@@ -79,15 +79,15 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 | 日志 | 统一自动记录、容量管理、分类导出 | 已交付 |
 | 设置 | 主题（浅色/暖色/深色）、日志容量等，存 `config/settings.json` | 已交付 |
 | 书签 | 资源库（文件夹树）管理 + 向实例分发、跨实例聚合搜索/编辑/删除 | 已交付（Stage 9C 书签部分） |
-| 代理配置 | 仅占位页面，无后端功能 | 待开发（Stage 6C） |
-| CDP 与多开同步 | 每实例 localhost CDP 端口与主控—被控同步 | 正在验证（Stage 10 重构实现已提交，未合并；main 尚无此实现） |
+| 代理配置 | 内置 Mihomo 核心管理、订阅/本地配置导入与节点解析、每实例独立节点绑定 | 已交付 |
+| CDP 与多开同步 | 每实例 localhost CDP 端口与主控—被控同步 | 已交付 |
 | 程序内更新、备份与恢复 | — | 未实现（Stage 11、12） |
 
 ## 前后端通信
 
-- **Bindings**：五个 Go 服务的导出方法经静态生成的 TypeScript bindings 暴露给前端（`wails3 generate bindings` 重新生成；CI 校验已提交的 bindings 与生成结果一致）。当前共 5 个服务、36 个方法。前端只能调用明确注册的服务方法，不能执行任意命令。
+- **Bindings**：Go 服务的导出方法经静态生成的 TypeScript bindings 暴露给前端（`wails3 generate bindings` 重新生成；CI 校验已提交的 bindings 与生成结果一致）。当前共 7 个服务、62 个方法。前端只能调用明确注册的服务方法，不能执行任意命令。
 - **事件**：目前只有一个类型化事件 `app:status`（应用状态，每 10 秒发出，也可经 `AppService.GetStatus()` 按需获取）。
-- **前端状态**：单个 Zustand store 保存当前页面、后端状态与主题；页面级状态留在各页面内。每次用户操作由前端生成唯一的 `operation_id` 并作为绑定的第一个参数传入，贯穿该操作的全部日志记录（见「日志」）。
+- **前端状态**：Zustand store 保存当前页面、后端状态与主题，通知另有独立的通知 store；页面级状态留在各页面内。每次用户操作由前端生成唯一的 `operation_id` 并作为绑定的第一个参数传入，贯穿该操作的全部日志记录（见「日志」）。
 
 ## 浏览器运行机制
 
@@ -140,7 +140,7 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 - **Profile 隔离**：实例文件互不共享；活动 Profile 永不在浏览器使用期间被复制。DeBrowser 不宣称指纹隔离。
 - **实例文件删除保护**：「删除实例及实例文件」是显式破坏性路径：拒绝删除运行中的实例、拒绝 profiles 根目录本身、拒绝任何无法证明严格位于 `data/profiles/` 内的目标（符号链接与每个路径组件都必须解析到受管根内）。删除以经验证的文件系统**对象**为锚（`internal/pfiles` 先移入隔离槽、数据库记录删除成功后才由 `internal/safedelete` 擦除），不以路径字符串做裸递归删除；平台无法提供对象锚定保证时失败关闭（拒绝并保留数据）。
 - **进程操作边界**：只操作 DeBrowser 自己启动并核验过的进程；身份无法确认时宁可冻结，也不误关、误删。
-- **凭据 Vault（兼容保留）**：`internal/secrets` 保存已移除的代理/订阅功能写入的历史凭据（`data/secrets.vault`，Windows DPAPI CurrentUser 保护；SQLite 只存不透明 `secret_ref`，明文永不进入数据库、日志与设置）。当前没有任何功能创建新凭据，但 Vault 在启动时照常打开：条目在仍被历史行引用时永不回收，删除只有「未被引用才删」的受守卫形式，没有无条件删除。DPAPI 的跨机器限制见 [README.md](../README.md)。
+- **凭据 Vault**：`internal/secrets` 保存凭据（`data/secrets.vault`，Windows DPAPI CurrentUser 保护；SQLite 只存不透明 `secret_ref`，明文永不进入数据库、日志与设置）。当前由代理模块用于保存订阅地址；已移除的历史代理/订阅功能写入的条目同样保留。Vault 在启动时打开：条目在仍被引用时永不回收，删除只有「未被引用才删」的受守卫形式，没有无条件删除。DPAPI 的跨机器限制见 [README.md](../README.md)。
 
 ## 日志
 
@@ -154,6 +154,6 @@ Go 1.26 + Wails v3.0.0 后端；React 18 + TypeScript + Vite + Tailwind CSS v4 �
 
 ## 当前功能边界
 
-已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）。正在验证（未合并，不属于 main 的已交付能力）：Stage 10 多开同步——重构实现位于分支 `feature/stage-10-sync-refactor`（实例运行层统一分配回环 CDP 端口、`internal/cdp` 客户端、页面事件捕获与 CDP 输入执行、`internal/capture` 页面观察脚本、`internal/winmgr` 原生窗口管理），其旧方案 PR #17、PR #19、PR #20 不是当前架构的一部分，本文档不按它们描述系统。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。待开发：代理配置（Stage 6C，尚未实施；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。已取消：Mihomo 核心集成（Stage 7）、规则管理（Stage 8）、独立 Chromium 下载管理。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
+已交付：应用外壳与生命周期、实例管理与真实运行、浏览器纯路径登记、统一日志、主题设置、书签管理（Stage 9C 书签部分）、多开同步（Stage 10：实例运行层统一分配回环 CDP 端口、`internal/cdp` 客户端、页面事件捕获与 CDP 输入执行、`internal/capture` 页面观察脚本、`internal/winmgr` 原生窗口管理；其旧方案 PR #17、PR #19、PR #20 不是当前架构的一部分，本文档不按它们描述系统）、代理模块（Stage 6C 重新设计：内置 Mihomo 核心管理、订阅/本地配置导入与节点解析、每实例独立节点绑定；过去的代理/订阅/Mihomo 历史实现已移除，其数据兼容保留见 [DATABASE.md](DATABASE.md)）。未接入：程序内更新（Stage 11）、完整备份与恢复（Stage 12）。已取消：Mihomo 核心集成与运行模式（Stage 7，原范围）、规则管理（Stage 8）、独立 Chromium 下载管理；其中 Mihomo 核心能力已随代理模块以更简单的形式交付（每实例专属监听直连所选节点，无运行模式与规则系统）。明确排除：Electron、Docker、Redis、MongoDB、微服务；唯一支持的目标是 Windows 11 x64。
 
 补充说明：`DiagnosticsService` 是数据管理页面的后端（应用版本、数据库状态与统一日志的查看，以及日志按类别导出），名字沿用自早期的诊断功能；早期的一键诊断导出已经移除，统一日志是唯一的记录系统（见「日志」），不存在第二套审计或诊断通道。

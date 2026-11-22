@@ -89,12 +89,6 @@ type Monitor struct {
 // same window state.
 func PlacementsEqual(a, b Placement) bool { return a == b }
 
-// ProcessWindows returns the visible top-level window handles
-// owned by the given process, in enumeration order. It is a
-// point-in-time lookup for window OPERATIONS; identity of the
-// instance itself always comes from the instance runtime.
-func ProcessWindows(pid int) ([]uintptr, error) { return processWindows(pid) }
-
 // GetPlacement reads the window's full placement.
 func GetPlacement(hwnd uintptr) (Placement, error) { return getPlacement(hwnd) }
 
@@ -110,10 +104,6 @@ func WindowScreenRect(hwnd uintptr) (Rect, error) { return windowScreenRect(hwnd
 // SetWindowRect moves/resizes a window to a SCREEN-coordinate
 // rectangle without activating it or changing its Z-order.
 func SetWindowRect(hwnd uintptr, r Rect) error { return setWindowRect(hwnd, r) }
-
-// ForegroundWindow returns the current foreground window
-// handle (0 when none).
-func ForegroundWindow() uintptr { return foregroundWindow() }
 
 // WindowOwnerPID returns the PID owning the window, or 0 when
 // the window is invalid.

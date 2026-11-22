@@ -9,7 +9,6 @@ import NotificationToasts from "./components/notifications/NotificationToasts";
 import DataManagementPage from "./pages/DataManagementPage";
 import InstancesPage from "./pages/InstancesPage";
 import KernelsPage from "./pages/KernelsPage";
-import PlannedPage from "./pages/PlannedPage";
 import SyncPage from "./pages/SyncPage";
 import BookmarksPage from "./pages/BookmarksPage";
 import ProxyConfigPage from "./pages/ProxyConfigPage";
@@ -85,10 +84,8 @@ export default function App() {
             <DataManagementPage />
           ) : page === "bookmarks" ? (
             <BookmarksPage />
-          ) : page === "sync" ? (
-            <SyncPage />
           ) : (
-            <PlannedPage page={page} />
+            <SyncPage />
           )}
         </main>
       </div>

@@ -22,8 +22,7 @@ function PathRow({ label, value }: { label: string; value?: string }) {
 
 /**
  * 系统设置：界面语言（固定简体中文）、外观主题（即时生效并持久化），
- * 以及当前便携式目录的只读展示。自定义数据路径将在后续阶段提供，
- * 路径架构已预留接口。
+ * 以及当前便携式目录的只读展示。
  */
 export default function SettingsPage() {
   const status = useAppStore((state) => state.status);
@@ -99,7 +98,7 @@ export default function SettingsPage() {
       <div className="rounded-lg border border-(--border) bg-(--panel-bg) p-5">
         <h3 className="text-[15px] font-semibold">目录（便携模式）</h3>
         <p className="mt-1 text-xs leading-relaxed text-(--text-faint)">
-          全部数据都位于可执行文件所在目录下，移动整个应用文件夹即可完成迁移。本阶段暂不支持自定义数据路径。
+          全部数据都位于可执行文件所在目录下，移动整个应用文件夹即可完成迁移。当前版本不支持自定义数据路径。
         </p>
         <div className="mt-2 divide-y divide-(--border)">
           <PathRow
