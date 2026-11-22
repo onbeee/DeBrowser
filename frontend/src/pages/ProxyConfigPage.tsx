@@ -44,13 +44,7 @@ export default function ProxyConfigPage() {
   const [addURL, setAddURL] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
   const [confirmDeleteSource, setConfirmDeleteSource] = useState<SourceView | null>(null);
-  // 节点筛选：输入框/下拉是草稿，点「搜索」后才应用；
-  // 「重置」清空草稿与已应用条件。筛选只影响显示。
-  const [filterSourceDraft, setFilterSourceDraft] = useState("");
-  const [filterQueryDraft, setFilterQueryDraft] = useState("");
-  const [appliedSource, setAppliedSource] = useState("");
-  const [appliedQuery, setAppliedQuery] = useState("");
-  // 测速：仅在用户点击时对当前筛选结果逐个测试，结果只
+  // 测速：仅在用户点击时对全部节点逐个测试，结果只
   // 用于本页显示，不保存、不影响绑定。
   const [testing, setTesting] = useState(false);
   const [testResults, setTestResults] = useState<Record<string, NodeTestResultView>>({});
@@ -101,67 +95,20 @@ export default function ProxyConfigPage() {
     return map;
   }, [bindings]);
 
-  const nodesBySource = useMemo(() => {
-    const map = new Map<string, NodeView[]>();
-    for (const n of nodes) {
-      const list = map.get(n.sourceId) ?? [];
-      list.push(n);
-      map.set(n.sourceId, list);
-    }
-    return map;
-  }, [nodes]);
-
-  // 当前筛选条件下的可见来源与节点（筛选只影响显示）。
-  const visibleSources = useMemo(
-    () => (appliedSource ? sources.filter((s) => s.id === appliedSource) : sources),
-    [sources, appliedSource],
-  );
-  const visibleNodesBySource = useMemo(() => {
-    const q = appliedQuery.trim().toLowerCase();
-    const map = new Map<string, NodeView[]>();
-    for (const src of visibleSources) {
-      map.set(
-        src.id,
-        (nodesBySource.get(src.id) ?? []).filter((n) => !q || n.name.toLowerCase().includes(q)),
-      );
-    }
-    return map;
-  }, [visibleSources, nodesBySource, appliedQuery]);
-  const visibleNodeIds = useMemo(
-    () => visibleSources.flatMap((src) => (visibleNodesBySource.get(src.id) ?? []).map((n) => n.id)),
-    [visibleSources, visibleNodesBySource],
-  );
-
-  // 当前筛选下可见的节点（平铺展示，不显示来源分组）。
-  const visibleNodes = useMemo(
-    () => visibleSources.flatMap((src) => visibleNodesBySource.get(src.id) ?? []),
-    [visibleSources, visibleNodesBySource],
-  );
-
-  const applyFilter = () => {
-    setAppliedSource(filterSourceDraft);
-    setAppliedQuery(filterQueryDraft);
-  };
-  const resetFilter = () => {
-    setFilterSourceDraft("");
-    setFilterQueryDraft("");
-    setAppliedSource("");
-    setAppliedQuery("");
-  };
-
   const runTest = async () => {
-    if (testing || visibleNodeIds.length === 0) return;
+    const nodeIds = nodes.map((n) => n.id);
+    if (testing || nodeIds.length === 0) return;
     setTesting(true);
     const opId = newOperationId();
     try {
-      const results = await ProxyService.TestNodes(opId, visibleNodeIds);
+      const results = await ProxyService.TestNodes(opId, nodeIds);
       setTestResults((prev) => {
         const next = { ...prev };
         for (const r of results ?? []) next[r.nodeId] = r;
         return next;
       });
       const okCount = (results ?? []).filter((r) => r.ok).length;
-      notifySuccess(`测速完成：${okCount}/${visibleNodeIds.length} 个节点可用`, {
+      notifySuccess(`测速完成：${okCount}/${nodeIds.length} 个节点可用`, {
         operationId: opId,
         important: true,
       });
@@ -380,59 +327,27 @@ export default function ProxyConfigPage() {
           {/* 下方左右并排：代理节点卡片与实例列表卡片，
               等高，各自内部纵向滚动（无分页）。 */}
           <div className="flex min-h-0 flex-1 flex-col gap-4 min-[1150px]:flex-row">
-            {/* 代理节点卡片：标题栏（标题 + 测速）与筛选
-                工具栏固定，只有节点列表滚动。 */}
+            {/* 代理节点卡片：标题栏（标题 + 测速）固定，
+                只有节点列表滚动。 */}
             <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
               <div className="flex shrink-0 items-center gap-3 border-b border-(--border) px-4 py-2.5">
                 <h3 className="min-w-0 flex-1 text-[15px] font-semibold">代理节点</h3>
                 <button
                   type="button"
                   className={`${btnSmall} w-20 shrink-0 justify-center`}
-                  disabled={testing || busy !== null || visibleNodeIds.length === 0}
+                  disabled={testing || busy !== null || nodes.length === 0}
                   onClick={() => void runTest()}
                 >
                   {testing ? <Loader2 size={13} className="animate-spin" /> : <Gauge size={13} />}
                   测速
                 </button>
               </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-(--border) px-4 py-2.5">
-                <select
-                  className="min-w-32 max-w-52 flex-[1_1_9rem] truncate rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
-                  value={filterSourceDraft}
-                  onChange={(e) => setFilterSourceDraft(e.target.value)}
-                  aria-label="按代理源筛选"
-                >
-                  <option value="">全部代理源</option>
-                  {sources.map((src) => (
-                    <option key={src.id} value={src.id}>
-                      {src.name}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="min-w-40 max-w-md flex-[2_1_10rem] rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)"
-                  placeholder="搜索节点名称"
-                  value={filterQueryDraft}
-                  onChange={(e) => setFilterQueryDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") applyFilter();
-                  }}
-                />
-                <button type="button" className={`${btnSmall} w-20 shrink-0 justify-center`} onClick={applyFilter}>
-                  搜索
-                </button>
-                <button type="button" className={`${btnSmall} w-20 shrink-0 justify-center`} onClick={resetFilter}>
-                  重置
-                </button>
-              </div>
               <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
-                {sources.length === 0 ? (
+                {nodes.length === 0 ? (
                   <p className="py-1 text-sm text-(--text-faint)">暂无节点。</p>
-                ) : visibleNodes.length === 0 ? (
-                  <p className="py-1 text-sm text-(--text-faint)">没有符合筛选条件的节点。</p>
                 ) : (
                   <div>
-                    {visibleNodes.map((n) => {
+                    {nodes.map((n) => {
                       const result = testResults[n.id];
                       return (
                         <div key={n.id} className="flex items-center gap-2 border-b border-(--border) py-2 last:border-b-0">
