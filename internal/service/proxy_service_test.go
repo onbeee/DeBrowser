@@ -501,6 +501,67 @@ func TestSetRouteModeFlow(t *testing.T) {
 	}
 }
 
+func TestEnsureGeoIPAndStartBlocking(t *testing.T) {
+	f, b := gateHealFixture(t) // one rule-mode binding
+	ctx := context.Background()
+	stored, err := f.store.GetBinding(ctx, b.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := []model.InstanceProxyBinding{stored}
+	geoPath := filepath.Join(f.cfg.Layout.Mihomo, "geoip.metadb")
+	failDownload := func(ctx context.Context, dir string) error {
+		return errors.New("network down")
+	}
+
+	// Missing database + failing download: a clear, blocking
+	// error — from ensureGeoIP and from StartCore alike, and
+	// the core is never started.
+	f.svc.geoipDownloadOverride = failDownload
+	if err := f.svc.ensureGeoIP(ctx, bindings); err == nil ||
+		!strings.Contains(err.Error(), "GeoIP 数据库下载失败") {
+		t.Fatalf("ensureGeoIP error = %v, want the GeoIP download failure", err)
+	}
+	if err := f.svc.StartCore("op"); err == nil ||
+		!strings.Contains(err.Error(), "GeoIP 数据库下载失败") {
+		t.Fatalf("StartCore error = %v, want the GeoIP download failure", err)
+	}
+	if st := f.svc.GetCoreStatus(); st.State != "stopped" {
+		t.Fatalf("core state after blocked start = %q, want stopped", st.State)
+	}
+
+	// Missing database + successful download: the file lands
+	// and preparation passes.
+	f.svc.geoipDownloadOverride = func(ctx context.Context, dir string) error {
+		return os.WriteFile(filepath.Join(dir, "geoip.metadb"), []byte("db"), 0o640)
+	}
+	if err := f.svc.ensureGeoIP(ctx, bindings); err != nil {
+		t.Fatalf("ensureGeoIP after successful download: %v", err)
+	}
+	if _, err := os.Stat(geoPath); err != nil {
+		t.Fatalf("database must be in place: %v", err)
+	}
+
+	// Present database: the download is not attempted again.
+	f.svc.geoipDownloadOverride = failDownload
+	if err := f.svc.ensureGeoIP(ctx, bindings); err != nil {
+		t.Fatalf("present database must be reused without downloading: %v", err)
+	}
+
+	// No rule-mode binding: no database is needed at all.
+	if err := os.Remove(geoPath); err != nil {
+		t.Fatal(err)
+	}
+	global := stored
+	global.RouteMode = "global"
+	if err := f.svc.ensureGeoIP(ctx, []model.InstanceProxyBinding{global}); err != nil {
+		t.Fatalf("global-only bindings must not need the GeoIP database: %v", err)
+	}
+	if _, err := os.Stat(geoPath); !os.IsNotExist(err) {
+		t.Fatal("no download may happen for global-only bindings")
+	}
+}
+
 func TestRefreshAfterInstanceDeletedWithoutCore(t *testing.T) {
 	f := testProxyFixture(t)
 	// Core stopped: the deletion hook is a no-op — above all it

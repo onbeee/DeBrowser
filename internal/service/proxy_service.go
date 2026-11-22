@@ -82,6 +82,56 @@ type ProxyService struct {
 	// a group parked on REJECT by core-side drift cannot be
 	// provoked deterministically from outside the core.
 	groupNowOverride func(ctx context.Context, group string) (string, error)
+	// geoipDownloadOverride, when set, replaces the GeoIP
+	// database download. Test seam only (nil in production):
+	// the real download depends on the network, and the
+	// start-blocking failure path must be exercised
+	// deterministically.
+	geoipDownloadOverride func(ctx context.Context, dir string) error
+}
+
+// configNeedsGeoIP reports whether the given bindings make the
+// generated configuration reference the GeoIP database: every
+// rule-mode binding's sub-rules contain a GEOIP line, and the
+// core refuses to load such a configuration without the
+// database in its working directory.
+func configNeedsGeoIP(bindings []model.InstanceProxyBinding) bool {
+	for _, b := range bindings {
+		if b.RouteMode == "" || b.RouteMode == model.RouteModeRule {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureGeoIP makes sure the GeoIP database is in place before
+// the core is started with — or reloaded into — a configuration
+// that needs it. A database already present is reused untouched.
+// A missing one is downloaded and validated by the mihomo
+// package (temporary file + atomic rename). A failed download
+// is a hard error: starting the core anyway would make IT fail
+// the whole configuration load with a far less clear message,
+// so the operation stops here instead.
+func (s *ProxyService) ensureGeoIP(ctx context.Context, bindings []model.InstanceProxyBinding) error {
+	if !configNeedsGeoIP(bindings) {
+		return nil
+	}
+	if mihomo.GeoIPPresent(s.layout.Mihomo) {
+		return nil
+	}
+	download := func(ctx context.Context, dir string) error {
+		return mihomo.DownloadGeoIP(ctx, dir, mihomo.GeoIPDownloadURL)
+	}
+	if s.geoipDownloadOverride != nil {
+		download = s.geoipDownloadOverride
+	}
+	if err := download(ctx, s.layout.Mihomo); err != nil {
+		return fmt.Errorf("GeoIP 数据库下载失败，核心尚未启动（规则分流模式需要该数据库）：%w；请检查网络后重试", err)
+	}
+	if !mihomo.GeoIPPresent(s.layout.Mihomo) {
+		return fmt.Errorf("GeoIP 数据库下载失败，核心尚未启动（规则分流模式需要该数据库）：下载未产生有效文件；请检查网络后重试")
+	}
+	return nil
 }
 
 // refreshProvider asks the core to re-fetch one proxy-provider.
@@ -331,6 +381,20 @@ func (s *ProxyService) StartCore(operationID string) error {
 		if err := s.regenerate(ctx); err != nil {
 			return err
 		}
+		// Prepare the GeoIP database before the core sees the
+		// configuration: with a rule-mode binding the generated
+		// sub-rules reference GEOIP, and the core refuses to
+		// load the configuration at all when the database is
+		// missing and its own download fails. DeBrowser
+		// downloads and validates it first, so a failure is
+		// reported here — clearly, and with nothing started.
+		state, err := s.loadConfigState(ctx)
+		if err != nil {
+			return err
+		}
+		if err := s.ensureGeoIP(ctx, state.bindings); err != nil {
+			return err
+		}
 		// No separate configuration pre-check: the generated
 		// configuration is machine-produced, the core's own load
 		// at start is the real check, and a core that fails to
@@ -440,6 +504,18 @@ func (s *ProxyService) regenerateState(ctx context.Context, state proxyConfigSta
 		return fmt.Errorf("写入核心配置失败：%w", err)
 	}
 	if s.coreRunning(ctx) {
+		// A reload that introduces a GEOIP reference (the first
+		// rule-mode binding appearing while the core runs) needs
+		// the database in place first: the core would refuse
+		// the new configuration without it and fail an otherwise
+		// valid binding change. Preparation failure rolls the
+		// file back exactly like a refused reload does.
+		if err := s.ensureGeoIP(ctx, state.bindings); err != nil {
+			if prev != nil {
+				_ = os.WriteFile(cfgPath, prev, 0o640)
+			}
+			return err
+		}
 		if err := s.client.ReloadConfig(ctx, cfgPath); err != nil {
 			// Roll the file back so the next start loads the same
 			// configuration the core is still running.

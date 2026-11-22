@@ -432,7 +432,7 @@ rules:
 | MATCH 如何处理 | 顶层一条 `MATCH,DIRECT`（核心自身流量）；每份 sub-rules 的收尾 MATCH（rule/global → 本实例组，direct → DIRECT） |
 | 规则策略页面是否有真实执行能力 | **没有规则编辑/启停页面**。用户可控的只有实例级的路由模式三选一（实例新建/编辑表单；代理页绑定总览只读显示模式）。规则集清单固定在 `internal/mihomo/config.go`，UI 无规则集开关 |
 | 规则集的更新与失败 | 核心按 `interval: 86400` 自动刷新各 rule-provider 并缓存到 `data/mihomo/rules/`；单个集下载失败只记核心日志、该集暂为空（不匹配任何流量），不阻止核心启动；本地已有缓存时启动直接用缓存 |
-| GeoIP 数据库依赖 | rule 模式 sub-rules 含 `GEOIP,CN` 一行，核心加载配置时**必须**有 GeoIP 数据库（`data/mihomo/geoip.metadb`）：首次启动核心时核心自动从 GitHub 下载（约 8 MB）并缓存在工作目录；**若数据库缺失且下载失败，核心拒绝加载配置、启动失败**（真实核心已验证）。global/direct 模式的 sub-rules 不含 GEOIP，但只要有一个 rule 模式绑定存在，整份配置就需要该数据库 |
+| GeoIP 数据库依赖 | rule 模式 sub-rules 含 `GEOIP,CN` 一行，核心加载配置时**必须**有 GeoIP 数据库（`data/mihomo/geoip.metadb`），只要有一个 rule 模式绑定存在整份配置就需要它。该数据库由 **DeBrowser 前置准备**（不依赖核心自行下载）：开启核心前、以及运行中重载将要引入 GEOIP 引用时，`ProxyService.ensureGeoIP` 先检查——已存在且非空直接复用；缺失则由 DeBrowser 从官方发布地址下载（临时文件 → 校验大小与 MaxMind 元数据标记 → 原子重命名落盘，`internal/mihomo/geoip.go`）；**下载失败时操作直接以「GeoIP 数据库下载失败」报错并阻断，核心不被启动/不执行该次重载**。global/direct 模式的 sub-rules 不含 GEOIP，无 rule 模式绑定时不准备该数据库 |
 | 核心的 `/rules/disable` 等 API | 不使用（客户端 `client.go` 未实现这些端点） |
 
 一句话：路由 = 每实例 sub-rules（按其路由模式生成）+ 共享固定规则集 + 每实例组的选择（绑定节点 / REJECT）；订阅规则仍不导入，用户不能编辑规则集，只能为每个实例选模式。
@@ -480,7 +480,7 @@ rules:
 
 ### 10.3 代码可确认的限制与缺陷
 
-- **GeoIP 数据库是首次开启核心的硬依赖（仅因 rule 模式）**：任一绑定为 rule 模式（默认）时，生成配置含 `GEOIP,CN` 子规则，核心加载配置必须有 `data/mihomo/geoip.metadb`；首次开启核心时核心会尝试从 GitHub 下载（约 8 MB），下载失败则核心启动失败、代理整体不可用（真实核心已验证该失败模式；规则集下载失败则不影响启动）。数据库一旦缓存成功，后续启动不再依赖网络。缓解方向（未实现）：由 DeBrowser 像核心二进制一样预下载并校验该数据库。
+- **GeoIP 数据库由 DeBrowser 前置准备（硬依赖的处理方式）**：任一绑定为 rule 模式（默认）时，生成配置含 `GEOIP,CN` 子规则，核心加载配置必须有 `data/mihomo/geoip.metadb`，缺失且核心自行下载失败时核心会拒绝整份配置（真实核心已验证该失败模式）。现行处理：DeBrowser 在开启核心前（及运行中重载引入 GEOIP 时）先行下载并校验该数据库（约 8 MB，官方发布地址；临时文件 + 格式校验 + 原子落盘），已存在则直接复用；下载失败时以明确错误阻断启动/重载，不让核心带着缺库配置启动。残余风险：首次准备时完全无网络则代理核心无法开启（错误信息会说明原因与重试方式）；规则集下载失败不影响启动（见第 8 节）。
 - **删除实例后的运行配置清理依赖删除钩子**：绑定行被外键级联删除后，删除钩子在核心运行时立即重载配置清除残留的组与 Listener（第 6 节流程 6）；钩子刷新失败时（只记日志）残留会延续到下一次成功重载或核心重启。影响有界：无浏览器再使用该端口；端口再分配有实时探测兜底。
 - **核心未运行时 SetBinding 不校验节点存在性**：离线绑定按用户所选存档；若节点名已不存在，核心启动后该实例进入 REJECT + 黄色「已不存在」状态，需用户改绑或等节点回归。
 - **核心定时刷新后的选择恢复缺口（已在启动路径自愈）**：http provider 每 86400 秒由核心自行刷新；若绑定节点在该次刷新中消失又回归，组选择停留在 REJECT，直到下一次 DeBrowser 侧触发 `applySelections` 才恢复——现在启动门禁就是这样一个触发点：启动已绑定实例时若组在 REJECT，门禁先重下发一次选择，节点已回归即恢复放行；实例不启动期间不做后台恢复（无 Watchdog）。手动刷新订阅无此问题（刷新后必重下达选择）。
@@ -532,7 +532,7 @@ rules:
 | 节点状态胶囊（四态） | 已实现 | 三处 UI 共用组件 |
 | 代理设置弹窗 | 已实现 | 只读信息，无可调参数 |
 | 每实例路由模式（rule/global/direct） | 已实现 | 绑定字段 route_mode（migration 0016）+ 实例表单三选一 + 代理页只读显示；真实核心集成测试覆盖三模式并行隔离与运行中切换 |
-| 共享规则集（14 个 rule-providers） | 已实现 | 核心下载/缓存/每日刷新；内容固定，不可编辑/启停；GeoIP 数据库为首次启动硬依赖（见 10.3） |
+| 共享规则集（14 个 rule-providers） | 已实现 | 核心下载/缓存/每日刷新；内容固定，不可编辑/启停；GeoIP 数据库由 DeBrowser 前置下载校验（见 10.3） |
 | TUN / 系统代理 | **未实现** | 不在产品范围 |
 | 实际连接测试 | **未实现** | — |
 | 自动测速 | **未实现** | — |
@@ -545,6 +545,7 @@ rules:
 | 文件 | 内容 |
 |---|---|
 | `internal/mihomo/config.go` | 配置生成 `Generate`、组名/测速组名/sub-rules 名派生、共享 rule-providers 清单与 sub-rules 渲染、YAML 标量转义 |
+| `internal/mihomo/geoip.go` | GeoIP 数据库准备：存在检查、下载（临时文件 + 大小/MaxMind 标记校验 + 原子重命名） |
 | `internal/mihomo/client.go` | 核心 REST 客户端（Version / ProviderProxies / RefreshProvider / GroupDelay / SelectNode / GroupNow / ReloadConfig） |
 | `internal/mihomo/manager.go` | 核心进程管理（EnsureBinary 双哈希、Start/Stop/abortStart、opMu 串行化）、版本与资产锁定 |
 | `internal/mihomo/child.go`、`child_unix.go`、`child_windows.go` | 子进程抽象与平台实现（Windows：Job Object + 挂起创建 + 句柄列表 + DuplicateHandle 副本；`StartProcess` 供一次性验证核心复用） |
