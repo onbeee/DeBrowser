@@ -23,9 +23,10 @@ function errText(err: unknown): string {
 const PICKER_CANCELLED = "未选择文件";
 
 // 代理配置页面：单页完成全部代理操作。布局自上而下为
-// 顶部操作区（启动在左、添加在右）、独占一行的代理源
-// 卡片、下方左右并排的代理节点卡片与实例列表卡片；
-// 三个列表都是标题固定、内容独立纵向滚动，无任何分页。
+// 顶部操作区（启动、添加依次靠左）、独占一行的代理源
+// 卡片、下方并排的代理节点卡片与实例列表卡片（窗口较
+// 窄时上下排列）；三个列表都是标题固定、内容独立纵向
+// 滚动，无任何分页。
 // 绑定数据只有一份：本页与浏览器实例页面读写同一个
 // ProxyService 绑定关系。
 export default function ProxyConfigPage() {
@@ -297,8 +298,8 @@ export default function ProxyConfigPage() {
 
   return (
     <div className="flex h-full flex-col gap-4 p-5">
-      {/* 顶部操作区：启动在左，添加在右 */}
-      <div className="flex shrink-0 items-center justify-between">
+      {/* 顶部操作区：启动、添加依次靠左排列 */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <button type="button" className={status?.running ? btnSecondary : btnPrimary} disabled={busy !== null || !status} onClick={toggleCore}>
           {busy === "core" ? <Loader2 size={15} className="animate-spin" /> : status?.running ? <Square size={15} /> : <Play size={15} />}
           {status?.running ? "关闭" : "启动"}
@@ -307,6 +308,14 @@ export default function ProxyConfigPage() {
           <Plus size={15} />
           添加
         </button>
+        <span className="ml-1 text-sm text-(--text-dim)">
+          {status === null
+            ? "正在读取核心状态…"
+            : status.running
+              ? `代理核心运行中（Mihomo ${status.version}）`
+              : "代理核心未启动"}
+        </span>
+        {status?.message && <span className="text-sm text-(--danger)">{status.message}</span>}
       </div>
 
       {loading && !loadedRef.current ? (
@@ -329,8 +338,9 @@ export default function ProxyConfigPage() {
             {sources.length === 0 ? (
               <p className="px-4 py-3 text-sm text-(--text-faint)">尚未添加任何代理配置。点击右上方「添加」导入订阅或本地配置文件。</p>
             ) : (
-              <>
-                <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_5rem_5.5rem_5rem_10rem] items-center gap-2 border-b border-(--border) px-4 py-2 text-center text-xs text-(--text-faint)">
+              <div className="overflow-x-auto">
+                <div className="min-w-[36rem]">
+                <div className="grid grid-cols-[minmax(0,1fr)_5rem_5.5rem_5rem_10rem] items-center gap-2 border-b border-(--border) px-4 py-2 text-center text-xs text-(--text-faint)">
                   <span>名称</span>
                   <span>节点数</span>
                   <span>来源</span>
@@ -362,13 +372,14 @@ export default function ProxyConfigPage() {
                     </div>
                   ))}
                 </div>
-              </>
+                </div>
+              </div>
             )}
           </section>
 
           {/* 下方左右并排：代理节点卡片与实例列表卡片，
               等高，各自内部纵向滚动（无分页）。 */}
-          <div className="flex min-h-0 flex-1 gap-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 min-[1150px]:flex-row">
             {/* 代理节点卡片：标题栏（标题 + 测速）与筛选
                 工具栏固定，只有节点列表滚动。 */}
             <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
@@ -384,9 +395,9 @@ export default function ProxyConfigPage() {
                   测速
                 </button>
               </div>
-              <div className="flex shrink-0 items-center gap-2 border-b border-(--border) px-4 py-2.5">
+              <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-(--border) px-4 py-2.5">
                 <select
-                  className="w-40 shrink-0 rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
+                  className="min-w-32 max-w-52 flex-[1_1_9rem] truncate rounded-md border border-(--border) bg-(--input-bg) px-2 py-1.5 text-sm text-(--text-main) outline-none disabled:opacity-50"
                   value={filterSourceDraft}
                   onChange={(e) => setFilterSourceDraft(e.target.value)}
                   aria-label="按代理源筛选"
@@ -399,7 +410,7 @@ export default function ProxyConfigPage() {
                   ))}
                 </select>
                 <input
-                  className="min-w-0 flex-1 rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)"
+                  className="min-w-40 max-w-md flex-[2_1_10rem] rounded-md border border-(--border) bg-(--input-bg) px-2.5 py-1.5 text-sm text-(--text-main) outline-none placeholder:text-(--text-faint)"
                   placeholder="搜索节点名称"
                   value={filterQueryDraft}
                   onChange={(e) => setFilterQueryDraft(e.target.value)}
@@ -465,6 +476,9 @@ export default function ProxyConfigPage() {
                               ariaLabel={`实例 ${inst.name} 的代理节点`}
                             />
                           </div>
+                          <span className="w-16 shrink-0 text-right text-xs text-(--text-faint)">
+                            {binding ? `端口 ${binding.listenPort}` : "未设置"}
+                          </span>
                         </div>
                       );
                     })}
