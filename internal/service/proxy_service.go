@@ -1277,8 +1277,15 @@ func (s *ProxyService) reimportFileSource(id string) (SourceView, error) {
 	// Keep the previous content: if the running core refuses the
 	// new file at refresh time, the old file is restored and
 	// reloaded, so the disk copy and the running configuration
-	// never disagree.
-	oldData, _ := os.ReadFile(filepath.Join(s.sourcesDir(), src.FileName))
+	// never disagree. A stored copy that exists but cannot be
+	// read aborts the reimport BEFORE anything is replaced —
+	// overwriting the only copy without a readable backup could
+	// destroy it; a copy that is simply absent (removed
+	// externally) proceeds with no backup, as before.
+	oldData, err := os.ReadFile(filepath.Join(s.sourcesDir(), src.FileName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return SourceView{}, fmt.Errorf("读取现有文件副本失败，已中止重新导入（原文件未被覆盖）：%w", err)
+	}
 	if err := s.writeSourceCopy(src.FileName, data); err != nil {
 		return SourceView{}, err
 	}
@@ -1361,29 +1368,29 @@ func (s *ProxyService) DeleteSource(operationID string, id string) error {
 			}
 			return fmt.Errorf("删除来源失败，运行配置已恢复：%w", err)
 		}
+		// The record is deleted; the remaining cleanup (file
+		// copy, provider cache, vault entry) is best-effort by
+		// necessity — the deletion has already committed, so a
+		// cleanup failure is NOT reported as a failed deletion,
+		// but it is never silent either: it goes to the service
+		// log so the residue stays discoverable.
 		if src.Kind == model.ProxySourceKindFile && src.FileName != "" {
-			os.Remove(filepath.Join(s.sourcesDir(), src.FileName))
+			if err := os.Remove(filepath.Join(s.sourcesDir(), src.FileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.log.Warn("proxy source file copy cleanup failed after source deletion", "source", id, "error", err)
+			}
 		}
 		// The provider's cache file may hold subscription content;
 		// remove it with the source.
-		os.Remove(filepath.Join(s.layout.Mihomo, "providers", src.ProviderName+".yaml"))
+		if err := os.Remove(filepath.Join(s.layout.Mihomo, "providers", src.ProviderName+".yaml")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.log.Warn("proxy provider cache cleanup failed after source deletion", "source", id, "error", err)
+		}
 		if src.SecretRef != "" && s.vault != nil {
 			ref := src.SecretRef
-			_, _ = s.vault.DeleteIfUnreferenced(ref, func(r string) (bool, error) {
-				if used, err := s.store.SecretRefInUse(ctx, r); err != nil || used {
-					return used, err
-				}
-				rest, err := s.store.ListProxySources(ctx)
-				if err != nil {
-					return false, err
-				}
-				for _, other := range rest {
-					if other.SecretRef == r {
-						return true, nil
-					}
-				}
-				return false, nil
-			})
+			if _, err := s.vault.DeleteIfUnreferenced(ref, func(r string) (bool, error) {
+				return s.store.SecretRefInUse(ctx, r)
+			}); err != nil {
+				s.log.Warn("proxy source credential cleanup failed after source deletion", "source", id, "error", err)
+			}
 		}
 		return nil
 	}()
@@ -1640,12 +1647,18 @@ func (s *ProxyService) setBinding(instanceID string, sourceID string, nodeName s
 		if existing.RouteMode != "" {
 			routeMode = existing.RouteMode // and its routing mode: re-binding a node never resets it
 		}
-	} else {
+	} else if errors.Is(err, store.ErrNotFound) {
 		p, err := s.allocatePort(ctx)
 		if err != nil {
 			return BindingView{}, err
 		}
 		port = p
+	} else {
+		// A read failure is NOT "no binding": treating it as
+		// one would silently hand the instance a different
+		// listener port while the recorded binding may still
+		// exist. Abort instead.
+		return BindingView{}, fmt.Errorf("读取实例现有代理绑定失败，已中止设置：%w", err)
 	}
 	proposed := model.InstanceProxyBinding{
 		InstanceID: instanceID, SourceID: sourceID, NodeName: nodeName, Port: port,
