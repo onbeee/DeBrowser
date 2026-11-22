@@ -160,7 +160,8 @@ export interface CoreLogsView {
  * CoreStatusView is the proxy page's core status summary. It
  * also carries the read-only facts the page's settings dialog
  * shows (the pinned core version and the core data directory);
- * there are no user-adjustable core parameters behind them.
+ * the user-adjustable settings live in ProxySettingsView
+ * (proxy_rules_service.go).
  */
 export interface CoreStatusView {
     /**
