@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   FileUp,
   Gauge,
   Loader2,
@@ -13,8 +15,13 @@ import {
 import {
   ProxyService,
   type BindingView,
+  type ConnectionView,
+  type CoreLogsView,
   type CoreStatusView,
+  type CustomRuleView,
   type NodeView,
+  type ProxySettingsView,
+  type RulePolicyView,
   type SourceView,
 } from "../../bindings/github.com/onbeee/DeBrowser/internal/service";
 import { NodeCapsule, asNodeState } from "../components/NodeCapsule";
@@ -44,12 +51,41 @@ interface AddSubState {
   url: string;
 }
 
+const POLICY_OPTIONS: { value: string; label: string }[] = [
+  { value: "proxy", label: "走实例节点" },
+  { value: "direct", label: "直连" },
+  { value: "reject", label: "拦截" },
+  { value: "disabled", label: "停用" },
+];
+
+const CUSTOM_POLICY_OPTIONS = POLICY_OPTIONS.slice(0, 3);
+
+const RULE_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: "DOMAIN-SUFFIX", label: "域名后缀" },
+  { value: "DOMAIN-KEYWORD", label: "域名关键词" },
+  { value: "IP-CIDR", label: "IP 段" },
+];
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ruleLabel(c: ConnectionView): string {
+  if (c.rule === "RuleSet" && c.rulePayload) return `规则集「${c.rulePayload}」`;
+  if (c.rule === "Match") return "兜底（走实例节点）";
+  if (c.rule === "GeoIP") return `GeoIP ${c.rulePayload ?? ""}`.trim();
+  return c.rulePayload ? `${c.rule}（${c.rulePayload}）` : c.rule;
+}
+
 /**
  * 代理配置（Stage 6C）：Mihomo 核心为全部浏览器实例提供代理。
- * 本页面只管理三件事：节点来源（订阅 / 本地 YAML）、节点列表与
- * 测速、核心运行状态与实例绑定概览。节点解析、规则匹配与连接
- * 全部由 Mihomo 核心完成；实例具体使用哪个节点在「浏览器实例」
- * 的新建 / 编辑表单中选择。
+ * 本页面管理：节点来源（订阅 / 本地 YAML）、节点列表与测速、
+ * 核心运行状态与实例绑定概览、可编辑的分流规则（内置规则集
+ * 策略 + 自定义置顶规则）、核心设置，以及实时连接与日志查看。
+ * 节点解析、规则匹配与连接全部由 Mihomo 核心完成；实例具体
+ * 使用哪个节点在「浏览器实例」的新建 / 编辑表单中选择。
  */
 export default function ProxyConfigPage() {
   const [core, setCore] = useState<CoreStatusView | null>(null);
@@ -66,20 +102,37 @@ export default function ProxyConfigPage() {
   const [addFileName, setAddFileName] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const loadedRef = useRef(false);
+  // 分流规则（内置策略 + 自定义置顶规则）与核心设置表单。
+  const [policies, setPolicies] = useState<RulePolicyView[]>([]);
+  const [customRules, setCustomRules] = useState<CustomRuleView[]>([]);
+  const [ruleDrafts, setRuleDrafts] = useState<Map<string, CustomRuleView>>(new Map());
+  const [newRule, setNewRule] = useState({ ruleType: "DOMAIN-SUFFIX", value: "", policy: "proxy" });
+  const [settingsForm, setSettingsForm] = useState<ProxySettingsView | null>(null);
+  // 实时连接与日志查看。
+  const [inspectTab, setInspectTab] = useState<"connections" | "logs">("connections");
+  const [connections, setConnections] = useState<ConnectionView[]>([]);
+  const [connInstance, setConnInstance] = useState("");
+  const [logLines, setLogLines] = useState<{ seq: number; level: string; text: string }[]>([]);
+  const logSeqRef = useRef(0);
 
   // 返回错误信息（成功返回 null）。失败保留已有数据。
   const reload = useCallback(async (): Promise<string | null> => {
     try {
-      const [status, srcs, nds, bds] = await Promise.all([
+      const [status, srcs, nds, bds, pols, customs] = await Promise.all([
         ProxyService.GetCoreStatus(),
         ProxyService.ListSources(),
         ProxyService.ListNodes(),
         ProxyService.ListBindings(),
+        ProxyService.GetRulePolicies(),
+        ProxyService.ListCustomRules(),
       ]);
       setCore(status);
       setSources(srcs ?? []);
       setNodes(nds ?? []);
       setBindings(bds ?? []);
+      setPolicies(pols ?? []);
+      setCustomRules(customs ?? []);
+      setRuleDrafts(new Map());
       loadedRef.current = true;
       setLoadError(null);
       setRefreshError(null);
@@ -206,7 +259,133 @@ export default function ProxyConfigPage() {
     return n.delay > 0 ? `${n.delay} ms` : "—";
   };
 
+  // ---- 分流规则 ----
+  const setPolicy = (p: RulePolicyView, policy: string) =>
+    run(`policy-${p.name}`, "proxy.rule_policy_set", async (opId) => {
+      await ProxyService.SetRulePolicy(opId, p.name, policy);
+      return `规则集「${p.name}」已改为「${POLICY_OPTIONS.find((o) => o.value === policy)?.label ?? policy}」`;
+    });
+
+  const resetPolicies = () =>
+    run("policies-reset", "proxy.rule_policies_reset", async (opId) => {
+      await ProxyService.ResetRulePolicies(opId);
+      return "内置规则集策略已恢复默认";
+    });
+
+  const refreshRules = () =>
+    run("rules-refresh", "proxy.rule_providers_refresh", async (opId) => {
+      await ProxyService.RefreshRuleProviders(opId);
+      return "规则集已更新";
+    });
+
+  const addCustomRule = () =>
+    run("custom-add", "proxy.custom_rule_add", async (opId) => {
+      await ProxyService.AddCustomRule(opId, newRule.ruleType, newRule.value, newRule.policy);
+      setNewRule({ ...newRule, value: "" });
+      return "自定义规则已添加";
+    });
+
+  const saveCustomRule = (draft: CustomRuleView) =>
+    run(`custom-save-${draft.id}`, "proxy.custom_rule_update", async (opId) => {
+      await ProxyService.UpdateCustomRule(opId, draft.id, draft.ruleType, draft.value, draft.policy, draft.enabled);
+      return "自定义规则已保存";
+    });
+
+  const toggleCustomRule = (r: CustomRuleView) =>
+    run(`custom-toggle-${r.id}`, "proxy.custom_rule_update", async (opId) => {
+      await ProxyService.UpdateCustomRule(opId, r.id, r.ruleType, r.value, r.policy, !r.enabled);
+      return r.enabled ? "自定义规则已停用" : "自定义规则已启用";
+    });
+
+  const deleteCustomRule = (r: CustomRuleView) =>
+    run(`custom-delete-${r.id}`, "proxy.custom_rule_delete", async (opId) => {
+      await ProxyService.DeleteCustomRule(opId, r.id);
+      return "自定义规则已删除";
+    });
+
+  const moveCustomRule = (index: number, dir: -1 | 1) => {
+    const next = [...customRules];
+    const target = index + dir;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    void run("custom-reorder", "proxy.custom_rule_reorder", async (opId) => {
+      await ProxyService.ReorderCustomRules(
+        opId,
+        next.map((r) => r.id),
+      );
+      return "自定义规则顺序已更新";
+    });
+  };
+
+  const draftOf = (r: CustomRuleView): CustomRuleView => ruleDrafts.get(r.id) ?? r;
+  const setDraft = (r: CustomRuleView, patch: Partial<CustomRuleView>) =>
+    setRuleDrafts((prev) => new Map(prev).set(r.id, { ...draftOf(r), ...patch }));
+
+  // ---- 核心设置 ----
+  const openSettings = async () => {
+    try {
+      setSettingsForm(await ProxyService.GetProxySettings());
+      setShowSettings(true);
+    } catch (e) {
+      notifyError(`读取代理设置失败：${errText(e)}`, { important: true });
+    }
+  };
+
+  const saveSettings = () => {
+    if (!settingsForm) return;
+    const form = settingsForm;
+    void run("settings-save", "proxy.settings_update", async (opId) => {
+      await ProxyService.UpdateProxySettings(opId, form);
+      setShowSettings(false);
+      return "代理设置已保存";
+    });
+  };
+
   const coreRunning = core?.state === "running";
+
+  // 实时连接轮询（仅在查看连接且核心运行时）。
+  useEffect(() => {
+    if (inspectTab !== "connections" || !coreRunning) return;
+    let alive = true;
+    const fetchOnce = async () => {
+      try {
+        const list = await ProxyService.ListConnections(connInstance);
+        if (alive) setConnections(list ?? []);
+      } catch {
+        /* 轮询失败静默：下一次轮询会重试 */
+      }
+    };
+    void fetchOnce();
+    const timer = setInterval(() => void fetchOnce(), 2500);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [inspectTab, coreRunning, connInstance]);
+
+  // 核心日志轮询（仅在查看日志且核心运行时）：按序号增量拉取。
+  useEffect(() => {
+    if (inspectTab !== "logs" || !coreRunning) return;
+    let alive = true;
+    const fetchOnce = async () => {
+      try {
+        const view: CoreLogsView = await ProxyService.GetCoreLogs(logSeqRef.current);
+        if (!alive) return;
+        if (view.lines && view.lines.length > 0) {
+          logSeqRef.current = view.latestSeq;
+          setLogLines((prev) => [...prev, ...(view.lines ?? [])].slice(-500));
+        }
+      } catch {
+        /* 轮询失败静默 */
+      }
+    };
+    void fetchOnce();
+    const timer = setInterval(() => void fetchOnce(), 2000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [inspectTab, coreRunning]);
 
   return (
     <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-6">
@@ -235,7 +414,7 @@ export default function ProxyConfigPage() {
               {busy === "core-start" ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} 启动核心
             </button>
           )}
-          <button type="button" className={btnSecondary} disabled={busy != null} onClick={() => setShowSettings(true)}>
+          <button type="button" className={btnSecondary} disabled={busy != null} onClick={() => void openSettings()}>
             <Settings size={14} /> 设置
           </button>
         </div>
@@ -417,6 +596,285 @@ export default function ProxyConfigPage() {
                 )}
               </div>
             </section>
+            {/* 分流规则 */}
+            <section>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold">分流规则</h3>
+                <span className="ml-auto flex shrink-0 items-center gap-2">
+                  <button type="button" className={btnSmall} disabled={busy != null} onClick={resetPolicies}>
+                    恢复默认
+                  </button>
+                  <button type="button" className={btnSmall} disabled={busy != null || !coreRunning} onClick={refreshRules}>
+                    {busy === "rules-refresh" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} 立即更新规则集
+                  </button>
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-(--text-faint)">
+                内置规则集仅对「规则分流」模式的实例生效：命中后按所选策略走该实例自己的节点、直连或拦截；停用后该规则集不再参与分流。修改会立即应用到运行中的核心，无需重启实例。
+              </p>
+              <div className="mt-2 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+                <ul className="divide-y divide-(--border)">
+                  {policies.map((p) => (
+                    <li key={p.name} className="flex flex-wrap items-center gap-2 px-4 py-2">
+                      <span className="w-24 shrink-0 text-sm">{p.name}</span>
+                      {p.policy !== p.defaultPolicy && <span className="text-xs text-(--text-faint)">已修改</span>}
+                      <span className="ml-auto flex shrink-0 items-center gap-1">
+                        {POLICY_OPTIONS.map((o) => (
+                          <button
+                            key={o.value}
+                            type="button"
+                            disabled={busy != null}
+                            onClick={() => p.policy !== o.value && setPolicy(p, o.value)}
+                            className={`h-7 rounded-md px-2 text-xs disabled:opacity-50 ${
+                              p.policy === o.value
+                                ? "bg-(--accent) font-medium text-(--accent-contrast)"
+                                : "border border-(--border-strong) bg-(--input-bg) text-(--text-main) hover:bg-(--hover-bg)"
+                            }`}
+                          >
+                            {o.label}
+                          </button>
+                        ))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* 自定义置顶规则 */}
+              <h4 className="mt-4 text-sm font-medium">自定义置顶规则</h4>
+              <p className="mt-1 text-xs text-(--text-faint)">
+                自定义规则排在所有内置规则集之前逐条匹配，先命中先执行；「走实例节点」对每个实例都指它自己绑定的节点。IP 段规则自动以 no-resolve 方式匹配。
+              </p>
+              <div className="mt-2 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+                {customRules.length === 0 ? (
+                  <p className="px-4 py-6 text-center text-sm text-(--text-faint)">暂无自定义规则。</p>
+                ) : (
+                  <ul className="divide-y divide-(--border)">
+                    {customRules.map((r, i) => {
+                      const draft = draftOf(r);
+                      const dirty =
+                        draft.ruleType !== r.ruleType || draft.value !== r.value || draft.policy !== r.policy;
+                      return (
+                        <li key={r.id} className="flex flex-wrap items-center gap-2 px-4 py-2">
+                          <select
+                            className="h-8 shrink-0 rounded-md border border-(--border-strong) bg-(--input-bg) px-1.5 text-xs text-(--text-main)"
+                            value={draft.ruleType}
+                            disabled={busy != null}
+                            onChange={(e) => setDraft(r, { ruleType: e.target.value })}
+                          >
+                            {RULE_TYPE_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            className="h-8 min-w-36 flex-1 rounded-md border border-(--border-strong) bg-(--input-bg) px-2 text-sm text-(--text-main) outline-none focus:border-(--accent)"
+                            value={draft.value}
+                            disabled={busy != null}
+                            onChange={(e) => setDraft(r, { value: e.target.value })}
+                            placeholder={draft.ruleType === "IP-CIDR" ? "例如 10.0.0.0/8" : "例如 example.com"}
+                          />
+                          <select
+                            className="h-8 shrink-0 rounded-md border border-(--border-strong) bg-(--input-bg) px-1.5 text-xs text-(--text-main)"
+                            value={draft.policy}
+                            disabled={busy != null}
+                            onChange={(e) => setDraft(r, { policy: e.target.value })}
+                          >
+                            {CUSTOM_POLICY_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className={btnSmall}
+                            disabled={busy != null}
+                            onClick={() => toggleCustomRule(r)}
+                          >
+                            {r.enabled ? "已启用" : "已停用"}
+                          </button>
+                          {dirty && (
+                            <button type="button" className={btnSmall} disabled={busy != null} onClick={() => saveCustomRule(draft)}>
+                              保存
+                            </button>
+                          )}
+                          <button type="button" className={btnSmall} disabled={busy != null || i === 0} onClick={() => moveCustomRule(i, -1)}>
+                            <ArrowUp size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            className={btnSmall}
+                            disabled={busy != null || i === customRules.length - 1}
+                            onClick={() => moveCustomRule(i, 1)}
+                          >
+                            <ArrowDown size={12} />
+                          </button>
+                          <button type="button" className={btnSmall} disabled={busy != null} onClick={() => deleteCustomRule(r)}>
+                            <Trash2 size={12} />
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+                <div className="flex flex-wrap items-center gap-2 border-t border-(--border) px-4 py-2.5">
+                  <select
+                    className="h-8 shrink-0 rounded-md border border-(--border-strong) bg-(--input-bg) px-1.5 text-xs text-(--text-main)"
+                    value={newRule.ruleType}
+                    disabled={busy != null}
+                    onChange={(e) => setNewRule({ ...newRule, ruleType: e.target.value })}
+                  >
+                    {RULE_TYPE_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="h-8 min-w-36 flex-1 rounded-md border border-(--border-strong) bg-(--input-bg) px-2 text-sm text-(--text-main) outline-none focus:border-(--accent)"
+                    value={newRule.value}
+                    disabled={busy != null}
+                    onChange={(e) => setNewRule({ ...newRule, value: e.target.value })}
+                    placeholder={newRule.ruleType === "IP-CIDR" ? "例如 10.0.0.0/8" : newRule.ruleType === "DOMAIN-KEYWORD" ? "例如 tracker" : "例如 example.com"}
+                  />
+                  <select
+                    className="h-8 shrink-0 rounded-md border border-(--border-strong) bg-(--input-bg) px-1.5 text-xs text-(--text-main)"
+                    value={newRule.policy}
+                    disabled={busy != null}
+                    onChange={(e) => setNewRule({ ...newRule, policy: e.target.value })}
+                  >
+                    {CUSTOM_POLICY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className={btnSmall} disabled={busy != null || !newRule.value.trim()} onClick={addCustomRule}>
+                    <Plus size={12} /> 添加规则
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            {/* 实时连接与日志 */}
+            <section>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold">实时连接与日志</h3>
+                <span className="ml-auto flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setInspectTab("connections")}
+                    className={`h-7 rounded-md px-2 text-xs ${
+                      inspectTab === "connections"
+                        ? "bg-(--accent) font-medium text-(--accent-contrast)"
+                        : "border border-(--border-strong) bg-(--input-bg) text-(--text-main) hover:bg-(--hover-bg)"
+                    }`}
+                  >
+                    当前连接
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInspectTab("logs")}
+                    className={`h-7 rounded-md px-2 text-xs ${
+                      inspectTab === "logs"
+                        ? "bg-(--accent) font-medium text-(--accent-contrast)"
+                        : "border border-(--border-strong) bg-(--input-bg) text-(--text-main) hover:bg-(--hover-bg)"
+                    }`}
+                  >
+                    核心日志
+                  </button>
+                </span>
+              </div>
+              <div className="mt-2 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
+                {!coreRunning ? (
+                  <p className="px-4 py-8 text-center text-sm text-(--text-faint)">核心未运行，暂无连接与日志。</p>
+                ) : inspectTab === "connections" ? (
+                  <div>
+                    <div className="flex items-center gap-2 border-b border-(--border) px-4 py-2">
+                      <span className="text-xs text-(--text-dim)">按实例筛选</span>
+                      <select
+                        className="h-8 rounded-md border border-(--border-strong) bg-(--input-bg) px-1.5 text-xs text-(--text-main)"
+                        value={connInstance}
+                        onChange={(e) => setConnInstance(e.target.value)}
+                      >
+                        <option value="">全部实例</option>
+                        {bindings.map((b) => (
+                          <option key={b.instanceId} value={b.instanceId}>
+                            {b.instanceName || b.instanceId}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="ml-auto text-xs text-(--text-faint)">每 2.5 秒自动刷新</span>
+                    </div>
+                    {connections.length === 0 ? (
+                      <p className="px-4 py-8 text-center text-sm text-(--text-faint)">暂无活跃连接。</p>
+                    ) : (
+                      <ul className="max-h-80 divide-y divide-(--border) overflow-y-auto">
+                        {connections.map((c) => (
+                          <li key={c.id} className="px-4 py-2 text-xs hover:bg-(--hover-bg)">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                              <span className="min-w-0 flex-1 truncate font-medium text-(--text-main)" title={c.target}>
+                                {c.target}
+                              </span>
+                              <span className="shrink-0 text-(--text-dim)">{ruleLabel(c)}</span>
+                              <span className="shrink-0 text-(--text-dim)">出口：{(c.chains ?? []).join(" → ") || "—"}</span>
+                            </div>
+                            <div className="mt-0.5 flex flex-wrap gap-x-3 text-(--text-faint)">
+                              <span>
+                                实例：
+                                {bindings.find((b) => b.instanceId === c.instanceId)?.instanceName || c.instanceId || "未知"}
+                              </span>
+                              <span>上传 {formatBytes(c.upload)}</span>
+                              <span>下载 {formatBytes(c.download)}</span>
+                              <span>开始 {c.start ? c.start.slice(11, 19) : ""}</span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ) : (
+                  <div>
+                    <div className="flex items-center gap-2 border-b border-(--border) px-4 py-2">
+                      <span className="flex-1 text-xs text-(--text-dim)">
+                        日志内容取决于核心日志等级（在「设置」中调整）；连接级明细需要 info 或 debug 等级。
+                      </span>
+                      <button
+                        type="button"
+                        className={btnSmall}
+                        onClick={() => {
+                          setLogLines([]);
+                        }}
+                      >
+                        清空显示
+                      </button>
+                    </div>
+                    {logLines.length === 0 ? (
+                      <p className="px-4 py-8 text-center text-sm text-(--text-faint)">暂无日志。</p>
+                    ) : (
+                      <div className="max-h-80 overflow-y-auto px-4 py-2 font-mono text-xs leading-5">
+                        {logLines.map((l) => (
+                          <p
+                            key={l.seq}
+                            className={
+                              l.level === "error"
+                                ? "text-(--danger)"
+                                : l.level === "warning"
+                                  ? "text-(--text-main)"
+                                  : "text-(--text-dim)"
+                            }
+                          >
+                            <span className="text-(--text-faint)">[{l.level}]</span> {l.text}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
         )}
       </div>
@@ -449,46 +907,110 @@ export default function ProxyConfigPage() {
         </div>
       )}
 
-      {/* 设置弹窗：只展示只读信息。核心参数均采用固定默认值，
-          没有需要用户调整的开关。 */}
-      {showSettings && (
+      {/* 设置弹窗：固定事实（版本/目录/控制接口）只读展示；
+          其余核心设置为可编辑表单，保存后经配置重载生效。 */}
+      {showSettings && settingsForm && (
         <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
+          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-(--border) bg-(--panel-bg) p-5 shadow-xl">
             <h3 className="text-base font-semibold">代理设置</h3>
-            <dl className="mt-4 space-y-2.5 text-sm">
+            <dl className="mt-4 space-y-2 text-sm">
               <div className="flex gap-3">
                 <dt className="w-24 shrink-0 text-(--text-faint)">核心版本</dt>
                 <dd className="text-(--text-main)">Mihomo {core?.coreVersion ?? ""}（官方版本，固定）</dd>
-              </div>
-              <div className="flex gap-3">
-                <dt className="w-24 shrink-0 text-(--text-faint)">运行状态</dt>
-                <dd className="text-(--text-main)">
-                  {core?.state === "running"
-                    ? `运行中${core.version ? ` · ${core.version}` : ""}`
-                    : core?.state === "error"
-                      ? "异常"
-                      : "未运行"}
-                </dd>
               </div>
               <div className="flex gap-3">
                 <dt className="w-24 shrink-0 text-(--text-faint)">数据目录</dt>
                 <dd className="break-all text-(--text-main)">{core?.dataDir ?? "—"}</dd>
               </div>
               <div className="flex gap-3">
-                <dt className="w-24 shrink-0 text-(--text-faint)">本地监听端口</dt>
-                <dd className="text-(--text-main)">21001–21999，按实例自动分配</dd>
-              </div>
-              <div className="flex gap-3">
                 <dt className="w-24 shrink-0 text-(--text-faint)">控制接口</dt>
                 <dd className="text-(--text-main)">仅监听本机 127.0.0.1，带随机密钥</dd>
               </div>
             </dl>
-            <p className="mt-4 text-xs text-(--text-faint)">
-              核心运行参数均采用合理默认值，无需调整。DeBrowser 不修改 Windows 系统代理、不启用 TUN，也不接管电脑上已有的 Clash。
-            </p>
+            <div className="mt-4 space-y-3 border-t border-(--border) pt-4">
+              <div>
+                <label className={labelCls}>测速地址</label>
+                <input
+                  className={inputCls}
+                  value={settingsForm.testUrl}
+                  onChange={(e) => setSettingsForm({ ...settingsForm, testUrl: e.target.value })}
+                />
+              </div>
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className={labelCls}>测速超时（毫秒）</label>
+                  <input
+                    className={inputCls}
+                    type="number"
+                    min={100}
+                    max={60000}
+                    value={settingsForm.testTimeoutMs}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, testTimeoutMs: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className={labelCls}>自动更新间隔（秒）</label>
+                  <input
+                    className={inputCls}
+                    type="number"
+                    min={60}
+                    max={2592000}
+                    value={settingsForm.providerIntervalSec}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, providerIntervalSec: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>DoH 上游（每行一个，须为 https 地址）</label>
+                <textarea
+                  className="h-16 w-full rounded-md border border-(--border-strong) bg-(--input-bg) px-2.5 py-2 text-sm text-(--text-main) outline-none focus:border-(--accent)"
+                  value={(settingsForm.dohServers ?? []).join("\n")}
+                  onChange={(e) =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      dohServers: e.target.value
+                        .split("\n")
+                        .map((s) => s.trim())
+                        .filter((s) => s !== ""),
+                    })
+                  }
+                />
+              </div>
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className={labelCls}>核心日志等级</label>
+                  <select
+                    className={inputCls}
+                    value={settingsForm.logLevel}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, logLevel: e.target.value })}
+                  >
+                    <option value="warning">warning（仅警告与错误）</option>
+                    <option value="info">info（含连接明细）</option>
+                    <option value="debug">debug（最详细）</option>
+                  </select>
+                </div>
+                <div className="flex-1">
+                  <label className={labelCls}>实例端口起始值</label>
+                  <input
+                    className={inputCls}
+                    type="number"
+                    min={1024}
+                    max={64535}
+                    value={settingsForm.listenerPortStart}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, listenerPortStart: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-(--text-faint)">
+                端口起始值只影响之后新建的绑定，已有绑定的端口不变。DeBrowser 不修改 Windows 系统代理、不启用 TUN，也不接管电脑上已有的 Clash。
+              </p>
+            </div>
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" className={btnPrimary} onClick={() => setShowSettings(false)}>
-                关闭
+              <button type="button" className={btnSecondary} disabled={busy != null} onClick={() => setShowSettings(false)}>
+                取消
+              </button>
+              <button type="button" className={btnPrimary} disabled={busy != null} onClick={saveSettings}>
+                {busy === "settings-save" ? <Loader2 size={14} className="animate-spin" /> : null} 保存设置
               </button>
             </div>
           </div>

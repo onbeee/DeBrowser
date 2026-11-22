@@ -74,7 +74,7 @@ func TestMigration12PreservesRegistrations(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 16 {
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 17 {
 		t.Fatalf("AppliedVersion = %d (err %v), want 12", v, err)
 	}
 	// The registration survived as a pure path record.

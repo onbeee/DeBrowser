@@ -88,6 +88,16 @@ type ProxyService struct {
 	// start-blocking failure path must be exercised
 	// deterministically.
 	geoipDownloadOverride func(ctx context.Context, dir string) error
+
+	// Core log stream state (see proxy_inspect.go): a lazily
+	// started forwarding goroutine appends the core's log lines
+	// into a bounded in-memory buffer the UI polls. Guarded by
+	// logMu, never by s.mu (the stream must not block mutations).
+	logMu        sync.Mutex
+	logLines     []coreLogLine
+	logSeq       int
+	logStreaming bool
+	logCancel    context.CancelFunc
 }
 
 // configNeedsGeoIP reports whether the given bindings make the
@@ -166,17 +176,18 @@ const (
 	// proxyValidatePort is the controller port of the short-lived
 	// throwaway core used to validate imported YAML files.
 	proxyValidatePort = 19098
-	// proxyListenerBasePort is the first loopback port handed out
-	// to instance listeners.
+	// proxyListenerBasePort is the DEFAULT first loopback port
+	// handed out to instance listeners; the editable setting
+	// (ProxySettings.ListenerPortStart) starts the allocation
+	// scan, which spans 1000 ports from there.
 	proxyListenerBasePort = 21001
-	// proxyListenerMaxPort bounds the allocation scan.
-	proxyListenerMaxPort = 21999
 )
 
 // CoreStatusView is the proxy page's core status summary. It
 // also carries the read-only facts the page's settings dialog
 // shows (the pinned core version and the core data directory);
-// there are no user-adjustable core parameters behind them.
+// the user-adjustable settings live in ProxySettingsView
+// (proxy_rules_service.go).
 type CoreStatusView struct {
 	State       string `json:"state"` // "running" | "stopped" | "error"
 	Version     string `json:"version"`
@@ -431,6 +442,7 @@ func (s *ProxyService) StopCore(operationID string) error {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.stopLogStream()
 		return s.manager.Stop()
 	}()
 	finishOp(op, err)
@@ -450,6 +462,11 @@ func (s *ProxyService) StopCore(operationID string) error {
 type proxyConfigState struct {
 	sources  []model.ProxySource
 	bindings []model.InstanceProxyBinding
+	// rulePolicyOverrides holds only the rulesets the user
+	// changed; the generator merges them over the defaults.
+	rulePolicyOverrides map[string]string
+	customRules         []model.ProxyCustomRule
+	settings            model.ProxySettings
 }
 
 func (s *ProxyService) loadConfigState(ctx context.Context) (proxyConfigState, error) {
@@ -461,7 +478,27 @@ func (s *ProxyService) loadConfigState(ctx context.Context) (proxyConfigState, e
 	if err != nil {
 		return proxyConfigState{}, err
 	}
-	return proxyConfigState{sources: sources, bindings: bindings}, nil
+	policies, err := s.store.ListRulePolicies(ctx)
+	if err != nil {
+		return proxyConfigState{}, err
+	}
+	overrides := map[string]string{}
+	for _, p := range policies {
+		overrides[p.ProviderName] = p.Policy
+	}
+	customRules, err := s.store.ListCustomRules(ctx)
+	if err != nil {
+		return proxyConfigState{}, err
+	}
+	settings, err := s.loadProxySettings(ctx)
+	if err != nil {
+		return proxyConfigState{}, err
+	}
+	return proxyConfigState{
+		sources: sources, bindings: bindings,
+		rulePolicyOverrides: overrides, customRules: customRules,
+		settings: settings,
+	}, nil
 }
 
 // regenerate rebuilds the runtime configuration from the current
@@ -533,7 +570,17 @@ func (s *ProxyService) regenerateState(ctx context.Context, state proxyConfigSta
 // snapshot. Subscription URLs are read from the vault here and
 // only here.
 func (s *ProxyService) buildConfigInput(ctx context.Context, state proxyConfigState) (mihomo.ConfigInput, error) {
-	input := mihomo.ConfigInput{ControllerPort: proxyControllerPort, Secret: s.secret}
+	input := mihomo.ConfigInput{
+		ControllerPort: proxyControllerPort, Secret: s.secret,
+		LogLevel: state.settings.LogLevel, DoHServers: state.settings.DoHServers,
+		ProviderIntervalSec: state.settings.ProviderIntervalSec,
+		RulePolicies:        state.rulePolicyOverrides,
+	}
+	for _, r := range state.customRules {
+		input.CustomRules = append(input.CustomRules, mihomo.CustomRuleInput{
+			RuleType: r.RuleType, Value: r.Value, Policy: r.Policy, Enabled: r.Enabled,
+		})
+	}
 	providerBySource := map[string]string{}
 	for _, src := range state.sources {
 		si := mihomo.SourceInput{ProviderName: src.ProviderName, Kind: src.Kind, FileName: src.FileName}
@@ -1235,13 +1282,17 @@ func (s *ProxyService) testDelays() ([]NodeDelayView, error) {
 	if err != nil {
 		return nil, err
 	}
+	settings, err := s.loadProxySettings(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := []NodeDelayView{}
 	for _, src := range sources {
 		nodes, err := s.client.ProviderProxies(ctx, src.ProviderName)
 		if err != nil {
 			continue
 		}
-		delays, err := s.client.GroupDelay(ctx, mihomo.DelayGroupName(src.ProviderName), 5000)
+		delays, err := s.client.GroupDelay(ctx, mihomo.DelayGroupName(src.ProviderName), settings.TestURL, settings.TestTimeoutMs)
 		if err != nil {
 			delays = map[string]int{}
 		}
@@ -1459,11 +1510,24 @@ func (s *ProxyService) allocatePort(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	settings, err := s.loadProxySettings(ctx)
+	if err != nil {
+		return 0, err
+	}
 	taken := map[int]bool{}
 	for _, p := range used {
 		taken[p] = true
 	}
-	for p := proxyListenerBasePort; p <= proxyListenerMaxPort; p++ {
+	// The scan range starts at the configured listener port
+	// start (an editable setting) and spans 1000 ports. Existing
+	// bindings keep their recorded ports wherever they are —
+	// the setting only steers NEW allocations.
+	start := settings.ListenerPortStart
+	end := start + 999
+	if end > 65535 {
+		end = 65535
+	}
+	for p := start; p <= end; p++ {
 		if taken[p] || mihomo.ProbePort(p) {
 			continue
 		}

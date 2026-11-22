@@ -114,6 +114,49 @@ export interface ClientEventInput {
 }
 
 /**
+ * ConnectionView is one active connection, attributed to the
+ * instance whose listener it entered through.
+ */
+export interface ConnectionView {
+    "id": string;
+
+    /**
+     * "" when not attributable to a bound instance
+     */
+    "instanceId": string;
+
+    /**
+     * host (or destination IP) + port
+     */
+    "target": string;
+
+    /**
+     * e.g. RuleSet, GeoIP, Match, IP-CIDR
+     */
+    "rule": string;
+    "rulePayload": string;
+
+    /**
+     * outbound path, e.g. [node, inst-group] or [DIRECT]
+     */
+    "chains": string[] | null;
+    "upload": number;
+    "download": number;
+    "start": string;
+}
+
+/**
+ * CoreLogsView is one poll of the log buffer: the lines after
+ * the caller's sequence number, the newest sequence number, and
+ * whether the stream is currently attached.
+ */
+export interface CoreLogsView {
+    "lines": coreLogLine[] | null;
+    "latestSeq": number;
+    "streaming": boolean;
+}
+
+/**
  * CoreStatusView is the proxy page's core status summary. It
  * also carries the read-only facts the page's settings dialog
  * shows (the pinned core version and the core data directory);
@@ -182,6 +225,18 @@ export interface CreateLibraryNodeInput {
     "name": string;
     "url": string;
     "parentId": string | null;
+}
+
+/**
+ * CustomRuleView is one custom top rule as the editor shows it.
+ */
+export interface CustomRuleView {
+    "id": string;
+    "ruleType": string;
+    "value": string;
+    "policy": string;
+    "enabled": boolean;
+    "sortOrder": number;
 }
 
 /**
@@ -295,6 +350,27 @@ export interface NodeView {
      * the core has health-checked this node at least once
      */
     "checked": boolean;
+}
+
+/**
+ * ProxySettingsView is the settings dialog's editable form data.
+ */
+export interface ProxySettingsView {
+    "testUrl": string;
+    "testTimeoutMs": number;
+    "providerIntervalSec": number;
+    "dohServers": string[] | null;
+    "logLevel": string;
+    "listenerPortStart": number;
+}
+
+/**
+ * RulePolicyView is one built-in ruleset's effective policy.
+ */
+export interface RulePolicyView {
+    "name": string;
+    "policy": string;
+    "defaultPolicy": string;
 }
 
 /**
@@ -496,4 +572,13 @@ export interface UpdateLibraryNodeInput {
     "name": string;
     "url": string;
     "parentId": string | null;
+}
+
+/**
+ * coreLogLine is one buffered core log line.
+ */
+export interface coreLogLine {
+    "seq": number;
+    "level": string;
+    "text": string;
 }

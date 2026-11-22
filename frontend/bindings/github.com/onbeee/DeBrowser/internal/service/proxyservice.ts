@@ -34,6 +34,14 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * AddCustomRule appends one custom top rule (enabled, last in
+ * evaluation order).
+ */
+export function AddCustomRule(operationID: string, ruleType: string, value: string, policy: string): $CancellablePromise<$models.CustomRuleView> {
+    return $Call.ByID(4105501347, operationID, ruleType, value, policy);
+}
+
+/**
  * AddFileSource imports a local Mihomo YAML file through the
  * native picker. DeBrowser copies the file into its own sources
  * directory; the user's original file is never modified. The
@@ -66,6 +74,13 @@ export function ClearBinding(operationID: string, instanceID: string): $Cancella
 }
 
 /**
+ * DeleteCustomRule removes one custom top rule.
+ */
+export function DeleteCustomRule(operationID: string, id: string): $CancellablePromise<void> {
+    return $Call.ByID(2325691277, operationID, id);
+}
+
+/**
  * DeleteSource removes a source. Sources with instances bound to
  * their nodes cannot be deleted until the bindings are cleared,
  * so an update or deletion can never silently re-point an
@@ -86,6 +101,19 @@ export function GetBinding(instanceID: string): $CancellablePromise<[$models.Bin
 }
 
 /**
+ * GetCoreLogs returns the core log lines buffered since afterSeq
+ * (0 = everything buffered). The first call while the core runs
+ * starts the forwarding stream; lines are only produced at the
+ * core's configured log level — at the default warning level the
+ * stream carries warnings and errors, and raising the level in
+ * the core settings (followed by the automatic reload) is what
+ * makes connection-level info lines appear.
+ */
+export function GetCoreLogs(afterSeq: number): $CancellablePromise<$models.CoreLogsView> {
+    return $Call.ByID(3373393221, afterSeq);
+}
+
+/**
  * GetCoreStatus returns the core's status for the proxy page.
  */
 export function GetCoreStatus(): $CancellablePromise<$models.CoreStatusView> {
@@ -93,10 +121,46 @@ export function GetCoreStatus(): $CancellablePromise<$models.CoreStatusView> {
 }
 
 /**
+ * GetProxySettings returns the effective core settings.
+ */
+export function GetProxySettings(): $CancellablePromise<$models.ProxySettingsView> {
+    return $Call.ByID(1154701350);
+}
+
+/**
+ * GetRulePolicies lists all built-in rulesets with their
+ * effective policies (stored overrides over the defaults), in
+ * evaluation order.
+ */
+export function GetRulePolicies(): $CancellablePromise<$models.RulePolicyView[] | null> {
+    return $Call.ByID(447595145);
+}
+
+/**
  * ListBindings returns every instance binding with live state.
  */
 export function ListBindings(): $CancellablePromise<$models.BindingView[] | null> {
     return $Call.ByID(1519141597);
+}
+
+/**
+ * ListConnections returns the core's active connections. With an
+ * instanceID it returns only the connections that entered
+ * through that instance's listener (the core reports the inbound
+ * port per connection, and the port identifies the binding
+ * exactly). A stopped core yields an empty list, not an error —
+ * the view simply has nothing to show.
+ */
+export function ListConnections(instanceID: string): $CancellablePromise<$models.ConnectionView[] | null> {
+    return $Call.ByID(3412261968, instanceID);
+}
+
+/**
+ * ListCustomRules returns the custom top rules in evaluation
+ * order.
+ */
+export function ListCustomRules(): $CancellablePromise<$models.CustomRuleView[] | null> {
+    return $Call.ByID(2335355863);
 }
 
 /**
@@ -146,6 +210,16 @@ export function RefreshAfterInstanceDeleted(instanceID: string): $CancellablePro
 }
 
 /**
+ * RefreshRuleProviders asks the running core to re-fetch every
+ * enabled built-in ruleset now (the manual counterpart of the
+ * providers' update interval). A ruleset whose fetch fails is
+ * named in the returned error; the core keeps its cached copy.
+ */
+export function RefreshRuleProviders(operationID: string): $CancellablePromise<void> {
+    return $Call.ByID(549261170, operationID);
+}
+
+/**
  * RefreshSource re-fetches a subscription through the core. The
  * core keeps the previous nodes when the fetch fails, and
  * instance bindings are never changed by an update; afterwards
@@ -167,6 +241,22 @@ export function RefreshSource(operationID: string, id: string): $CancellableProm
  */
 export function ReimportFileSource(operationID: string, id: string): $CancellablePromise<$models.SourceView> {
     return $Call.ByID(3052492324, operationID, id);
+}
+
+/**
+ * ReorderCustomRules rewrites the evaluation order from the
+ * given ID sequence, which must cover exactly the stored rules.
+ */
+export function ReorderCustomRules(operationID: string, ids: string[] | null): $CancellablePromise<void> {
+    return $Call.ByID(3030036804, operationID, ids);
+}
+
+/**
+ * ResetRulePolicies removes every policy override ("restore
+ * defaults").
+ */
+export function ResetRulePolicies(operationID: string): $CancellablePromise<void> {
+    return $Call.ByID(1412086414, operationID);
 }
 
 /**
@@ -199,6 +289,13 @@ export function SetRouteMode(operationID: string, instanceID: string, routeMode:
 }
 
 /**
+ * SetRulePolicy changes one built-in ruleset's policy.
+ */
+export function SetRulePolicy(operationID: string, providerName: string, policy: string): $CancellablePromise<void> {
+    return $Call.ByID(2448601617, operationID, providerName, policy);
+}
+
+/**
  * StartCore starts the core. It is the ONLY way the core starts:
  * an explicit user action on the proxy page. DeBrowser startup
  * never starts the core, and no other operation starts it as a
@@ -224,4 +321,23 @@ export function StopCore(operationID: string): $CancellablePromise<void> {
  */
 export function TestDelays(operationID: string): $CancellablePromise<$models.NodeDelayView[] | null> {
     return $Call.ByID(203525591, operationID);
+}
+
+/**
+ * UpdateCustomRule rewrites one custom rule's fields (including
+ * its enabled flag).
+ */
+export function UpdateCustomRule(operationID: string, id: string, ruleType: string, value: string, policy: string, enabled: boolean): $CancellablePromise<void> {
+    return $Call.ByID(3326383879, operationID, id, ruleType, value, policy, enabled);
+}
+
+/**
+ * UpdateProxySettings validates and saves the core settings.
+ * Settings the generated configuration embeds (log level, DoH,
+ * provider interval) take effect through the standard
+ * regenerate/reload flow; the delay-test values are read at test
+ * time and the port start steers future allocations.
+ */
+export function UpdateProxySettings(operationID: string, v: $models.ProxySettingsView): $CancellablePromise<void> {
+    return $Call.ByID(2110886195, operationID, v);
 }

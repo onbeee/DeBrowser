@@ -168,6 +168,128 @@ func TestGenerateEmpty(t *testing.T) {
 	}
 }
 
+func TestGenerateEditableRules(t *testing.T) {
+	in := sampleInput()                 // binding 0 (instance 1111…) is rule mode; its group is inst-111111112222
+	in.Bindings[1].RouteMode = "global" // the other instance: customs must not leak in
+	in.CustomRules = []CustomRuleInput{
+		{RuleType: "DOMAIN-SUFFIX", Value: "example.com", Policy: "reject", Enabled: true},
+		{RuleType: "IP-CIDR", Value: "10.0.0.0/8", Policy: "proxy", Enabled: true},
+		{RuleType: "DOMAIN-KEYWORD", Value: "tracker", Policy: "direct", Enabled: false},
+	}
+	in.RulePolicies = map[string]string{
+		"局域网络": "reject",   // default direct -> reject
+		"禁止广告": "disabled", // default reject -> not generated at all
+		"智能服务": "direct",   // default proxy -> direct
+	}
+	out, err := Generate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := subRulesBlock(t, out, SubRuleName("11111111-2222-3333-4444-555555555555"))
+	// Custom rules come first, in order, enabled only; IP-CIDR
+	// gains ,no-resolve; proxy maps to the instance's own group.
+	wantHead := []string{
+		"DOMAIN-SUFFIX,example.com,REJECT",
+		"IP-CIDR,10.0.0.0/8,inst-111111112222,no-resolve",
+	}
+	for i, want := range wantHead {
+		if sub[i] != want {
+			t.Fatalf("sub-rule %d = %q, want %q\nall: %v", i, sub[i], want, sub)
+		}
+	}
+	if strings.Contains(out, "tracker") {
+		t.Errorf("a disabled custom rule must not be generated\n%s", out)
+	}
+	// The disabled ruleset is skipped in BOTH the providers and
+	// the sub-rules (a dangling reference would break the core).
+	if strings.Contains(out, "禁止广告") {
+		t.Errorf("a disabled ruleset must not appear anywhere\n%s", out)
+	}
+	// Remapped policies land in the sub-rules.
+	for _, want := range []string{"RULE-SET,局域网络,REJECT", "RULE-SET,智能服务,DIRECT"} {
+		found := false
+		for _, line := range sub {
+			if line == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("sub-rules missing %q\nall: %v", want, sub)
+		}
+	}
+	// The fixed tail stays: GEOIP then MATCH onto the group.
+	if sub[len(sub)-2] != "GEOIP,CN,DIRECT,no-resolve" || sub[len(sub)-1] != "MATCH,inst-111111112222" {
+		t.Errorf("sub-rule tail = %v", sub[len(sub)-2:])
+	}
+	// Custom rules never leak into a global-mode instance's
+	// sub-rules: it keeps exactly its single MATCH line.
+	gb := subRulesBlock(t, out, SubRuleName("66666666-7777-8888-9999-000000000000"))
+	if len(gb) != 1 || gb[0] != "MATCH,inst-666666667777" {
+		t.Errorf("global sub-rules = %v, want the single MATCH line", gb)
+	}
+}
+
+func TestGenerateEditableSettings(t *testing.T) {
+	in := sampleInput()
+	in.LogLevel = "info"
+	in.DoHServers = []string{"https://dns.example/dns-query"}
+	in.ProviderIntervalSec = 3600
+	out, err := Generate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"log-level: info\n",
+		"    - \"https://dns.example/dns-query\"\n",
+		"    interval: 3600\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "https://dns.example/dns-query") != 2 {
+		t.Errorf("the DoH list must feed both nameserver lists\n%s", out)
+	}
+	if strings.Count(out, "interval: 3600") < 2 || strings.Contains(out, "interval: 86400") {
+		t.Errorf("the interval must feed proxy-providers and rule-providers alike\n%s", out)
+	}
+	for _, bad := range []ConfigInput{
+		{ControllerPort: 19097, Secret: "s", LogLevel: "trace"},
+		{ControllerPort: 19097, Secret: "s", CustomRules: []CustomRuleInput{{RuleType: "DOMAIN", Value: "x", Policy: "proxy", Enabled: true}}},
+		{ControllerPort: 19097, Secret: "s", CustomRules: []CustomRuleInput{{RuleType: "DOMAIN-SUFFIX", Value: "a,b", Policy: "proxy", Enabled: true}}},
+		{ControllerPort: 19097, Secret: "s", RulePolicies: map[string]string{"局域网络": "bogus"}},
+	} {
+		if _, err := Generate(bad); err == nil {
+			t.Errorf("Generate(%+v) must fail", bad)
+		}
+	}
+}
+
+// subRulesBlock extracts one instance's sub-rule lines from the
+// generated configuration.
+func subRulesBlock(t *testing.T, out, name string) []string {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	start := -1
+	for i, l := range lines {
+		if l == "  "+yq(name)+":" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("sub-rules for %s not found\n%s", name, out)
+	}
+	var sub []string
+	for _, l := range lines[start:] {
+		if !strings.HasPrefix(l, "    - ") {
+			break
+		}
+		sub = append(sub, strings.Trim(l, "    - \""))
+	}
+	return sub
+}
+
 func TestGenerateRouteModes(t *testing.T) {
 	in := sampleInput()
 	in.Bindings[0].RouteMode = "global"

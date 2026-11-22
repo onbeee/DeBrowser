@@ -407,6 +407,111 @@ func TestProxyCoreEndToEnd(t *testing.T) {
 	}
 }
 
+// TestProxyCoreEditableRulesLive verifies the editable rules
+// against the real core: with the core RUNNING and the instance
+// untouched, adding a custom top rule, disabling it, and
+// disabling a built-in ruleset each take effect on the very next
+// request through the standard reload flow. It also checks the
+// log stream picks up the core's connection lines once the log
+// level is raised to info.
+func TestProxyCoreEditableRulesLive(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	seedRuleCaches(t, f.cfg.Layout.Mihomo, true) // lan set claims 127.0.0.0/8 -> DIRECT
+	seedGeoIP(t, f.cfg.Layout.Mihomo)
+
+	echoA := startEcho(t, "VIA-A")
+	targetPort := startEcho(t, "DIRECT-TARGET")
+	nodeA := startSocksNode(t, echoA)
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d/", targetPort)
+
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "nodes.yaml")
+	writeSourceYAML(t, srcFile, fmt.Sprintf("NodeA=%d", nodeA))
+	f.svc.SourceFilePicker = func() (string, error) { return srcFile, nil }
+	srcView, err := f.svc.AddFileSource("op", "可编辑规则")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := f.makeInstance(t, "实例一").ID
+	b, err := f.svc.SetBinding("op", inst, srcView.ID, "NodeA") // rule mode (default)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Raise the log level BEFORE the start so the log stream has
+	// connection lines to pick up.
+	settings, err := f.svc.GetProxySettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.LogLevel = "info"
+	if err := f.svc.UpdateProxySettings("op", settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+	// Attach the log stream now: /logs only forwards lines
+	// emitted after the subscription, so the first read must
+	// happen before the traffic it should capture.
+	if _, err := f.svc.GetCoreLogs(0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline: the LAN set sends the loopback target direct.
+	probeWantURL(t, b.Port, targetURL, "DIRECT-TARGET")
+
+	// 1. A custom top rule rejecting the target's /8 takes
+	// effect live, ahead of the LAN set's DIRECT.
+	rule, err := f.svc.AddCustomRule("op", "IP-CIDR", "127.0.0.0/8", "reject")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := probeViaURL(b.Port, targetURL); err == nil {
+		t.Fatalf("the rejecting custom rule must block the target, got body %q", body)
+	}
+
+	// 2. Disabling the custom rule restores the direct path.
+	if err := f.svc.UpdateCustomRule("op", rule.ID, "IP-CIDR", "127.0.0.0/8", "reject", false); err != nil {
+		t.Fatal(err)
+	}
+	probeWantURL(t, b.Port, targetURL, "DIRECT-TARGET")
+
+	// 3. Deleting the custom rule and disabling the LAN ruleset
+	// drops the target through to the final MATCH: the bound
+	// node serves it.
+	if err := f.svc.DeleteCustomRule("op", rule.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.SetRulePolicy("op", "局域网络", "disabled"); err != nil {
+		t.Fatal(err)
+	}
+	probeWantURL(t, b.Port, targetURL, "VIA-A")
+
+	// The log stream (level info) must have picked up core log
+	// lines by now; poll briefly for the buffer to fill.
+	deadline := time.Now().Add(10 * time.Second)
+	found := false
+	for time.Now().Before(deadline) && !found {
+		view, err := f.svc.GetCoreLogs(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range view.Lines {
+			if strings.Contains(l.Text, "[TCP]") {
+				found = true
+			}
+		}
+		if !found {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	if !found {
+		t.Fatal("the core log stream delivered no connection lines at info level")
+	}
+}
+
 func TestProxyCoreExternalConflict(t *testing.T) {
 	f := testProxyFixture(t)
 	f.installCore(t)

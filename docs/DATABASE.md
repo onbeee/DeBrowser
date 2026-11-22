@@ -29,7 +29,7 @@
 
 ## 当前有效表
 
-当前产品实际使用的数据表共七张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`、`proxy_sources`、`instance_proxy_bindings`。
+当前产品实际使用的数据表共十张：`browser_instances`、`bookmark_nodes`、`external_browsers`、`instance_runtime`、`profile_counter`、`proxy_sources`、`instance_proxy_bindings`、`proxy_rule_policies`、`proxy_custom_rules`、`proxy_settings`。
 
 ### `browser_instances`
 
@@ -83,6 +83,18 @@ DeBrowser 重启后的重新识别逐项核验记录（PID 存在、创建时间
 实例代理绑定（Stage 6C，migration 0015；`route_mode` 由 migration 0016 添加）：每个使用代理的浏览器实例一行。列：`instance_id`（主键，外键 → `browser_instances(id)`，随实例删除级联）、`source_id`（外键 → `proxy_sources(id)`，无级联：有绑定的来源不能删除，服务层先行检查并明确提示）、`node_name`（节点在所属来源内的名称；节点身份由「来源 + 名称」共同确定，不同来源的同名节点不冲突）、`port`（该实例专属的本地监听端口，唯一）、`route_mode`（路由模式，CHECK：`rule` / `global` / `direct`，默认 `rule`；决定生成的运行配置中该实例的子规则集内容）、时间戳。
 
 绑定是 DeBrowser 的业务数据，只存于本表，永不依赖 Mihomo 核心的 cache 保存；核心每次启动或配置重载后由服务按本表重新下达节点选择。订阅更新后原绑定节点消失时，绑定保留、界面标记不可用，永不静默回退到其他节点。
+
+### `proxy_rule_policies`
+
+内置规则集策略覆盖（Stage 6C，migration 0017）：只保存用户改动过的规则集，一行一个规则集。列：`provider_name`（主键，与生成的运行配置中的 rule-provider 名一致）、`policy`（CHECK：`proxy` / `direct` / `reject` / `disabled`）、`updated_at`。没有行的规则集使用 `internal/mihomo` 中编译的默认策略；「恢复默认」即删除全部行。策略是全局统一的（不按实例区分），生成配置时与默认值合并为每个规则集的有效策略。
+
+### `proxy_custom_rules`
+
+用户自定义置顶规则（Stage 6C，migration 0017）：在每个 rule 模式实例的子规则中排在全部内置 RULE-SET 之前，按 `sort_order` 逐条匹配。列：`id`（主键）、`rule_type`（CHECK：`DOMAIN-SUFFIX` / `DOMAIN-KEYWORD` / `IP-CIDR`）、`value`、`policy`（CHECK：`proxy` / `direct` / `reject`；`proxy` 生成时编译为该实例自己的组名）、`enabled`、`sort_order`、时间戳。值的合法性（CIDR 形式、不得含逗号/空格等）由服务层在保存前校验并给出明确提示。
+
+### `proxy_settings`
+
+可编辑核心设置（Stage 6C，migration 0017）：键值表，列：`key`（主键）、`value`（文本；DoH 列表以 JSON 数组保存）。键：`test_url`、`test_timeout_ms`、`provider_interval_sec`、`doh_servers`、`log_level`、`listener_port_start`。缺失的键使用 `internal/model.DefaultProxySettings` 的默认值。本表只存代理核心设置，与面向用户的应用设置（`config/settings.json`：语言、主题、日志容量）互不相关。
 
 ## 遗留表（当前未使用）
 

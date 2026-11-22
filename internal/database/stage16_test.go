@@ -20,8 +20,8 @@ func TestMigration16BindingRouteMode(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if v, err := db.AppliedVersion(ctx); err != nil || v != 16 {
-		t.Fatalf("AppliedVersion = %d (err %v), want 16", v, err)
+	if v, err := db.AppliedVersion(ctx); err != nil || v != 17 {
+		t.Fatalf("AppliedVersion = %d (err %v), want 17", v, err)
 	}
 	if _, err := db.SQL().ExecContext(ctx,
 		`INSERT INTO browser_instances (id, name, user_data_dir) VALUES ('i1', '实例一', 'profiles/i1')`); err != nil {

@@ -44,12 +44,44 @@ type BindingInput struct {
 	RouteMode    string
 }
 
+// CustomRuleInput is one user-defined top rule for the
+// generator: it lands, in input order, ahead of every built-in
+// RULE-SET line in each rule-mode instance's sub-rules. Disabled
+// rules are skipped. Policy is one of proxy/direct/reject
+// (model.CustomRulePolicy*); proxy compiles to the instance's
+// own group, so the same rule serves every instance with its
+// own bound node.
+type CustomRuleInput struct {
+	RuleType string
+	Value    string
+	Policy   string
+	Enabled  bool
+}
+
 // ConfigInput is everything Generate needs.
 type ConfigInput struct {
 	ControllerPort int
 	Secret         string
 	Sources        []SourceInput
 	Bindings       []BindingInput
+
+	// Editable core settings (zero values select the built-in
+	// defaults, which are the values DefaultProxySettings
+	// carries): the core log level, the DoH upstreams for
+	// dns.nameserver / dns.proxy-server-nameserver, and the
+	// update interval of http proxy-providers and
+	// rule-providers.
+	LogLevel            string
+	DoHServers          []string
+	ProviderIntervalSec int
+
+	// RulePolicies maps a built-in ruleset name to its EFFECTIVE
+	// policy (proxy/direct/reject/disabled). Missing entries use
+	// the ruleset's default policy. Disabled rulesets are neither
+	// emitted as rule-providers nor referenced by sub-rules.
+	RulePolicies map[string]string
+	// CustomRules are the user's top rules, in evaluation order.
+	CustomRules []CustomRuleInput
 }
 
 // shortID derives a stable, configuration-safe name fragment from
@@ -82,33 +114,82 @@ type ruleProviderDef struct {
 	Name string // provider name, referenced by RULE-SET lines
 	URL  string
 	File string // cache file basename under ./rules/
+	// DefaultPolicy is where matching traffic goes until the
+	// user overrides this ruleset's policy (proxy/direct/reject).
+	DefaultPolicy string
 }
 
 var sharedRuleProviders = []ruleProviderDef{
-	{"规则修正", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Direct/Direct.yaml", "direct"},
-	{"屏蔽服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/BlockHttpDNS/BlockHttpDNS.yaml", "block-http-dns"},
-	{"禁止广告", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/AdvertisingLite/AdvertisingLite_Classical.yaml", "advertising-lite"},
-	{"反劫服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Hijacking/Hijacking.yaml", "hijacking"},
-	{"隐私保护", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Privacy/Privacy_Classical.yaml", "privacy"},
-	{"智能服务", "https://raw.githubusercontent.com/KPP69/CF/main/Clash/Rule/Ai.yaml", "ai"},
-	{"谷歌服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml", "google"},
-	{"推特服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Twitter/Twitter.yaml", "twitter"},
-	{"飞机服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Telegram/Telegram.yaml", "telegram"},
-	{"加密服务", "https://raw.githubusercontent.com/KPP69/CF/main/Clash/Rule/Crypto.yaml", "crypto"},
-	{"微软服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Microsoft/Microsoft.yaml", "microsoft"},
-	{"国际服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Proxy/Proxy_Classical.yaml", "proxy"},
-	{"国内服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Classical.yaml", "china-max"},
-	{"局域网络", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml", "lan"},
+	{"规则修正", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Direct/Direct.yaml", "direct", "direct"},
+	{"屏蔽服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/BlockHttpDNS/BlockHttpDNS.yaml", "block-http-dns", "reject"},
+	{"禁止广告", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/AdvertisingLite/AdvertisingLite_Classical.yaml", "advertising-lite", "reject"},
+	{"反劫服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Hijacking/Hijacking.yaml", "hijacking", "reject"},
+	{"隐私保护", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Privacy/Privacy_Classical.yaml", "privacy", "reject"},
+	{"智能服务", "https://raw.githubusercontent.com/KPP69/CF/main/Clash/Rule/Ai.yaml", "ai", "proxy"},
+	{"谷歌服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml", "google", "proxy"},
+	{"推特服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Twitter/Twitter.yaml", "twitter", "proxy"},
+	{"飞机服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Telegram/Telegram.yaml", "telegram", "proxy"},
+	{"加密服务", "https://raw.githubusercontent.com/KPP69/CF/main/Clash/Rule/Crypto.yaml", "crypto", "proxy"},
+	{"微软服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Microsoft/Microsoft.yaml", "microsoft", "proxy"},
+	{"国际服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Proxy/Proxy_Classical.yaml", "proxy", "proxy"},
+	{"国内服务", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Classical.yaml", "china-max", "direct"},
+	{"局域网络", "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml", "lan", "direct"},
+}
+
+// RuleProviderInfo describes one built-in ruleset to callers
+// outside this package (the service's policy views).
+type RuleProviderInfo struct {
+	Name          string
+	DefaultPolicy string
+}
+
+// BuiltinRuleProviders returns the shared rulesets in their
+// fixed evaluation order, with their default policies.
+func BuiltinRuleProviders() []RuleProviderInfo {
+	out := make([]RuleProviderInfo, len(sharedRuleProviders))
+	for i, rp := range sharedRuleProviders {
+		out[i] = RuleProviderInfo{Name: rp.Name, DefaultPolicy: rp.DefaultPolicy}
+	}
+	return out
+}
+
+// EffectiveRulePolicies merges stored overrides over the
+// built-in defaults, returning every ruleset's effective policy.
+// Unknown names in overrides are ignored.
+func EffectiveRulePolicies(overrides map[string]string) map[string]string {
+	out := make(map[string]string, len(sharedRuleProviders))
+	for _, rp := range sharedRuleProviders {
+		out[rp.Name] = rp.DefaultPolicy
+		if p, ok := overrides[rp.Name]; ok {
+			out[rp.Name] = p
+		}
+	}
+	return out
+}
+
+// policyTarget maps a policy to the rule target for one
+// instance: proxy is the instance's own group.
+func policyTarget(policy, group string) string {
+	switch policy {
+	case "direct":
+		return "DIRECT"
+	case "reject":
+		return "REJECT"
+	default: // "proxy"
+		return group
+	}
 }
 
 // subRuleLines renders one instance's sub-rules from its routing
-// mode. In rule mode the shared sets run in their fixed order —
-// direct-fixes first, block sets next, the instance's group for
-// everything proxy-bound, China/LAN direct — and the final MATCH
-// lands on the instance's own group, so a request no set claims
-// still uses exactly the instance's bound node. Mode values are
+// mode and the editable rule configuration. In rule mode the
+// evaluation order is: the user's enabled custom top rules
+// first, then the built-in RULE-SET lines in their fixed order
+// (skipping disabled sets, each mapped through its effective
+// policy), then GEOIP/CN direct and a final MATCH onto the
+// instance's own group, so a request nothing claims still uses
+// exactly the instance's bound node. Mode values are
 // model.RouteMode* (the database CHECK constrains them).
-func subRuleLines(b BindingInput) []string {
+func subRuleLines(b BindingInput, effective map[string]string, customs []CustomRuleInput) []string {
 	group := GroupName(b.InstanceID)
 	switch b.RouteMode {
 	case "global":
@@ -116,24 +197,27 @@ func subRuleLines(b BindingInput) []string {
 	case "direct":
 		return []string{"MATCH,DIRECT"}
 	default: // "rule" (and the zero value)
-		return []string{
-			"RULE-SET,规则修正,DIRECT",
-			"RULE-SET,屏蔽服务,REJECT",
-			"RULE-SET,禁止广告,REJECT",
-			"RULE-SET,反劫服务,REJECT",
-			"RULE-SET,隐私保护,REJECT",
-			"RULE-SET,智能服务," + group,
-			"RULE-SET,谷歌服务," + group,
-			"RULE-SET,推特服务," + group,
-			"RULE-SET,飞机服务," + group,
-			"RULE-SET,加密服务," + group,
-			"RULE-SET,微软服务," + group,
-			"RULE-SET,国际服务," + group,
-			"RULE-SET,国内服务,DIRECT",
-			"RULE-SET,局域网络,DIRECT",
-			"GEOIP,CN,DIRECT,no-resolve",
-			"MATCH," + group,
+		lines := []string{}
+		for _, c := range customs {
+			if !c.Enabled {
+				continue
+			}
+			line := c.RuleType + "," + c.Value + "," + policyTarget(c.Policy, group)
+			if c.RuleType == "IP-CIDR" {
+				line += ",no-resolve"
+			}
+			lines = append(lines, line)
 		}
+		for _, rp := range sharedRuleProviders {
+			policy := effective[rp.Name]
+			if policy == "disabled" {
+				continue
+			}
+			lines = append(lines, "RULE-SET,"+rp.Name+","+policyTarget(policy, group))
+		}
+		return append(lines,
+			"GEOIP,CN,DIRECT,no-resolve",
+			"MATCH,"+group)
 	}
 }
 
@@ -180,11 +264,55 @@ func Generate(in ConfigInput) (string, error) {
 			return "", fmt.Errorf("mihomo: binding for instance %s has invalid route mode %q", b.InstanceID, b.RouteMode)
 		}
 	}
+	// Editable-settings inputs, with the built-in defaults.
+	logLevel := in.LogLevel
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+	switch logLevel {
+	case "warning", "info", "debug":
+	default:
+		return "", fmt.Errorf("mihomo: invalid log level %q", logLevel)
+	}
+	dohServers := in.DoHServers
+	if len(dohServers) == 0 {
+		dohServers = []string{"https://223.5.5.5/dns-query", "https://223.6.6.6/dns-query"}
+	}
+	providerInterval := in.ProviderIntervalSec
+	if providerInterval <= 0 {
+		providerInterval = 86400
+	}
+	effective := EffectiveRulePolicies(in.RulePolicies)
+	for name, p := range in.RulePolicies {
+		if _, known := effective[name]; !known {
+			continue
+		}
+		switch p {
+		case "proxy", "direct", "reject", "disabled":
+		default:
+			return "", fmt.Errorf("mihomo: ruleset %s has invalid policy %q", name, p)
+		}
+	}
+	for _, c := range in.CustomRules {
+		switch c.RuleType {
+		case "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR":
+		default:
+			return "", fmt.Errorf("mihomo: custom rule has invalid type %q", c.RuleType)
+		}
+		switch c.Policy {
+		case "proxy", "direct", "reject":
+		default:
+			return "", fmt.Errorf("mihomo: custom rule has invalid policy %q", c.Policy)
+		}
+		if c.Value == "" || strings.ContainsAny(c.Value, ",\r\n") {
+			return "", fmt.Errorf("mihomo: custom rule value %q is empty or contains a separator", c.Value)
+		}
+	}
 
 	var w strings.Builder
 	w.WriteString("# DeBrowser 生成的 Mihomo 运行配置，请勿手动编辑。\n")
 	w.WriteString("# 订阅地址等敏感信息只出现在本文件中，不要分享或导出本文件。\n")
-	w.WriteString("log-level: warning\n")
+	fmt.Fprintf(&w, "log-level: %s\n", logLevel)
 	w.WriteString("mode: rule\n")
 	w.WriteString("ipv6: false\n")
 	// tcp-concurrent races a hostname's addresses instead of
@@ -212,8 +340,14 @@ func Generate(in ConfigInput) (string, error) {
 	// depends on the general nameserver path.
 	w.WriteString("dns:\n  enable: true\n  ipv6: false\n  enhanced-mode: redir-host\n")
 	w.WriteString("  default-nameserver:\n    - \"223.5.5.5\"\n    - \"223.6.6.6\"\n")
-	w.WriteString("  proxy-server-nameserver:\n    - \"https://223.5.5.5/dns-query\"\n    - \"https://223.6.6.6/dns-query\"\n")
-	w.WriteString("  nameserver:\n    - \"https://223.5.5.5/dns-query\"\n    - \"https://223.6.6.6/dns-query\"\n")
+	// The DoH upstream list is one of the editable settings; it
+	// feeds both the proxy-server resolver and the general one.
+	for _, key := range []string{"proxy-server-nameserver", "nameserver"} {
+		fmt.Fprintf(&w, "  %s:\n", key)
+		for _, srv := range dohServers {
+			fmt.Fprintf(&w, "    - %s\n", yq(srv))
+		}
+	}
 
 	if len(sources) > 0 {
 		w.WriteString("proxy-providers:\n")
@@ -223,7 +357,7 @@ func Generate(in ConfigInput) (string, error) {
 			case "url":
 				w.WriteString("    type: http\n")
 				fmt.Fprintf(&w, "    url: %s\n", yq(s.URL))
-				w.WriteString("    interval: 86400\n")
+				fmt.Fprintf(&w, "    interval: %d\n", providerInterval)
 				// The provider's own fetch must not traverse the
 				// rule engine (it would depend on the very nodes it
 				// is fetching); pin it to a direct connection.
@@ -297,11 +431,23 @@ func Generate(in ConfigInput) (string, error) {
 	if anyRuleMode {
 		// The shared rule-providers exist only when at least one
 		// instance can reference them; the core downloads and
-		// caches them once for all rule-mode instances.
-		w.WriteString("rule-providers:\n")
+		// caches them once for all rule-mode instances. A ruleset
+		// whose effective policy is disabled is not emitted at
+		// all (the sub-rules skip it too — a dangling RULE-SET
+		// reference would make the core refuse the whole
+		// configuration).
+		enabled := []ruleProviderDef{}
 		for _, rp := range sharedRuleProviders {
-			fmt.Fprintf(&w, "  %s:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    path: %s\n    interval: 86400\n",
-				yq(rp.Name), yq(rp.URL), yq("./rules/"+rp.File+".yaml"))
+			if effective[rp.Name] != "disabled" {
+				enabled = append(enabled, rp)
+			}
+		}
+		if len(enabled) > 0 {
+			w.WriteString("rule-providers:\n")
+			for _, rp := range enabled {
+				fmt.Fprintf(&w, "  %s:\n    type: http\n    behavior: classical\n    format: yaml\n    url: %s\n    path: %s\n    interval: %d\n",
+					yq(rp.Name), yq(rp.URL), yq("./rules/"+rp.File+".yaml"), providerInterval)
+			}
 		}
 	}
 
@@ -309,7 +455,7 @@ func Generate(in ConfigInput) (string, error) {
 		w.WriteString("sub-rules:\n")
 		for _, b := range bindings {
 			fmt.Fprintf(&w, "  %s:\n", yq(SubRuleName(b.InstanceID)))
-			for _, line := range subRuleLines(b) {
+			for _, line := range subRuleLines(b, effective, in.CustomRules) {
 				fmt.Fprintf(&w, "    - %s\n", yq(line))
 			}
 		}

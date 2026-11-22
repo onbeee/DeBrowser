@@ -388,20 +388,20 @@ rules:
 
 | 字段 | 来源 | 用途 |
 |---|---|---|
-| `log-level: warning` | 固定 | 核心日志级别；核心日志写 `core.log` |
+| `log-level` | 可编辑设置（默认 `warning`） | 核心日志级别（warning / info / debug，`proxy_settings.log_level`）；核心日志写 `core.log`，同一流经后端转发供代理页「核心日志」查看（见第 9 节） |
 | `mode: rule` | 固定 | 核心运行模式（实例流量经各自 sub-rules 决策，不经顶层 rules，见 7.3） |
 | `ipv6: false` | 固定 | 关闭 IPv6 |
 | `external-controller` / `secret` | 固定端口 19097 + Vault 外的本地密钥文件 | REST API 入口与 Bearer 认证，仅回环 |
 | `profile.store-selected: false` | 固定 | 禁止核心持久化组选择；选择真源是 DeBrowser 的 DB |
-| `dns` | 固定 | 核心 DNS：启用、redir-host 模式、上游为 DoH（`default-nameserver` 223.5.5.5/223.6.6.6、`proxy-server-nameserver` 与 `nameserver` 均为其 DoH 端点）。不再使用系统解析器：redir-host 下系统解析器可能使首次查询长时间阻塞（MetaCubeX/mihomo#1185），与测速超时现象相关。DeBrowser 只下发这组最小配置，解析行为全在核心 |
+| `dns` | 固定 | 核心 DNS：启用、redir-host 模式、上游为 DoH（`default-nameserver` 223.5.5.5/223.6.6.6 固定；`proxy-server-nameserver` 与 `nameserver` 的 DoH 列表为可编辑设置，默认即 223.5.5.5/223.6.6.6 的 DoH 端点）。不再使用系统解析器：redir-host 下系统解析器可能使首次查询长时间阻塞（MetaCubeX/mihomo#1185），与测速超时现象相关。DeBrowser 只下发这组最小配置，解析行为全在核心 |
 | `tcp-concurrent` / `unified-delay` | 固定 `true` | 并发竞速拨号避免单个坏地址拖垮连接与测速；统一延迟口径去掉测速的额外握手往返 |
-| `proxy-providers.*` | 每来源一条 | http：订阅地址（Vault 解出）、每日自动刷新、抓取固定直连、缓存路径；file：指向 DeBrowser 的副本文件 |
+| `proxy-providers.*` | 每来源一条 | http：订阅地址（Vault 解出）、自动刷新间隔取可编辑设置（默认 86400 秒）、抓取固定直连、缓存路径；file：指向 DeBrowser 的副本文件 |
 | `health-check` | 固定参数 | 见第 5 节 |
 | `proxy-groups`（delay-*） | 每来源一条 | 测速专用隐藏组 |
 | `proxy-groups`（inst-*） | 每绑定一条 | 实例专属选择组：`proxies: [REJECT]` + `use: [绑定来源]` |
 | `listeners` | 每绑定一条 | mixed 监听（HTTP/SOCKS 同端口）、仅 127.0.0.1、`rule` 指向本实例的 sub-rules |
-| `rule-providers` | 固定 14 个共享集（仅当至少一个绑定为 rule 模式时生成） | 全部 `type: http`、`behavior: classical`、`format: yaml`、`interval: 86400`，各自缓存到 `./rules/<英文名>.yaml`；核心统一下载与缓存，全部 rule 模式实例共享 |
-| `sub-rules` | 每绑定一份 | 由绑定的 `route_mode` 派生：rule = 14 条 RULE-SET（顺序固定：直连修正 → 四个 REJECT 集 → 七个走实例组的服务集 → 国内/局域直连）+ `GEOIP,CN,DIRECT,no-resolve` + `MATCH,<实例组>`；global = 仅 `MATCH,<实例组>`；direct = 仅 `MATCH,DIRECT` |
+| `rule-providers` | 14 个共享集（仅当至少一个绑定为 rule 模式时生成；有效策略为 disabled 的集不生成） | 全部 `type: http`、`behavior: classical`、`format: yaml`、`interval` 取可编辑设置（默认 86400），各自缓存到 `./rules/<英文名>.yaml`；核心统一下载与缓存，全部 rule 模式实例共享；清单与默认策略固定在 `config.go`，策略可改（见下） |
+| `sub-rules` | 每绑定一份 | 由绑定的 `route_mode` 与可编辑规则共同派生：rule = 已启用的自定义置顶规则（逐条，IP-CIDR 自动加 `,no-resolve`，`proxy` 编译为本实例组）→ 未停用的 RULE-SET（按固定顺序、经各自有效策略映射目标）→ `GEOIP,CN,DIRECT,no-resolve` → `MATCH,<实例组>`；global = 仅 `MATCH,<实例组>`；direct = 仅 `MATCH,DIRECT` |
 | `rules` | 固定一条 `MATCH,DIRECT` | 仅作用于核心自身经规则的流量（如未被 provider 固定的抓取、规则集下载）；实例流量不经此表 |
 
 ### 7.3 关键问答（按代码）
@@ -409,7 +409,7 @@ rules:
 - **一个实例几个 Listener、几个组？** 恰好各一个，外加一份同名 sub-rules。Listener 名与组名相同（`inst-<实例ID前12位十六进制>`），sub-rules 名为 `sub-inst-<实例ID前12位十六进制>`。
 - **Listener 用 `proxy` 还是 `rule`？** 只用 `rule`（指向本实例的 sub-rules）。sub-rules 的最终 MATCH 落到本实例组（rule/global 模式）或 DIRECT（direct 模式），因此节点选择仍只由本实例组决定。
 - **实例流量是否经过顶层 rules？** 否。实例流量只经自己的 sub-rules；顶层 `rules` 只有一条 `MATCH,DIRECT`，只作用于核心自身流量，与实例流量无关。
-- **是否支持每实例独立规则？** 支持**每实例独立路由模式**（绑定上的 `route_mode`：rule/global/direct，migration 0016）：rule 模式实例之间共享同一组 rule-providers，但各自的 sub-rules 把代理目标指向自己的组，互不影响；规则集内容本身是产品固定的 14 个共享集，不支持用户编辑或按实例增删。
+- **是否支持每实例独立规则？** 支持**每实例独立路由模式**（绑定上的 `route_mode`：rule/global/direct，migration 0016）：rule 模式实例之间共享同一组 rule-providers，但各自的 sub-rules 把代理目标指向自己的组，互不影响。规则层另有两级**全局统一**（不按实例区分）的可编辑项（migration 0017）：14 个内置规则集各自的策略（走实例节点/直连/拦截/停用，存 `proxy_rule_policies` 覆盖行，默认即原预设）与用户自定义置顶规则（DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR，存 `proxy_custom_rules`，排在全部 RULE-SET 之前）；其中 `proxy` 策略在生成时编译为每个实例自己的组，因此同一条规则对各实例仍指向各自的节点。规则集的清单、地址与默认策略固定在 `internal/mihomo/config.go`，用户不能增删规则集、不能改其内容，也不能手写 YAML 覆写。
 - **节点绑定如何影响出站？** DB 绑定（含 route_mode）→ 生成组、Listener 与 sub-rules → 核心启动/重载后 `applySelections` 用 `PUT /proxies/{组名}` 把组选择设为绑定节点；浏览器流量经 Listener 进入 sub-rules，按模式与规则集决策出站（命中代理目标时经本实例组到绑定节点）。
 - **更新配置是否需要重启核心？** 不需要。`PUT /configs?force=true` 热重载（`regenerateState`）；仅当核心未运行时，配置只写文件，待下次手动启动加载。
 - 组选择的易失性：`store-selected: false` + 热重载会重置组选择，因此**每次**启动与重载后都必须 `applySelections`——代码中所有触发重载的路径（StartCore、regenerateState 内部）都串联了它。
@@ -430,12 +430,12 @@ rules:
 | DIRECT 如何处理 | 出现在：provider 抓取固定 `proxy: DIRECT`；顶层兜底 `MATCH,DIRECT`（核心自身流量）；sub-rules 中规则修正/国内服务/局域网络/GEOIP,CN 的目标；direct 模式的 MATCH 目标 |
 | REJECT 如何处理 | 两处：每实例组的首成员与安全回落目标（节点未选/消失/选择失败时流量被拒绝，从不写入 DB 冒充绑定）；sub-rules 中屏蔽服务/禁止广告/反劫服务/隐私保护四个规则集的目标 |
 | MATCH 如何处理 | 顶层一条 `MATCH,DIRECT`（核心自身流量）；每份 sub-rules 的收尾 MATCH（rule/global → 本实例组，direct → DIRECT） |
-| 规则策略页面是否有真实执行能力 | **没有规则编辑/启停页面**。用户可控的只有实例级的路由模式三选一（实例新建/编辑表单；代理页绑定总览只读显示模式）。规则集清单固定在 `internal/mihomo/config.go`，UI 无规则集开关 |
+| 规则策略页面是否有真实执行能力 | **有**。代理页「分流规则」区可改每个内置规则集的策略（走实例节点/直连/拦截/停用）、恢复默认、立即更新规则集（`PUT /providers/rules/{name}`），并增删改、启停、排序自定义置顶规则；保存经「提议配置 → ensureGeoIP → 重载 → applySelections → 失败回滚」即时生效。实例级另有路由模式三选一（实例新建/编辑表单）。不可做的是：增删规则集本身、编辑规则集内容、手写 YAML |
 | 规则集的更新与失败 | 核心按 `interval: 86400` 自动刷新各 rule-provider 并缓存到 `data/mihomo/rules/`；单个集下载失败只记核心日志、该集暂为空（不匹配任何流量），不阻止核心启动；本地已有缓存时启动直接用缓存 |
 | GeoIP 数据库依赖 | rule 模式 sub-rules 含 `GEOIP,CN` 一行，核心加载配置时**必须**有 GeoIP 数据库（`data/mihomo/geoip.metadb`），只要有一个 rule 模式绑定存在整份配置就需要它。该数据库由 **DeBrowser 前置准备**（不依赖核心自行下载）：开启核心前、以及运行中重载将要引入 GEOIP 引用时，`ProxyService.ensureGeoIP` 先检查——已存在且非空直接复用；缺失则由 DeBrowser 从官方发布地址下载（临时文件 → 校验大小与 MaxMind 元数据标记 → 原子重命名落盘，`internal/mihomo/geoip.go`）；**下载失败时操作直接以「GeoIP 数据库下载失败」报错并阻断，核心不被启动/不执行该次重载**。global/direct 模式的 sub-rules 不含 GEOIP，无 rule 模式绑定时不准备该数据库 |
 | 核心的 `/rules/disable` 等 API | 不使用（客户端 `client.go` 未实现这些端点） |
 
-一句话：路由 = 每实例 sub-rules（按其路由模式生成）+ 共享固定规则集 + 每实例组的选择（绑定节点 / REJECT）；订阅规则仍不导入，用户不能编辑规则集，只能为每个实例选模式。
+一句话：路由 = 每实例 sub-rules（按其路由模式生成：自定义置顶规则 + 内置规则集策略映射 + GEOIP/MATCH 兜底）+ 共享规则集（清单固定、策略可编辑）+ 每实例组的选择（绑定节点 / REJECT）；订阅规则仍不导入。
 
 ---
 
@@ -474,7 +474,7 @@ rules:
 
 ### 10.2 实机已报告现象与代码层面的对应（根因均标注状态）
 
-1. **同一订阅在 Clash Verge 全部节点可用，DeBrowser 约 1/3 节点测速超时** — 根因**待验证**。代码可确认的我方参数：测速超时固定 **5000 ms**；测速 URL 为 `https://www.gstatic.com/generate_204`；每来源一次 group delay 调用、组内节点由核心并发测试。已针对最可疑因素做收敛修复（待实机对照确认）：DNS 由 redir-host + 系统解析器改为 DoH 上游（系统解析器在 redir-host 下可阻塞首次查询，见 MetaCubeX/mihomo#1185），并开启 `tcp-concurrent` 与 `unified-delay`。修复是否消除超时率差异，以 Windows 11 实机同订阅对照测速为准。
+1. **同一订阅在 Clash Verge 全部节点可用，DeBrowser 约 1/3 节点测速超时** — 根因**待验证**。代码可确认的我方参数：测速超时与测速 URL 为可编辑设置（默认 **5000 ms** 与 `https://www.gstatic.com/generate_204`，`proxy_settings`）；每来源一次 group delay 调用、组内节点由核心并发测试。已针对最可疑因素做收敛修复（待实机对照确认）：DNS 由 redir-host + 系统解析器改为 DoH 上游（系统解析器在 redir-host 下可阻塞首次查询，见 MetaCubeX/mihomo#1185），并开启 `tcp-concurrent` 与 `unified-delay`。修复是否消除超时率差异，以 Windows 11 实机同订阅对照测速为准。
 2. **曾出现 Listener 本地端口无响应** — 代码可确认的机制：核心在 Listener 端口冲突时**不退出**，只在 `core.log` 记录并丢弃该 Listener，进程存活与控制器应答都正常，因此「核心运行中」与「某 Listener 已死」可以并存。DeBrowser 的发现手段是探测：绑定列表的 Listener 状态、实例启动门禁都会 `ProbePort` 并在无响应时明确提示/拒绝。至于该次实机事件是否即此机制（或端口被其他程序占用、重载瞬间窗口），**待验证**（需当时的 `core.log`）。
 3. **曾出现配置更新失败** — 代码路径明确：热重载被核心拒绝时 `regenerateState` 恢复旧文件并返回错误，操作不假报成功。何种配置内容会触发核心拒绝（生成配置为程序渲染，顶层字段固定），**待验证**（需当时的错误文本与 `core.log`）。
 
@@ -530,9 +530,11 @@ rules:
 | 节点消失防回退（REJECT） | 已实现 | 实测 + 集成测试覆盖 |
 | 节点恢复自动续绑 | 已实现 | 限 DeBrowser 触发的重下达时机（见 10.3） |
 | 节点状态胶囊（四态） | 已实现 | 三处 UI 共用组件 |
-| 代理设置弹窗 | 已实现 | 只读信息，无可调参数 |
+| 代理设置弹窗 | 已实现 | 固定事实只读 + 可编辑设置表单（测速地址/超时、更新间隔、DoH 上游、日志等级、实例端口起始值；存 `proxy_settings`，migration 0017） |
 | 每实例路由模式（rule/global/direct） | 已实现 | 绑定字段 route_mode（migration 0016）+ 实例表单三选一 + 代理页只读显示；真实核心集成测试覆盖三模式并行隔离与运行中切换 |
-| 共享规则集（14 个 rule-providers） | 已实现 | 核心下载/缓存/每日刷新；内容固定，不可编辑/启停；GeoIP 数据库由 DeBrowser 前置下载校验（见 10.3） |
+| 共享规则集（14 个 rule-providers） | 已实现 | 核心下载/缓存/按设置间隔刷新 + 页面「立即更新规则集」；清单与内容固定，**策略可编辑**（走实例节点/直连/拦截/停用，存 `proxy_rule_policies` 覆盖行）；GeoIP 数据库由 DeBrowser 前置下载校验（见 10.3） |
+| 自定义置顶规则 | 已实现 | DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR 三类，增删改/启停/排序（`proxy_custom_rules`）；生成时排在全部 RULE-SET 之前，真实核心集成测试覆盖运行中新增/停用/删除即时生效 |
+| 实时连接与日志查看 | 已实现 | 代理页内置页签：当前连接（后端封装 `GET /connections`，按连接的入站端口精确归属实例，可按实例筛选，含命中规则与出口链）与核心日志（后端转发 `GET /logs` 流入内存缓冲，前端按序号增量轮询；secret 不出后端） |
 | TUN / 系统代理 | **未实现** | 不在产品范围 |
 | 实际连接测试 | **未实现** | — |
 | 自动测速 | **未实现** | — |
@@ -557,7 +559,10 @@ rules:
 | `internal/service/instance_runtime.go` | 浏览器启动参数构建（`--proxy-server` 注入点） |
 | `internal/service/instance_service.go` | `ProxyPortFor` 注入字段定义 |
 | `main.go` | 服务组装与 `ProxyPortFor` 接线（第 196–198 行附近） |
-| `frontend/src/pages/ProxyConfigPage.tsx` | 代理配置页（核心控制、来源、节点、绑定总览、设置弹窗） |
+| `frontend/src/pages/ProxyConfigPage.tsx` | 代理配置页（核心控制、来源、节点、绑定总览、分流规则管理、可编辑设置弹窗、实时连接与日志） |
+| `internal/service/proxy_rules_service.go` | 可编辑规则与设置：策略/自定义规则/设置的校验、提议-重载-落库纪律（applyStateChange）、规则集手动刷新、设置存取 |
+| `internal/service/proxy_inspect.go` | 排障视图：连接快照（按入站端口归属实例）与核心日志流转发（内存缓冲 + 序号增量读取） |
+| `internal/store/proxy_rules.go` | migration 0017 三张表的仓储（策略覆盖、自定义规则、设置键值） |
 | `frontend/src/pages/InstancesPage.tsx` | 实例列表代理胶囊与表单节点选择 |
 | `frontend/src/components/NodeCapsule.tsx` | 节点状态胶囊共享组件 |
 | `internal/service/proxy_core_integration_test.go` | 真实核心集成测试（路由、防回退、健康状态、回滚、生命周期） |

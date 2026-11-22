@@ -272,6 +272,94 @@ type InstanceProxyBinding struct {
 	UpdatedAt  string `json:"updatedAt"`
 }
 
+// Rule policy values for ProxyRulePolicy.Policy and for the
+// effective per-ruleset policy the configuration generator
+// compiles: where traffic matching a built-in ruleset goes.
+const (
+	RulePolicyProxy    = "proxy"    // via the instance's bound node
+	RulePolicyDirect   = "direct"   // direct connection
+	RulePolicyReject   = "reject"   // rejected
+	RulePolicyDisabled = "disabled" // ruleset not generated at all
+)
+
+// ProxyRulePolicy is one stored OVERRIDE of a built-in ruleset's
+// policy (Stage 6C). Rulesets without a stored row keep the
+// default policy compiled into internal/mihomo; the store only
+// ever holds rows the user actually changed, and "restore
+// defaults" is deleting all rows.
+type ProxyRulePolicy struct {
+	ProviderName string `json:"providerName"`
+	Policy       string `json:"policy"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// Custom rule type values for ProxyCustomRule.RuleType — the
+// three Mihomo rule types the editor offers.
+const (
+	CustomRuleDomainSuffix  = "DOMAIN-SUFFIX"
+	CustomRuleDomainKeyword = "DOMAIN-KEYWORD"
+	CustomRuleIPCIDR        = "IP-CIDR"
+)
+
+// Custom rule policy values for ProxyCustomRule.Policy (a custom
+// rule cannot disable anything, so no 'disabled' here).
+const (
+	CustomRulePolicyProxy  = "proxy"
+	CustomRulePolicyDirect = "direct"
+	CustomRulePolicyReject = "reject"
+)
+
+// ProxyCustomRule is one user-defined top rule (Stage 6C):
+// evaluated, in SortOrder, ahead of every built-in RULE-SET line
+// in each rule-mode instance's sub-rules. Policy 'proxy' compiles
+// to that instance's own group, so one rule text serves every
+// instance with its own bound node.
+type ProxyCustomRule struct {
+	ID        string `json:"id"`
+	RuleType  string `json:"ruleType"`
+	Value     string `json:"value"`
+	Policy    string `json:"policy"`
+	Enabled   bool   `json:"enabled"`
+	SortOrder int    `json:"sortOrder"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// ProxySettings is the editable core settings set (Stage 6C).
+// Values persist as key/value rows; a zero ProxySettings is
+// never valid — always start from DefaultProxySettings.
+type ProxySettings struct {
+	// TestURL and TestTimeoutMs drive the per-source delay test.
+	TestURL       string `json:"testUrl"`
+	TestTimeoutMs int    `json:"testTimeoutMs"`
+	// ProviderIntervalSec is the update interval written into
+	// http proxy-providers and rule-providers.
+	ProviderIntervalSec int `json:"providerIntervalSec"`
+	// DoHServers are the DNS-over-HTTPS upstreams written to
+	// dns.nameserver and dns.proxy-server-nameserver.
+	DoHServers []string `json:"dohServers"`
+	// LogLevel is the core's log-level (warning | info | debug).
+	LogLevel string `json:"logLevel"`
+	// ListenerPortStart is the first port of the range instance
+	// listeners are allocated from (applies to NEW bindings;
+	// existing bindings keep their recorded ports).
+	ListenerPortStart int `json:"listenerPortStart"`
+}
+
+// DefaultProxySettings returns the built-in defaults, identical
+// to the values the generator used before the settings became
+// editable.
+func DefaultProxySettings() ProxySettings {
+	return ProxySettings{
+		TestURL:             "https://www.gstatic.com/generate_204",
+		TestTimeoutMs:       5000,
+		ProviderIntervalSec: 86400,
+		DoHServers:          []string{"https://223.5.5.5/dns-query", "https://223.6.6.6/dns-query"},
+		LogLevel:            "warning",
+		ListenerPortStart:   21001,
+	}
+}
+
 // Bookmark kind values for BookmarkNode.Kind.
 const (
 	BookmarkKindBookmark = "bookmark"
