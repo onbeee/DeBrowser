@@ -193,6 +193,28 @@ export function ProxyPortForInstance(instanceID: string): $CancellablePromise<nu
 }
 
 /**
+ * SetRouteMode changes one bound instance's routing mode
+ * (rule | global | direct). The mode is part of the binding
+ * ReassignInstancePort moves one instance's binding to a fresh
+ * free listener port — the one-click recovery when the recorded
+ * port is occupied by another program. The core never takes an
+ * occupied port over; the binding moves instead. The operation
+ * refuses while the instance's browser may be running: that
+ * process still points at the old --proxy-server port.
+ * 
+ * With the core stopped only the stored port changes. With the
+ * core running the change follows the proposed-config-first
+ * discipline: regenerate + hot reload + applySelections, then
+ * the NEW listener must answer a SOCKS5 greeting (proving the
+ * answerer is the core's listener, not a squatter) before the
+ * new port is persisted; any failure regenerates the previous
+ * state back and keeps the old port.
+ */
+export function ReassignInstancePort(operationID: string, instanceID: string): $CancellablePromise<$models.BindingView> {
+    return $Call.ByID(1843307995, operationID, instanceID);
+}
+
+/**
  * RefreshAfterInstanceDeleted is the deletion hook the instance
  * service calls after an instance record is gone (its binding row
  * went with it, via the schema cascade). A running core would
@@ -274,8 +296,6 @@ export function SetBinding(operationID: string, instanceID: string, sourceID: st
 }
 
 /**
- * SetRouteMode changes one bound instance's routing mode
- * (rule | global | direct). The mode is part of the binding
  * record; the generated configuration derives the instance's
  * sub-rules from it. Same consistency discipline as the other
  * binding mutations: the proposed configuration is applied

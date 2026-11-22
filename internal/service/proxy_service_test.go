@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -498,6 +499,54 @@ func TestSetRouteModeFlow(t *testing.T) {
 	}
 	if !strings.Contains(string(cfgBytes), "rule-providers:") {
 		t.Error("switching back to rule must regenerate the rule-providers")
+	}
+}
+
+// TestReassignInstancePortFlow covers the one-click port
+// reassignment with the core stopped: refusals (unbound,
+// instance running) change nothing, and a successful reassign
+// moves the stored binding to a different free port that the
+// next regeneration then carries into the config.
+func TestReassignInstancePortFlow(t *testing.T) {
+	f, b := gateHealFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.svc.ReassignInstancePort("op", "no-such-instance"); err == nil {
+		t.Fatal("reassign for an unbound instance must fail")
+	}
+
+	f.svc.InstanceMayBeRunning = func(string) bool { return true }
+	if _, err := f.svc.ReassignInstancePort("op", b.InstanceID); err == nil ||
+		!strings.Contains(err.Error(), "请先停止实例") {
+		t.Fatalf("reassign while running = %v, want the stop-first refusal", err)
+	}
+	if got, err := f.store.GetBinding(ctx, b.InstanceID); err != nil || got.Port != b.Port {
+		t.Fatalf("a refused reassign changed the port: %+v, %v", got, err)
+	}
+	f.svc.InstanceMayBeRunning = nil
+
+	view, err := f.svc.ReassignInstancePort("op", b.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Port == b.Port {
+		t.Fatalf("port unchanged after reassign: %d", view.Port)
+	}
+	got, err := f.store.GetBinding(ctx, b.InstanceID)
+	if err != nil || got.Port != view.Port {
+		t.Fatalf("stored port = %+v, %v; view port = %d", got, err, view.Port)
+	}
+	// The next regeneration (every core start performs one)
+	// carries the new port into the generated config.
+	if err := f.svc.regenerate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cfgBytes, err := os.ReadFile(f.svc.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfgBytes), fmt.Sprintf("port: %d", view.Port)) {
+		t.Errorf("regenerated config does not carry the reassigned port %d", view.Port)
 	}
 }
 

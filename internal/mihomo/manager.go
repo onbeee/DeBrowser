@@ -460,3 +460,28 @@ func ProbePort(port int) bool {
 	conn.Close()
 	return true
 }
+
+// ProbeListener reports whether a Mihomo mixed listener answers
+// on the port: it performs a SOCKS5 greeting and requires the
+// no-auth method-selection reply (0x05 0x00). Unlike ProbePort —
+// a bare TCP dial that ANY program holding the port satisfies —
+// this distinguishes the core's own listeners from an unrelated
+// program that happens to occupy the port (the port-conflict
+// case: the core is alive, its listener never came up, and the
+// foreign program would otherwise look like a healthy listener).
+func ProbeListener(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return false
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return false
+	}
+	return buf[0] == 0x05 && buf[1] == 0x00
+}

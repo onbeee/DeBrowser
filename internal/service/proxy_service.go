@@ -89,6 +89,13 @@ type ProxyService struct {
 	// deterministically.
 	geoipDownloadOverride func(ctx context.Context, dir string) error
 
+	// InstanceMayBeRunning, when wired by main, reports whether
+	// an instance's browser process may currently be running
+	// (running, or state unconfirmed). Port reassignment refuses
+	// then: the live browser still points at the old
+	// --proxy-server port. Nil (tests) means "not running".
+	InstanceMayBeRunning func(instanceID string) bool
+
 	// Core log stream state (see proxy_inspect.go): a lazily
 	// started forwarding goroutine appends the core's log lines
 	// into a bounded in-memory buffer the UI polls. Guarded by
@@ -240,6 +247,12 @@ type BindingView struct {
 	RouteMode     string `json:"routeMode"`     // "rule" | "global" | "direct"
 	NodeState     string `json:"nodeState"`     // "ok" | "down" | "missing" | "unknown"
 	ListenerState string `json:"listenerState"` // "ok" | "down" | "unknown"
+	// InstanceRunning reports whether the instance's browser may
+	// currently be running (running, or state unconfirmed) — the
+	// port-reassignment action is disabled then, because the
+	// browser process still points at the old --proxy-server
+	// port. Filled via the InstanceMayBeRunning hook when wired.
+	InstanceRunning bool `json:"instanceRunning"`
 }
 
 // NewProxyService builds the service. The vault carries the
@@ -1365,8 +1378,15 @@ func (s *ProxyService) bindingView(ctx context.Context, b model.InstanceProxyBin
 	if providerName != "" {
 		view.NodeState = s.nodeState(ctx, b, providerName)
 	}
+	if s.InstanceMayBeRunning != nil {
+		view.InstanceRunning = s.InstanceMayBeRunning(b.InstanceID)
+	}
 	if s.coreRunning(ctx) {
-		if mihomo.ProbePort(b.Port) {
+		// ProbeListener (a SOCKS5 greeting), not a bare TCP dial:
+		// when a foreign program occupies the port, the core's
+		// listener never came up but the port still "answers" —
+		// only the greeting distinguishes the two.
+		if mihomo.ProbeListener(b.Port) {
 			view.ListenerState = "ok"
 		} else {
 			view.ListenerState = "down"
@@ -1575,6 +1595,103 @@ func (s *ProxyService) ClearBinding(operationID string, instanceID string) error
 
 // SetRouteMode changes one bound instance's routing mode
 // (rule | global | direct). The mode is part of the binding
+// ReassignInstancePort moves one instance's binding to a fresh
+// free listener port — the one-click recovery when the recorded
+// port is occupied by another program. The core never takes an
+// occupied port over; the binding moves instead. The operation
+// refuses while the instance's browser may be running: that
+// process still points at the old --proxy-server port.
+//
+// With the core stopped only the stored port changes. With the
+// core running the change follows the proposed-config-first
+// discipline: regenerate + hot reload + applySelections, then
+// the NEW listener must answer a SOCKS5 greeting (proving the
+// answerer is the core's listener, not a squatter) before the
+// new port is persisted; any failure regenerates the previous
+// state back and keeps the old port.
+func (s *ProxyService) ReassignInstancePort(operationID string, instanceID string) (BindingView, error) {
+	op := beginOp(s.Auditor, operationID, "代理", "proxy.binding_reassign_port", "browser_instance", instanceID)
+	view, err := s.reassignInstancePort(instanceID)
+	finishOp(op, err)
+	return view, err
+}
+
+func (s *ProxyService) reassignInstancePort(instanceID string) (BindingView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if s.InstanceMayBeRunning != nil && s.InstanceMayBeRunning(instanceID) {
+		return BindingView{}, fmt.Errorf("实例正在运行，请先停止实例后再更换端口")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.store.GetBinding(ctx, instanceID)
+	if errors.Is(err, store.ErrNotFound) {
+		return BindingView{}, fmt.Errorf("该实例尚未绑定代理节点，无需更换端口")
+	}
+	if err != nil {
+		return BindingView{}, err
+	}
+	// allocatePort skips every recorded binding port (including
+	// this binding's current one) and every port that answers a
+	// TCP dial (including a squatter's), so the pick is free on
+	// both counts.
+	newPort, err := s.allocatePort(ctx)
+	if err != nil {
+		return BindingView{}, err
+	}
+
+	if !s.coreRunning(ctx) {
+		if err := s.store.UpdateBindingPort(ctx, instanceID, newPort); err != nil {
+			return BindingView{}, err
+		}
+		b.Port = newPort
+		return s.bindingView(ctx, b), nil
+	}
+
+	state, err := s.loadConfigState(ctx)
+	if err != nil {
+		return BindingView{}, err
+	}
+	previous := state
+	proposed := state
+	proposed.bindings = make([]model.InstanceProxyBinding, len(state.bindings))
+	copy(proposed.bindings, state.bindings)
+	for i := range proposed.bindings {
+		if proposed.bindings[i].InstanceID == instanceID {
+			proposed.bindings[i].Port = newPort
+		}
+	}
+	if err := s.regenerateState(ctx, proposed); err != nil {
+		return BindingView{}, fmt.Errorf("核心配置更新失败，端口未更换：%w", err)
+	}
+	if !probeListenerWait(newPort) {
+		_ = s.regenerateState(ctx, previous)
+		return BindingView{}, fmt.Errorf("新端口 %d 的监听未能就绪，已保留原端口 %d，请重试", newPort, b.Port)
+	}
+	if err := s.store.UpdateBindingPort(ctx, instanceID, newPort); err != nil {
+		if rbErr := s.regenerateState(ctx, previous); rbErr != nil {
+			return BindingView{}, fmt.Errorf("保存新端口失败且配置回滚失败：%v（保存错误：%w）", rbErr, err)
+		}
+		return BindingView{}, fmt.Errorf("保存新端口失败，端口未更换：%w", err)
+	}
+	b.Port = newPort
+	return s.bindingView(ctx, b), nil
+}
+
+// probeListenerWait polls the SOCKS5-greeting listener probe
+// for a few seconds: a listener created by a hot reload may
+// need a moment to come up.
+func probeListenerWait(port int) bool {
+	for i := 0; i < 12; i++ {
+		if mihomo.ProbeListener(port) {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
+
 // record; the generated configuration derives the instance's
 // sub-rules from it. Same consistency discipline as the other
 // binding mutations: the proposed configuration is applied
@@ -1654,8 +1771,8 @@ func (s *ProxyService) ProxyPortForInstance(instanceID string) (int, error) {
 	if err := s.healRejectedGroup(ctx, b); err != nil {
 		return 0, err
 	}
-	if !mihomo.ProbePort(b.Port) {
-		return 0, fmt.Errorf("该实例的代理监听端口 127.0.0.1:%d 无响应，实例未启动。请检查「代理配置」页面的核心状态后重试", b.Port)
+	if !mihomo.ProbeListener(b.Port) {
+		return 0, fmt.Errorf("该实例的代理监听端口 127.0.0.1:%d 无响应（可能被其他程序占用），实例未启动。可在「代理配置」页面为该实例重分配空闲端口后重试", b.Port)
 	}
 	return b.Port, nil
 }

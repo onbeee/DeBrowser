@@ -39,6 +39,15 @@ export interface BindingView {
      * "ok" | "down" | "unknown"
      */
     "listenerState": string;
+
+    /**
+     * InstanceRunning reports whether the instance's browser may
+     * currently be running (running, or state unconfirmed) — the
+     * port-reassignment action is disabled then, because the
+     * browser process still points at the old --proxy-server
+     * port. Filled via the InstanceMayBeRunning hook when wired.
+     */
+    "instanceRunning": boolean;
 }
 
 export interface BookmarkInstanceInfo {

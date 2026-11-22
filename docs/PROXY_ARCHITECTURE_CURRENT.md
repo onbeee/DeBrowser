@@ -267,7 +267,7 @@
 1. 查绑定：无绑定 → `(0, nil)`，不追加代理参数，与无代理时完全一致（直连）；
 2. 有绑定：`coreRunning` 为假 → 返回错误「已绑定代理但核心尚未开启」，**拒绝启动**，不自动开启核心；
 3. 核心在运行：读实例组当前选择（`GET /proxies/{组}` 的 `now`）。若为 REJECT（例如核心定时刷新 provider 后节点已回归但选择未恢复），门禁重新下发一次全部记录选择并复检：恢复为绑定节点则继续；仍为 REJECT（节点确实不在或选择无法应用）→ 返回错误并**拒绝启动**（提示确认节点状态或更换节点），不启动一个流量必然被拒绝的浏览器。选择读取失败本身不阻断（按原逻辑继续第 4 步）；
-4. `ProbePort(绑定端口)` 探测 Listener 是否应答，无应答 → 返回错误并拒绝启动（提示检查核心状态）；
+4. `ProbeListener(绑定端口)` 探测 Listener 是否应答：该探测执行一次 SOCKS5 握手，要求对方回无认证方式选择（`05 00`）——裸 TCP 拨号（`ProbePort`）会被占用端口的外部程序同样满足，从而把别人的程序误判为健康 Listener；无应答或不应答 SOCKS5 → 返回错误并拒绝启动（提示端口可能被占用，可在代理页重分配空闲端口）；
 5. 正常：返回端口，启动参数追加 `--proxy-server=http://127.0.0.1:{port}`，浏览器流量进入该实例的 Listener → 该实例 sub-rules（按路由模式决策）→ 命中代理目标时经实例组到绑定节点。
 
 ### 流程 4：实例更换节点
@@ -443,7 +443,7 @@ rules:
 
 ### 9.1 记录机制
 
-- 统一自动记录（`internal/logging`）：operation / error / runtime 三类 JSONL，位于 `data/logs/`；每个用户操作一个 operation_id 贯穿。代理模块经 `beginOp/finishOp`（`internal/service/audit.go`）记录以下操作的结果（成功/失败与错误文本）：`proxy.core_start`、`proxy.core_stop`、`proxy.source_add_url`、`proxy.source_add_file`、`proxy.source_refresh`、`proxy.source_reimport`、`proxy.source_delete`、`proxy.delay_test`、`proxy.binding_set`、`proxy.binding_clear`。实例启动被代理门禁拒绝时，错误进入该实例的启动操作记录。
+- 统一自动记录（`internal/logging`）：operation / error / runtime 三类 JSONL，位于 `data/logs/`；每个用户操作一个 operation_id 贯穿。代理模块经 `beginOp/finishOp`（`internal/service/audit.go`）记录以下操作的结果（成功/失败与错误文本）：`proxy.core_start`、`proxy.core_stop`、`proxy.source_add_url`、`proxy.source_add_file`、`proxy.source_refresh`、`proxy.source_reimport`、`proxy.source_delete`、`proxy.delay_test`、`proxy.binding_set`、`proxy.binding_clear`、`proxy.binding_reassign_port`。实例启动被代理门禁拒绝时，错误进入该实例的启动操作记录。
 - 核心自身日志：`data/mihomo/core.log`（核心 stdout/stderr，warning 级别）。这是核心内部事件（provider 加载细节、Listener 冲突、连接错误）的**唯一**出处，不进入 JSONL。
 - 脱敏：操作记录只带动作名与目标 ID；订阅 URL、控制器密钥从不进入任何记录（代码检索确认）；错误消息由服务层构造，不拼接 URL/凭据。数据管理页的日志导出只含三类 JSONL 并经敏感扫描与路径脱敏；`config.yaml`、Vault 内容、核心目录**不在任何导出范围内**。
 
@@ -475,7 +475,7 @@ rules:
 ### 10.2 实机已报告现象与代码层面的对应（根因均标注状态）
 
 1. **同一订阅在 Clash Verge 全部节点可用，DeBrowser 约 1/3 节点测速超时** — 根因**待验证**。代码可确认的我方参数：测速超时与测速 URL 为可编辑设置（默认 **5000 ms** 与 `https://www.gstatic.com/generate_204`，`proxy_settings`）；每来源一次 group delay 调用、组内节点由核心并发测试。已针对最可疑因素做收敛修复（待实机对照确认）：DNS 由 redir-host + 系统解析器改为 DoH 上游（系统解析器在 redir-host 下可阻塞首次查询，见 MetaCubeX/mihomo#1185），并开启 `tcp-concurrent` 与 `unified-delay`。修复是否消除超时率差异，以 Windows 11 实机同订阅对照测速为准。
-2. **曾出现 Listener 本地端口无响应** — 代码可确认的机制：核心在 Listener 端口冲突时**不退出**，只在 `core.log` 记录并丢弃该 Listener，进程存活与控制器应答都正常，因此「核心运行中」与「某 Listener 已死」可以并存。DeBrowser 的发现手段是探测：绑定列表的 Listener 状态、实例启动门禁都会 `ProbePort` 并在无响应时明确提示/拒绝。至于该次实机事件是否即此机制（或端口被其他程序占用、重载瞬间窗口），**待验证**（需当时的 `core.log`）。
+2. **曾出现 Listener 本地端口无响应** — 代码可确认的机制：核心在 Listener 端口冲突时**不退出**，只在 `core.log` 记录并丢弃该 Listener，进程存活与控制器应答都正常，因此「核心运行中」与「某 Listener 已死」可以并存。DeBrowser 的发现手段是探测：绑定列表的 Listener 状态、实例启动门禁都会以 SOCKS5 握手探测（`ProbeListener`，能区分核心 Listener 与占用端口的外部程序），并在无响应时明确提示/拒绝；绑定行与实例列表在 Listener 无响应时提供「重分配空闲端口」一键恢复——绑定换到空闲端口（核心运行中走提议配置→重载→新 Listener 握手确认→落库，失败回滚保留原端口），占用端口的外部程序不被接管或终止；实例运行中（含状态未确认）拒绝换端口，因为浏览器进程仍指向旧 `--proxy-server` 端口。至于该次实机事件是否即此机制（或端口被其他程序占用、重载瞬间窗口），**待验证**（需当时的 `core.log`）。
 3. **曾出现配置更新失败** — 代码路径明确：热重载被核心拒绝时 `regenerateState` 恢复旧文件并返回错误，操作不假报成功。何种配置内容会触发核心拒绝（生成配置为程序渲染，顶层字段固定），**待验证**（需当时的错误文本与 `core.log`）。
 
 ### 10.3 代码可确认的限制与缺陷
@@ -526,7 +526,8 @@ rules:
 | Provider 健康检查 | 已实现（核心内建） | lazy + 300 秒间隔配置 |
 | 实例绑定/换绑/解绑 | 已实现 | 先配置后落库的一致性顺序 |
 | 每实例独立 Listener 与组 | 已实现 | 21001–21999 自动分配 |
-| 浏览器启动代理门禁 | 已实现 | 核心未开/Listen 无响应均拒绝启动 |
+| 浏览器启动代理门禁 | 已实现 | 核心未开/Listener 无响应均拒绝启动；Listener 探测为 SOCKS5 握手（可区分外部程序占用） |
+| 端口占用一键换端口 | 已实现 | `ReassignInstancePort`：绑定总览与实例列表在 Listener 无响应时提供按钮；核心停机时只改记录、运行时走提议-重载-握手确认-落库（失败回滚）；实例运行中拒绝；真实核心集成测试覆盖外部占用→换端口恢复全流程 |
 | 节点消失防回退（REJECT） | 已实现 | 实测 + 集成测试覆盖 |
 | 节点恢复自动续绑 | 已实现 | 限 DeBrowser 触发的重下达时机（见 10.3） |
 | 节点状态胶囊（四态） | 已实现 | 三处 UI 共用组件 |

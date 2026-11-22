@@ -1215,3 +1215,108 @@ func TestProxyCoreRouteModes(t *testing.T) {
 	}
 	probeWantURL(t, b2.Port, targetURL, "VIA-B")
 }
+
+// TestProxyCoreReassignPort proves the one-click recovery from
+// an externally occupied listener port against the real core:
+// the foreign program keeps its port (never taken over), the
+// launch gate refuses while the recorded port is squatted, the
+// reassignment refuses while the instance may be running, and
+// a successful reassign moves the binding to a fresh port whose
+// listener answers and carries traffic — no core restart.
+func TestProxyCoreReassignPort(t *testing.T) {
+	f := testProxyFixture(t)
+	f.installCore(t)
+	seedRuleCaches(t, f.cfg.Layout.Mihomo, true) // lan set claims 127.0.0.0/8 -> DIRECT
+	seedGeoIP(t, f.cfg.Layout.Mihomo)
+
+	echoA := startEcho(t, "VIA-A")
+	targetPort := startEcho(t, "DIRECT-TARGET")
+	nodeA := startSocksNode(t, echoA)
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d/", targetPort)
+
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "nodes.yaml")
+	writeSourceYAML(t, srcFile, fmt.Sprintf("NodeA=%d", nodeA))
+	f.svc.SourceFilePicker = func() (string, error) { return srcFile, nil }
+	srcView, err := f.svc.AddFileSource("op", "换端口")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := f.makeInstance(t, "实例一").ID
+	b, err := f.svc.SetBinding("op", inst, srcView.ID, "NodeA")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An external program occupies the binding's port before the
+	// core starts: it accepts TCP connections but never speaks,
+	// like an unrelated local service.
+	squat, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", b.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer squat.Close()
+	go func() {
+		for {
+			c, err := squat.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				_, _ = io.Copy(io.Discard, c)
+				c.Close()
+			}(c)
+		}
+	}()
+
+	if err := f.svc.StartCore("op"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.svc.StopCore("op") }()
+
+	// The core is up but its listener on the recorded port never
+	// came up: the gate refuses the launch and the binding reads
+	// as listener-down (the squatter must not pass as healthy).
+	if port, err := f.svc.ProxyPortForInstance(inst); err == nil || port != 0 {
+		t.Fatalf("gate = %d, %v; want refusal while the port is squatted", port, err)
+	}
+	views, err := f.svc.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].ListenerState != "down" {
+		t.Fatalf("bindings = %+v; want the squatted binding listener-down", views)
+	}
+
+	// While the instance may be running the reassign is refused
+	// and nothing changes.
+	f.svc.InstanceMayBeRunning = func(string) bool { return true }
+	if _, err := f.svc.ReassignInstancePort("op", inst); err == nil ||
+		!strings.Contains(err.Error(), "请先停止实例") {
+		t.Fatalf("reassign while running = %v, want the stop-first refusal", err)
+	}
+	f.svc.InstanceMayBeRunning = nil
+
+	// One click: fresh port, listener up, traffic flows.
+	view, err := f.svc.ReassignInstancePort("op", inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Port == b.Port {
+		t.Fatalf("port did not change: still %d", view.Port)
+	}
+	if got, err := f.store.GetBinding(context.Background(), inst); err != nil || got.Port != view.Port {
+		t.Fatalf("stored binding = %+v, %v; want port %d", got, err, view.Port)
+	}
+	if port, err := f.svc.ProxyPortForInstance(inst); err != nil || port != view.Port {
+		t.Fatalf("gate after reassign = %d, %v; want %d, nil", port, err, view.Port)
+	}
+	probeWantURL(t, view.Port, targetURL, "DIRECT-TARGET")
+
+	// The squatter was never taken over: the old port is still
+	// occupied by the external program.
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", b.Port)); err == nil {
+		ln.Close()
+		t.Fatal("the old port must still belong to the external program")
+	}
+}

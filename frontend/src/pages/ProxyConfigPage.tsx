@@ -278,6 +278,16 @@ export default function ProxyConfigPage() {
       return "规则集已更新";
     });
 
+  // One-click recovery for an occupied listener port: the
+  // binding moves to a fresh free port (the core never takes
+  // the occupied port over). run() reloads afterwards, so the
+  // new port shows and the listener-down warning clears.
+  const reassignPort = (b: BindingView) =>
+    run(`reassign-${b.instanceId}`, "proxy.binding_reassign_port", async (opId) => {
+      const view = await ProxyService.ReassignInstancePort(opId, b.instanceId);
+      return `已为「${b.instanceName || b.instanceId}」重分配端口：${view.port}`;
+    });
+
   const addCustomRule = () =>
     run("custom-add", "proxy.custom_rule_add", async (opId) => {
       await ProxyService.AddCustomRule(opId, newRule.ruleType, newRule.value, newRule.policy);
@@ -587,7 +597,18 @@ export default function ProxyConfigPage() {
                               ? "该节点已从来源中消失。绑定保持不变，节点重新出现后将自动恢复使用。"
                               : ""}
                             {b.nodeState === "down" ? "该节点当前连接失败。绑定保持不变，不会改用其他节点。" : ""}
-                            {b.listenerState === "down" ? "该实例的本地监听端口当前无响应，实例暂时无法使用代理。" : ""}
+                            {b.listenerState === "down" ? "该实例的本地监听端口当前无响应（可能被其他程序占用），实例暂时无法使用代理。" : ""}
+                            {b.listenerState === "down" && (
+                              <button
+                                type="button"
+                                className="ml-2 rounded border border-(--border) bg-(--panel-bg) px-1.5 py-0.5 text-(--text) hover:bg-(--hover-bg) disabled:opacity-50"
+                                disabled={busy != null || b.instanceRunning}
+                                title={b.instanceRunning ? "实例运行中，请先停止实例后再更换端口" : "为该实例换一个空闲端口"}
+                                onClick={() => void reassignPort(b)}
+                              >
+                                重分配空闲端口
+                              </button>
+                            )}
                           </p>
                         )}
                       </li>

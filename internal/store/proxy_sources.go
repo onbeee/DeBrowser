@@ -138,6 +138,26 @@ func (s *Store) UpdateBindingRouteMode(ctx context.Context, instanceID, routeMod
 	return nil
 }
 
+// UpdateBindingPort changes only the listener port of one
+// instance's binding (ErrNotFound when the instance has none).
+func (s *Store) UpdateBindingPort(ctx context.Context, instanceID string, port int) error {
+	res, err := s.q.ExecContext(ctx,
+		`UPDATE instance_proxy_bindings
+		 SET port = ?, updated_at = datetime('now')
+		 WHERE instance_id = ?`, port, instanceID)
+	if err != nil {
+		return fmt.Errorf("store: update binding port: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: update binding port: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetBinding returns the binding of one instance (ErrNotFound when
 // the instance has no proxy binding).
 func (s *Store) GetBinding(ctx context.Context, instanceID string) (model.InstanceProxyBinding, error) {

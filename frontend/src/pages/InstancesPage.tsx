@@ -232,6 +232,22 @@ export default function InstancesPage() {
     }
   }, []);
 
+  // One-click recovery when an instance's proxy listener port
+  // is occupied by another program: the binding moves to a
+  // fresh free port (the core never takes the port over). The
+  // backend refuses while the instance is running; the button
+  // is disabled then as well.
+  const reassignPort = async (inst: Instance) => {
+    const opId = newOperationId();
+    try {
+      const view = await ProxyService.ReassignInstancePort(opId, inst.id);
+      notifySuccess(`已为「${inst.name}」重分配代理端口：${view.port}`, { operationId: opId, important: true });
+      await refreshProxyBindings();
+    } catch (e) {
+      notifyError(`重分配端口失败：${e instanceof Error ? e.message : String(e)}`, { operationId: opId, important: true });
+    }
+  };
+
   // Loads the proxy node options (and, when editing, the
   // instance's current binding) for the form. Failures leave the
   // form usable with no proxy options rather than blocking it.
@@ -881,10 +897,25 @@ export default function InstancesPage() {
                     <td className="px-4 py-2.5 font-medium">{inst.name}</td>
                     <td className="px-4 py-2.5 text-center text-(--text-dim)">
                       {proxyBindingByInstance.get(inst.id) ? (
-                        <NodeCapsule
-                          name={proxyBindingByInstance.get(inst.id)!.nodeName}
-                          state={asNodeState(proxyBindingByInstance.get(inst.id)!.nodeState)}
-                        />
+                        <>
+                          <NodeCapsule
+                            name={proxyBindingByInstance.get(inst.id)!.nodeName}
+                            state={asNodeState(proxyBindingByInstance.get(inst.id)!.nodeState)}
+                          />
+                          {proxyBindingByInstance.get(inst.id)!.listenerState === "down" && (
+                            <div className="mt-1">
+                              <button
+                                type="button"
+                                className="rounded-md border border-(--border) px-2 py-0.5 text-xs hover:bg-(--hover-bg) disabled:opacity-50"
+                                disabled={active || transitioning || batchBusy}
+                                title={active ? "实例运行中，请先停止实例后再更换端口" : "该端口无响应（可能被其他程序占用），为该实例换一个空闲端口"}
+                                onClick={() => void reassignPort(inst)}
+                              >
+                                重分配端口
+                              </button>
+                            </div>
+                          )}
+                        </>
                       ) : inst.proxyId ? (
                         "已设置（历史关联）"
                       ) : (
