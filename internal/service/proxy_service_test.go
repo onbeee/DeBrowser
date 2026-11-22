@@ -515,7 +515,7 @@ func TestReassignInstancePortFlow(t *testing.T) {
 		t.Fatal("reassign for an unbound instance must fail")
 	}
 
-	f.svc.InstanceMayBeRunning = func(string) bool { return true }
+	f.svc.InstanceStatus = func(string) (string, bool) { return "running", true }
 	if _, err := f.svc.ReassignInstancePort("op", b.InstanceID); err == nil ||
 		!strings.Contains(err.Error(), "请先停止实例") {
 		t.Fatalf("reassign while running = %v, want the stop-first refusal", err)
@@ -523,7 +523,7 @@ func TestReassignInstancePortFlow(t *testing.T) {
 	if got, err := f.store.GetBinding(ctx, b.InstanceID); err != nil || got.Port != b.Port {
 		t.Fatalf("a refused reassign changed the port: %+v, %v", got, err)
 	}
-	f.svc.InstanceMayBeRunning = nil
+	f.svc.InstanceStatus = nil
 
 	view, err := f.svc.ReassignInstancePort("op", b.InstanceID)
 	if err != nil {

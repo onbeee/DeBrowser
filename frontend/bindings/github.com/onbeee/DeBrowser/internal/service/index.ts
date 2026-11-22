@@ -27,8 +27,6 @@ export type {
     BrowserView,
     CategoryView,
     ClientEventInput,
-    ConnectionView,
-    CoreLogsView,
     CoreStatusView,
     CreateInstanceInput,
     CreateLibraryNodeInput,

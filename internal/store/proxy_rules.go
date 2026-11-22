@@ -165,13 +165,43 @@ func (s *Store) DeleteCustomRule(ctx context.Context, id string) error {
 	return nil
 }
 
-// SetCustomRuleOrder rewrites sort_order from the given ID
-// sequence (position = order). The caller validates that the
-// sequence covers exactly the stored rules; unknown IDs are
-// rejected here as well so a partial rewrite can never happen
-// silently.
+// SetCustomRuleOrder rewrites the sort order of ALL custom
+// rules. The id list must be exactly the current rule set —
+// same count, no duplicates, no unknown ids, none missing —
+// validated inside the same transaction as the updates, so a
+// rejected reorder writes nothing at all.
 func (s *Store) SetCustomRuleOrder(ctx context.Context, ids []string) error {
 	return s.WithTx(ctx, func(tx *Store) error {
+		rows, err := tx.q.QueryContext(ctx, `SELECT id FROM proxy_custom_rules`)
+		if err != nil {
+			return fmt.Errorf("store: reorder custom rules: %w", err)
+		}
+		current := map[string]bool{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return fmt.Errorf("store: reorder custom rules: %w", err)
+			}
+			current[id] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("store: reorder custom rules: %w", err)
+		}
+		if len(ids) != len(current) {
+			return fmt.Errorf("store: reorder custom rules: id list does not match the current rule set")
+		}
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if seen[id] {
+				return fmt.Errorf("store: reorder custom rules: duplicate id")
+			}
+			seen[id] = true
+			if !current[id] {
+				return ErrNotFound
+			}
+		}
 		for i, id := range ids {
 			res, err := tx.q.ExecContext(ctx,
 				`UPDATE proxy_custom_rules

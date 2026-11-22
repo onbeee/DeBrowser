@@ -15,8 +15,6 @@ import {
 import {
   ProxyService,
   type BindingView,
-  type ConnectionView,
-  type CoreLogsView,
   type CoreStatusView,
   type CustomRuleView,
   type NodeView,
@@ -66,24 +64,11 @@ const RULE_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "IP-CIDR", label: "IP 段" },
 ];
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function ruleLabel(c: ConnectionView): string {
-  if (c.rule === "RuleSet" && c.rulePayload) return `规则集「${c.rulePayload}」`;
-  if (c.rule === "Match") return "兜底（走实例节点）";
-  if (c.rule === "GeoIP") return `GeoIP ${c.rulePayload ?? ""}`.trim();
-  return c.rulePayload ? `${c.rule}（${c.rulePayload}）` : c.rule;
-}
-
 /**
  * 代理配置（Stage 6C）：Mihomo 核心为全部浏览器实例提供代理。
  * 本页面管理：节点来源（订阅 / 本地 YAML）、节点列表与测速、
  * 核心运行状态与实例绑定概览、可编辑的分流规则（内置规则集
- * 策略 + 自定义置顶规则）、核心设置，以及实时连接与日志查看。
+ * 策略 + 自定义置顶规则）、核心设置。
  * 节点解析、规则匹配与连接全部由 Mihomo 核心完成；实例具体
  * 使用哪个节点在「浏览器实例」的新建 / 编辑表单中选择。
  */
@@ -108,13 +93,6 @@ export default function ProxyConfigPage() {
   const [ruleDrafts, setRuleDrafts] = useState<Map<string, CustomRuleView>>(new Map());
   const [newRule, setNewRule] = useState({ ruleType: "DOMAIN-SUFFIX", value: "", policy: "proxy" });
   const [settingsForm, setSettingsForm] = useState<ProxySettingsView | null>(null);
-  // 实时连接与日志查看。
-  const [inspectTab, setInspectTab] = useState<"connections" | "logs">("connections");
-  const [connections, setConnections] = useState<ConnectionView[]>([]);
-  const [connInstance, setConnInstance] = useState("");
-  const [logLines, setLogLines] = useState<{ seq: number; level: string; text: string }[]>([]);
-  const logSeqRef = useRef(0);
-
   // 返回错误信息（成功返回 null）。失败保留已有数据。
   const reload = useCallback(async (): Promise<string | null> => {
     try {
@@ -352,50 +330,6 @@ export default function ProxyConfigPage() {
   };
 
   const coreRunning = core?.state === "running";
-
-  // 实时连接轮询（仅在查看连接且核心运行时）。
-  useEffect(() => {
-    if (inspectTab !== "connections" || !coreRunning) return;
-    let alive = true;
-    const fetchOnce = async () => {
-      try {
-        const list = await ProxyService.ListConnections(connInstance);
-        if (alive) setConnections(list ?? []);
-      } catch {
-        /* 轮询失败静默：下一次轮询会重试 */
-      }
-    };
-    void fetchOnce();
-    const timer = setInterval(() => void fetchOnce(), 2500);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [inspectTab, coreRunning, connInstance]);
-
-  // 核心日志轮询（仅在查看日志且核心运行时）：按序号增量拉取。
-  useEffect(() => {
-    if (inspectTab !== "logs" || !coreRunning) return;
-    let alive = true;
-    const fetchOnce = async () => {
-      try {
-        const view: CoreLogsView = await ProxyService.GetCoreLogs(logSeqRef.current);
-        if (!alive) return;
-        if (view.lines && view.lines.length > 0) {
-          logSeqRef.current = view.latestSeq;
-          setLogLines((prev) => [...prev, ...(view.lines ?? [])].slice(-500));
-        }
-      } catch {
-        /* 轮询失败静默 */
-      }
-    };
-    void fetchOnce();
-    const timer = setInterval(() => void fetchOnce(), 2000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [inspectTab, coreRunning]);
 
   return (
     <div className="mx-auto flex h-full max-w-5xl flex-col px-6 py-6">
@@ -779,123 +713,6 @@ export default function ProxyConfigPage() {
               </div>
             </section>
 
-            {/* 实时连接与日志 */}
-            <section>
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-sm font-semibold">实时连接与日志</h3>
-                <span className="ml-auto flex shrink-0 items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setInspectTab("connections")}
-                    className={`h-7 rounded-md px-2 text-xs ${
-                      inspectTab === "connections"
-                        ? "bg-(--accent) font-medium text-(--accent-contrast)"
-                        : "border border-(--border-strong) bg-(--input-bg) text-(--text-main) hover:bg-(--hover-bg)"
-                    }`}
-                  >
-                    当前连接
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setInspectTab("logs")}
-                    className={`h-7 rounded-md px-2 text-xs ${
-                      inspectTab === "logs"
-                        ? "bg-(--accent) font-medium text-(--accent-contrast)"
-                        : "border border-(--border-strong) bg-(--input-bg) text-(--text-main) hover:bg-(--hover-bg)"
-                    }`}
-                  >
-                    核心日志
-                  </button>
-                </span>
-              </div>
-              <div className="mt-2 overflow-hidden rounded-lg border border-(--border) bg-(--panel-bg)">
-                {!coreRunning ? (
-                  <p className="px-4 py-8 text-center text-sm text-(--text-faint)">核心未运行，暂无连接与日志。</p>
-                ) : inspectTab === "connections" ? (
-                  <div>
-                    <div className="flex items-center gap-2 border-b border-(--border) px-4 py-2">
-                      <span className="text-xs text-(--text-dim)">按实例筛选</span>
-                      <select
-                        className="h-8 rounded-md border border-(--border-strong) bg-(--input-bg) px-1.5 text-xs text-(--text-main)"
-                        value={connInstance}
-                        onChange={(e) => setConnInstance(e.target.value)}
-                      >
-                        <option value="">全部实例</option>
-                        {bindings.map((b) => (
-                          <option key={b.instanceId} value={b.instanceId}>
-                            {b.instanceName || b.instanceId}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="ml-auto text-xs text-(--text-faint)">每 2.5 秒自动刷新</span>
-                    </div>
-                    {connections.length === 0 ? (
-                      <p className="px-4 py-8 text-center text-sm text-(--text-faint)">暂无活跃连接。</p>
-                    ) : (
-                      <ul className="max-h-80 divide-y divide-(--border) overflow-y-auto">
-                        {connections.map((c) => (
-                          <li key={c.id} className="px-4 py-2 text-xs hover:bg-(--hover-bg)">
-                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                              <span className="min-w-0 flex-1 truncate font-medium text-(--text-main)" title={c.target}>
-                                {c.target}
-                              </span>
-                              <span className="shrink-0 text-(--text-dim)">{ruleLabel(c)}</span>
-                              <span className="shrink-0 text-(--text-dim)">出口：{(c.chains ?? []).join(" → ") || "—"}</span>
-                            </div>
-                            <div className="mt-0.5 flex flex-wrap gap-x-3 text-(--text-faint)">
-                              <span>
-                                实例：
-                                {bindings.find((b) => b.instanceId === c.instanceId)?.instanceName || c.instanceId || "未知"}
-                              </span>
-                              <span>上传 {formatBytes(c.upload)}</span>
-                              <span>下载 {formatBytes(c.download)}</span>
-                              <span>开始 {c.start ? c.start.slice(11, 19) : ""}</span>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center gap-2 border-b border-(--border) px-4 py-2">
-                      <span className="flex-1 text-xs text-(--text-dim)">
-                        日志内容取决于核心日志等级（在「设置」中调整）；连接级明细需要 info 或 debug 等级。
-                      </span>
-                      <button
-                        type="button"
-                        className={btnSmall}
-                        onClick={() => {
-                          setLogLines([]);
-                        }}
-                      >
-                        清空显示
-                      </button>
-                    </div>
-                    {logLines.length === 0 ? (
-                      <p className="px-4 py-8 text-center text-sm text-(--text-faint)">暂无日志。</p>
-                    ) : (
-                      <div className="max-h-80 overflow-y-auto px-4 py-2 font-mono text-xs leading-5">
-                        {logLines.map((l) => (
-                          <p
-                            key={l.seq}
-                            className={
-                              l.level === "error"
-                                ? "text-(--danger)"
-                                : l.level === "warning"
-                                  ? "text-(--text-main)"
-                                  : "text-(--text-dim)"
-                            }
-                          >
-                            <span className="text-(--text-faint)">[{l.level}]</span> {l.text}
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </section>
           </div>
         )}
       </div>

@@ -201,11 +201,6 @@ func (s *ProxyService) UpdateProxySettings(operationID string, v ProxySettingsVi
 		}); err != nil {
 			return fmt.Errorf("核心设置保存失败：%w", err)
 		}
-		// A log-level change restarts the log stream lazily with
-		// the new level on the next read.
-		if previous.settings.LogLevel != next.LogLevel {
-			s.stopLogStream()
-		}
 		return nil
 	}()
 	finishOp(op, err)
@@ -587,7 +582,12 @@ func (s *ProxyService) ReorderCustomRules(operationID string, ids []string) erro
 		previous := state
 		proposed := state
 		proposed.customRules = nil
+		seen := map[string]bool{}
 		for i, id := range ids {
+			if seen[id] {
+				return fmt.Errorf("排序列表包含重复规则，请刷新后重试")
+			}
+			seen[id] = true
 			r, ok := byID[id]
 			if !ok {
 				return fmt.Errorf("排序列表包含不存在的规则，请刷新后重试")

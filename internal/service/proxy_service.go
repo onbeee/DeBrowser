@@ -34,10 +34,17 @@ import (
 //     connections, DNS, delay tests).
 //
 // One core serves every browser instance. Each bound instance
-// gets its own loopback listener that hands its traffic straight
-// to its own select group (fed by its bound source's provider
-// only), so instances choose nodes independently and never
-// interfere. DeBrowser keeps no rule set of its own.
+// gets its own loopback listener whose traffic enters the
+// instance's own sub-rules: the sub-rules end at the instance's
+// select group (fed by its bound source's provider only) in
+// rule and global mode, or at DIRECT in direct mode, so
+// instances choose nodes independently and never interfere.
+// The generated configuration also carries DeBrowser's routing
+// layer: 14 built-in rule-providers with per-set policies plus
+// the user's custom top rules, compiled into each rule-mode
+// instance's sub-rules (see mihomo.Generate). Subscription
+// files' own rules and groups are never imported — a source
+// contributes nodes only.
 //
 // Lifecycle: the core is started ONLY by the user's explicit
 // action on the proxy page — never automatically at application
@@ -82,6 +89,13 @@ type ProxyService struct {
 	// a group parked on REJECT by core-side drift cannot be
 	// provoked deterministically from outside the core.
 	groupNowOverride func(ctx context.Context, group string) (string, error)
+	// coreRunningOverride and reloadOverride, when set, replace
+	// the running-core check and the config reload. Test seams
+	// only (nil in production), same rationale: regenerateState's
+	// hot-reload rollback paths need a "running core" whose
+	// reload and selection outcomes are scriptable.
+	coreRunningOverride func() bool
+	reloadOverride      func(ctx context.Context) error
 	// geoipDownloadOverride, when set, replaces the GeoIP
 	// database download. Test seam only (nil in production):
 	// the real download depends on the network, and the
@@ -89,22 +103,23 @@ type ProxyService struct {
 	// deterministically.
 	geoipDownloadOverride func(ctx context.Context, dir string) error
 
-	// InstanceMayBeRunning, when wired by main, reports whether
-	// an instance's browser process may currently be running
-	// (running, or state unconfirmed). Port reassignment refuses
-	// then: the live browser still points at the old
-	// --proxy-server port. Nil (tests) means "not running".
-	InstanceMayBeRunning func(instanceID string) bool
-
-	// Core log stream state (see proxy_inspect.go): a lazily
-	// started forwarding goroutine appends the core's log lines
-	// into a bounded in-memory buffer the UI polls. Guarded by
-	// logMu, never by s.mu (the stream must not block mutations).
-	logMu        sync.Mutex
-	logLines     []coreLogLine
-	logSeq       int
-	logStreaming bool
-	logCancel    context.CancelFunc
+	// InstanceStatus, when wired by main, returns an instance's
+	// effective lifecycle status ("stopped", "starting",
+	// "running", "stopping", "unknown", ...). Port reassignment
+	// is allowed only from a confirmed "stopped"; the bindings
+	// view also uses it to disable the action while an instance
+	// runs. Nil (tests) means "no information" — views then
+	// report not-running and reassignment skips the check only
+	// when the lifecycle lock hook is also unwired.
+	InstanceStatus func(instanceID string) (string, bool)
+	// Lifecycle, when wired by main, is the SAME per-instance
+	// lifecycle lock registry the instance service holds across
+	// start, stop and deletion (see instance_lifecycle.go).
+	// Port reassignment holds it for its whole check-and-update,
+	// so the status it checks cannot change underneath it and
+	// no start can read a half-updated port. Nil (tests) means
+	// no locking.
+	Lifecycle *InstanceLifecycle
 }
 
 // configNeedsGeoIP reports whether the given bindings make the
@@ -251,7 +266,7 @@ type BindingView struct {
 	// currently be running (running, or state unconfirmed) — the
 	// port-reassignment action is disabled then, because the
 	// browser process still points at the old --proxy-server
-	// port. Filled via the InstanceMayBeRunning hook when wired.
+	// port. Filled via the InstanceStatus hook when wired.
 	InstanceRunning bool `json:"instanceRunning"`
 }
 
@@ -334,6 +349,9 @@ func (s *ProxyService) ServiceShutdown() error {
 // coreRunning reports whether the core DeBrowser started answers
 // its controller with our credentials right now.
 func (s *ProxyService) coreRunning(ctx context.Context) bool {
+	if s.coreRunningOverride != nil {
+		return s.coreRunningOverride()
+	}
 	if s.initCore() != nil {
 		return false
 	}
@@ -434,8 +452,13 @@ func (s *ProxyService) StartCore(operationID string) error {
 			// could not be applied: stop the core again, so a
 			// start that reports failure never leaves a core
 			// running (and no instance can end up on a node
-			// other than its recorded one).
-			_ = s.manager.Stop()
+			// other than its recorded one). A failed stop is
+			// reported too — claiming the core was stopped when
+			// it was not would hide exactly the inconsistency
+			// this path exists to prevent.
+			if stopErr := s.manager.Stop(); stopErr != nil {
+				return fmt.Errorf("核心已启动但实例节点选择应用失败，且停止核心失败（%v），核心可能仍在运行，请在代理页手动关闭核心（选择错误：%w）", stopErr, err)
+			}
 			return fmt.Errorf("核心已启动但实例节点选择应用失败，已停止核心：%w", err)
 		}
 		return nil
@@ -455,7 +478,6 @@ func (s *ProxyService) StopCore(operationID string) error {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.stopLogStream()
 		return s.manager.Stop()
 	}()
 	finishOp(op, err)
@@ -524,11 +546,30 @@ func (s *ProxyService) regenerate(ctx context.Context) error {
 	return s.regenerateState(ctx, state)
 }
 
+// reloadConfig asks the running core to load the configuration
+// file at its canonical path.
+func (s *ProxyService) reloadConfig(ctx context.Context) error {
+	if s.reloadOverride != nil {
+		return s.reloadOverride(ctx)
+	}
+	return s.client.ReloadConfig(ctx, s.configPath())
+}
+
 // regenerateState renders the configuration for the given state
 // and writes it atomically. When the core is running it
 // hot-reloads; a rejected reload restores the previous file and
-// leaves the running configuration untouched. Callers hold s.mu.
+// leaves the running configuration untouched. If the reload
+// succeeds but applying the recorded selections fails, the
+// recorded (database) state is regenerated back — file, running
+// configuration and selections — so the core never keeps
+// serving a configuration the records do not describe; a failed
+// rollback is reported as such, with the original failure kept.
+// Callers hold s.mu.
 func (s *ProxyService) regenerateState(ctx context.Context, state proxyConfigState) error {
+	return s.regenerateStateGuarded(ctx, state, false)
+}
+
+func (s *ProxyService) regenerateStateGuarded(ctx context.Context, state proxyConfigState, rollingBack bool) error {
 	if err := s.initCore(); err != nil {
 		return err
 	}
@@ -566,7 +607,7 @@ func (s *ProxyService) regenerateState(ctx context.Context, state proxyConfigSta
 			}
 			return err
 		}
-		if err := s.client.ReloadConfig(ctx, cfgPath); err != nil {
+		if err := s.reloadConfig(ctx); err != nil {
 			// Roll the file back so the next start loads the same
 			// configuration the core is still running.
 			if prev != nil {
@@ -574,7 +615,27 @@ func (s *ProxyService) regenerateState(ctx context.Context, state proxyConfigSta
 			}
 			return fmt.Errorf("核心拒绝了新配置，已保留原有配置：%w", err)
 		}
-		return s.applySelections(ctx)
+		if err := s.applySelections(ctx); err != nil {
+			if rollingBack {
+				return err
+			}
+			// The core now runs the NEW configuration while the
+			// records still describe the previous state. Restore
+			// consistency by regenerating the recorded state:
+			// file, running configuration and selections all go
+			// back. (For proposed-state flows the records ARE the
+			// previous state; for database-truth flows this is a
+			// consistency-restoring retry of the same state.)
+			prevState, lerr := s.loadConfigState(ctx)
+			if lerr != nil {
+				return fmt.Errorf("应用节点选择失败：%w；且读取原状态失败（%v），核心配置可能与记录不一致，请重启代理核心恢复一致性", err, lerr)
+			}
+			if rbErr := s.regenerateStateGuarded(ctx, prevState, true); rbErr != nil {
+				return fmt.Errorf("应用节点选择失败：%w；回滚原配置失败（%v），核心配置可能与记录不一致，请重启代理核心恢复一致性", err, rbErr)
+			}
+			return fmt.Errorf("应用节点选择失败，已回滚到原配置：%w", err)
+		}
+		return nil
 	}
 	return nil
 }
@@ -821,7 +882,10 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 		if err := s.refreshProvider(ctx, src.ProviderName); err != nil {
 			_ = s.store.DeleteProxySource(ctx, id)
 			_, _ = s.vault.DeleteCompensating(ref)
-			_ = s.regenerate(ctx)
+			if rbErr := s.regenerate(ctx); rbErr != nil {
+				s.mu.Unlock()
+				return SourceView{}, fmt.Errorf("添加订阅失败，核心未能加载该订阅，且运行配置恢复失败（加载错误：%v；恢复错误：%v），请重启核心以恢复一致", err, rbErr)
+			}
 			s.mu.Unlock()
 			return SourceView{}, fmt.Errorf("添加订阅失败，核心未能加载该订阅，已回滚：%w", err)
 		}
@@ -1151,7 +1215,9 @@ func (s *ProxyService) reimportFileSource(id string) (SourceView, error) {
 			if rollbackErr != nil {
 				return SourceView{}, fmt.Errorf("新文件刷新失败，且原文件恢复失败（刷新错误：%v；恢复错误：%v），请重新导入原文件", err, rollbackErr)
 			}
-			_ = s.applySelections(ctx)
+			if selErr := s.applySelections(ctx); selErr != nil {
+				return SourceView{}, fmt.Errorf("新文件刷新失败，已恢复原文件，但节点选择恢复失败（%v），请重启核心以恢复一致（刷新错误：%w）", selErr, err)
+			}
 			return SourceView{}, fmt.Errorf("新文件刷新失败，已恢复原文件和原有节点：%w", err)
 		}
 		if err := s.applySelections(ctx); err != nil {
@@ -1378,14 +1444,18 @@ func (s *ProxyService) bindingView(ctx context.Context, b model.InstanceProxyBin
 	if providerName != "" {
 		view.NodeState = s.nodeState(ctx, b, providerName)
 	}
-	if s.InstanceMayBeRunning != nil {
-		view.InstanceRunning = s.InstanceMayBeRunning(b.InstanceID)
+	if s.InstanceStatus != nil {
+		if st, known := s.InstanceStatus(b.InstanceID); known {
+			view.InstanceRunning = st == string(model.StatusRunning) || st == string(model.StatusUnknown)
+		}
 	}
 	if s.coreRunning(ctx) {
 		// ProbeListener (a SOCKS5 greeting), not a bare TCP dial:
-		// when a foreign program occupies the port, the core's
+		// when a non-proxy program occupies the port, the core's
 		// listener never came up but the port still "answers" —
-		// only the greeting distinguishes the two.
+		// the greeting separates a live proxy listener from a
+		// mere occupant (a protocol probe; see ProbeListener for
+		// the ownership boundary).
 		if mihomo.ProbeListener(b.Port) {
 			view.ListenerState = "ok"
 		} else {
@@ -1605,8 +1675,9 @@ func (s *ProxyService) ClearBinding(operationID string, instanceID string) error
 // With the core stopped only the stored port changes. With the
 // core running the change follows the proposed-config-first
 // discipline: regenerate + hot reload + applySelections, then
-// the NEW listener must answer a SOCKS5 greeting (proving the
-// answerer is the core's listener, not a squatter) before the
+// the NEW listener must answer a SOCKS5 greeting (proving a
+// proxy listener came up on the fresh port, which was verified
+// free immediately before the reload) before the
 // new port is persisted; any failure regenerates the previous
 // state back and keeps the old port.
 func (s *ProxyService) ReassignInstancePort(operationID string, instanceID string) (BindingView, error) {
@@ -1619,8 +1690,27 @@ func (s *ProxyService) ReassignInstancePort(operationID string, instanceID strin
 func (s *ProxyService) reassignInstancePort(instanceID string) (BindingView, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if s.InstanceMayBeRunning != nil && s.InstanceMayBeRunning(instanceID) {
-		return BindingView{}, fmt.Errorf("实例正在运行，请先停止实例后再更换端口")
+	// The instance lifecycle lock comes FIRST and is held for
+	// the whole operation: the status check below and every
+	// state change after it are atomic against instance start,
+	// stop and deletion, which hold the same lock (see
+	// instance_lifecycle.go). Lock order note: this lock is
+	// always taken before s.mu — the launch gate inside a start
+	// takes s.mu (selection heal) while holding it, never the
+	// other way around.
+	if s.Lifecycle != nil {
+		unlock := s.Lifecycle.Lock(instanceID)
+		defer unlock()
+	}
+	// Only a confirmed stopped instance may change ports: a
+	// starting/running/stopping browser still points (or is
+	// about to point) at the old --proxy-server port, and an
+	// unconfirmed state cannot prove otherwise.
+	if s.InstanceStatus != nil {
+		st, known := s.InstanceStatus(instanceID)
+		if !known || st != string(model.StatusStopped) {
+			return BindingView{}, fmt.Errorf("实例尚未停止，请先停止实例后再更换端口")
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1666,8 +1756,10 @@ func (s *ProxyService) reassignInstancePort(instanceID string) (BindingView, err
 		return BindingView{}, fmt.Errorf("核心配置更新失败，端口未更换：%w", err)
 	}
 	if !probeListenerWait(newPort) {
-		_ = s.regenerateState(ctx, previous)
-		return BindingView{}, fmt.Errorf("新端口 %d 的监听未能就绪，已保留原端口 %d，请重试", newPort, b.Port)
+		if rbErr := s.regenerateState(ctx, previous); rbErr != nil {
+			return BindingView{}, fmt.Errorf("新端口 %d 的监听未能就绪，且原配置恢复失败（%v），核心配置可能与记录不一致，请重启代理核心恢复一致性", newPort, rbErr)
+		}
+		return BindingView{}, fmt.Errorf("新端口 %d 的监听未能就绪，已恢复原端口 %d，请重试", newPort, b.Port)
 	}
 	if err := s.store.UpdateBindingPort(ctx, instanceID, newPort); err != nil {
 		if rbErr := s.regenerateState(ctx, previous); rbErr != nil {

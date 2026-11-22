@@ -58,6 +58,12 @@ type InstanceService struct {
 	// contract — the deletion has already committed when this
 	// runs, so the hook takes the ID and reports nothing back.
 	ProxyInstanceDeleted func(instanceID string)
+	// Lifecycle is the per-instance lifecycle mutex registry
+	// (see instance_lifecycle.go): start, stop and deletion
+	// serialize on it. main replaces this service's registry
+	// with the SAME object the proxy service uses, so port
+	// reassignment joins the same lock.
+	Lifecycle *InstanceLifecycle
 	// Runtime tracking (Stage 9B), guarded by rtMu: procs holds
 	// the verified live process of each running instance;
 	// transient holds the in-flight starting/stopping state of an
@@ -111,6 +117,7 @@ func newInstanceService(db *database.DB, layout paths.Layout, log *slog.Logger, 
 		procs:      map[string]*procWatch{},
 		transient:  map[string]model.InstanceStatus{},
 		unverified: map[string]bool{},
+		Lifecycle:  &InstanceLifecycle{},
 	}
 	s.deleteRecord = s.store.DeleteInstance
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -219,6 +226,15 @@ func (s *InstanceService) ListInstances() ([]model.Instance, error) {
 	s.resolveKernelPaths(c, list)
 	s.applyEffectiveStatuses(list)
 	return list, nil
+}
+
+// lockLifecycle acquires this instance's lifecycle lock,
+// tolerating a service whose registry was never initialized.
+func (s *InstanceService) lockLifecycle(id string) func() {
+	if s.Lifecycle == nil {
+		s.Lifecycle = &InstanceLifecycle{}
+	}
+	return s.Lifecycle.Lock(id)
 }
 
 // GetInstance returns one instance.
@@ -605,6 +621,8 @@ func (s *InstanceService) DeleteInstance(operationID string, id string) error {
 }
 
 func (s *InstanceService) deleteInstance(id string) error {
+	unlock := s.lockLifecycle(id)
+	defer unlock()
 	c, cancel := ctx()
 	defer cancel()
 	inst, err := s.store.GetInstance(c, id)
@@ -672,6 +690,8 @@ func (s *InstanceService) DeleteInstanceAndProfile(operationID string, id string
 }
 
 func (s *InstanceService) deleteInstanceAndProfile(id string, op *logging.Operation) error {
+	unlock := s.lockLifecycle(id)
+	defer unlock()
 	c, cancel := ctx()
 	defer cancel()
 	in, err := s.store.GetInstance(c, id)

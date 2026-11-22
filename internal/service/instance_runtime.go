@@ -525,6 +525,14 @@ func (s *InstanceService) StartInstance(operationID string, id string) error {
 }
 
 func (s *InstanceService) startInstance(id string, op *logging.Operation) error {
+	// The lifecycle lock is held for the WHOLE start: from the
+	// state checks, through the proxy gate's port read, to the
+	// launch and the running-state registration — a port
+	// reassignment can never slip in between and leave this
+	// browser launching against a port that is no longer its
+	// recorded one (see instance_lifecycle.go).
+	unlock := s.lockLifecycle(id)
+	defer unlock()
 	c, cancel := ctx()
 	defer cancel()
 	inst, err := s.store.GetInstance(c, id)
@@ -809,6 +817,11 @@ func (s *InstanceService) StopInstance(operationID string, id string) error {
 }
 
 func (s *InstanceService) stopInstance(id string, op *logging.Operation) error {
+	// Same lifecycle lock as start and port reassignment. The
+	// process watcher never takes it, so waiting for the exit
+	// here cannot deadlock against the watcher's cleanup.
+	unlock := s.lockLifecycle(id)
+	defer unlock()
 	c, cancel := ctx()
 	defer cancel()
 	inst, err := s.store.GetInstance(c, id)

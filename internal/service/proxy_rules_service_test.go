@@ -219,3 +219,55 @@ func TestProxySettingsFlow(t *testing.T) {
 	}
 	_ = model.DefaultProxySettings
 }
+
+// TestReorderCustomRulesRejectsBadSets covers the service-side
+// set validation: duplicate, missing and unknown ids are all
+// refused and the stored order survives every refusal.
+func TestReorderCustomRulesRejectsBadSets(t *testing.T) {
+	f := testProxyFixture(t)
+	ctx := context.Background()
+	r1, err := f.svc.AddCustomRule("op", "DOMAIN-SUFFIX", "a.com", "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := f.svc.AddCustomRule("op", "DOMAIN-SUFFIX", "b.com", "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r3, err := f.svc.AddCustomRule("op", "DOMAIN-SUFFIX", "c.com", "reject")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ctx
+
+	bad := map[string][]string{
+		"duplicate": {r1.ID, r1.ID, r2.ID},
+		"missing":   {r1.ID, r2.ID},
+		"unknown":   {r1.ID, r2.ID, "no-such-rule"},
+		"extra":     {r1.ID, r2.ID, r3.ID, "no-such-rule"},
+	}
+	for name, ids := range bad {
+		if err := f.svc.ReorderCustomRules("op", ids); err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
+		rules, err := f.svc.ListCustomRules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rules) != 3 || rules[0].ID != r1.ID || rules[1].ID != r2.ID || rules[2].ID != r3.ID {
+			t.Fatalf("%s: order changed after a rejected reorder: %+v", name, rules)
+		}
+	}
+
+	// A valid full reorder applies.
+	if err := f.svc.ReorderCustomRules("op", []string{r3.ID, r1.ID, r2.ID}); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := f.svc.ListCustomRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules[0].ID != r3.ID || rules[1].ID != r1.ID || rules[2].ID != r2.ID {
+		t.Fatalf("order after valid reorder = %+v", rules)
+	}
+}

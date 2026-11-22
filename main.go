@@ -33,7 +33,6 @@ import (
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
 	"github.com/onbeee/DeBrowser/internal/logging"
-	"github.com/onbeee/DeBrowser/internal/model"
 	"github.com/onbeee/DeBrowser/internal/secrets"
 	"github.com/onbeee/DeBrowser/internal/service"
 	"github.com/onbeee/DeBrowser/internal/singleinstance"
@@ -198,10 +197,17 @@ func run() error {
 	proxyService.Auditor = logSystem
 	instanceService.ProxyPortFor = proxyService.ProxyPortForInstance
 	instanceService.ProxyInstanceDeleted = proxyService.RefreshAfterInstanceDeleted
-	proxyService.InstanceMayBeRunning = func(instanceID string) bool {
+	proxyService.InstanceStatus = func(instanceID string) (string, bool) {
 		inst, err := instanceService.GetInstance(instanceID)
-		return err == nil && (inst.Status == model.StatusRunning || inst.Status == model.StatusUnknown)
+		if err != nil {
+			return "", false
+		}
+		return string(inst.Status), true
 	}
+	// Both services serialize instance lifecycle operations on
+	// the SAME registry object: starts, stops and deletions on
+	// one side, listener-port reassignment on the other.
+	proxyService.Lifecycle = instanceService.Lifecycle
 
 	wailsApp := app.New(cfg, appService, instanceService, diagnosticsService, browserService, bookmarkService, syncService, proxyService, logger, assets)
 	logSystem.RecordLifecycle("应用初始化完成", logging.StatusSuccess, nil)

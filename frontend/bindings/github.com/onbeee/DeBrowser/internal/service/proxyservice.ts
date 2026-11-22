@@ -13,10 +13,17 @@
  *     connections, DNS, delay tests).
  * 
  * One core serves every browser instance. Each bound instance
- * gets its own loopback listener that hands its traffic straight
- * to its own select group (fed by its bound source's provider
- * only), so instances choose nodes independently and never
- * interfere. DeBrowser keeps no rule set of its own.
+ * gets its own loopback listener whose traffic enters the
+ * instance's own sub-rules: the sub-rules end at the instance's
+ * select group (fed by its bound source's provider only) in
+ * rule and global mode, or at DIRECT in direct mode, so
+ * instances choose nodes independently and never interfere.
+ * The generated configuration also carries DeBrowser's routing
+ * layer: 14 built-in rule-providers with per-set policies plus
+ * the user's custom top rules, compiled into each rule-mode
+ * instance's sub-rules (see mihomo.Generate). Subscription
+ * files' own rules and groups are never imported — a source
+ * contributes nodes only.
  * 
  * Lifecycle: the core is started ONLY by the user's explicit
  * action on the proxy page — never automatically at application
@@ -101,19 +108,6 @@ export function GetBinding(instanceID: string): $CancellablePromise<[$models.Bin
 }
 
 /**
- * GetCoreLogs returns the core log lines buffered since afterSeq
- * (0 = everything buffered). The first call while the core runs
- * starts the forwarding stream; lines are only produced at the
- * core's configured log level — at the default warning level the
- * stream carries warnings and errors, and raising the level in
- * the core settings (followed by the automatic reload) is what
- * makes connection-level info lines appear.
- */
-export function GetCoreLogs(afterSeq: number): $CancellablePromise<$models.CoreLogsView> {
-    return $Call.ByID(3373393221, afterSeq);
-}
-
-/**
  * GetCoreStatus returns the core's status for the proxy page.
  */
 export function GetCoreStatus(): $CancellablePromise<$models.CoreStatusView> {
@@ -141,18 +135,6 @@ export function GetRulePolicies(): $CancellablePromise<$models.RulePolicyView[] 
  */
 export function ListBindings(): $CancellablePromise<$models.BindingView[] | null> {
     return $Call.ByID(1519141597);
-}
-
-/**
- * ListConnections returns the core's active connections. With an
- * instanceID it returns only the connections that entered
- * through that instance's listener (the core reports the inbound
- * port per connection, and the port identifies the binding
- * exactly). A stopped core yields an empty list, not an error —
- * the view simply has nothing to show.
- */
-export function ListConnections(instanceID: string): $CancellablePromise<$models.ConnectionView[] | null> {
-    return $Call.ByID(3412261968, instanceID);
 }
 
 /**
@@ -205,8 +187,9 @@ export function ProxyPortForInstance(instanceID: string): $CancellablePromise<nu
  * With the core stopped only the stored port changes. With the
  * core running the change follows the proposed-config-first
  * discipline: regenerate + hot reload + applySelections, then
- * the NEW listener must answer a SOCKS5 greeting (proving the
- * answerer is the core's listener, not a squatter) before the
+ * the NEW listener must answer a SOCKS5 greeting (proving a
+ * proxy listener came up on the fresh port, which was verified
+ * free immediately before the reload) before the
  * new port is persisted; any failure regenerates the previous
  * state back and keeps the old port.
  */

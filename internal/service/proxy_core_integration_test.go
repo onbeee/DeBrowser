@@ -411,9 +411,7 @@ func TestProxyCoreEndToEnd(t *testing.T) {
 // against the real core: with the core RUNNING and the instance
 // untouched, adding a custom top rule, disabling it, and
 // disabling a built-in ruleset each take effect on the very next
-// request through the standard reload flow. It also checks the
-// log stream picks up the core's connection lines once the log
-// level is raised to info.
+// request through the standard reload flow.
 func TestProxyCoreEditableRulesLive(t *testing.T) {
 	f := testProxyFixture(t)
 	f.installCore(t)
@@ -438,26 +436,10 @@ func TestProxyCoreEditableRulesLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Raise the log level BEFORE the start so the log stream has
-	// connection lines to pick up.
-	settings, err := f.svc.GetProxySettings()
-	if err != nil {
-		t.Fatal(err)
-	}
-	settings.LogLevel = "info"
-	if err := f.svc.UpdateProxySettings("op", settings); err != nil {
-		t.Fatal(err)
-	}
 	if err := f.svc.StartCore("op"); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.svc.StopCore("op") }()
-	// Attach the log stream now: /logs only forwards lines
-	// emitted after the subscription, so the first read must
-	// happen before the traffic it should capture.
-	if _, err := f.svc.GetCoreLogs(0); err != nil {
-		t.Fatal(err)
-	}
 
 	// Baseline: the LAN set sends the loopback target direct.
 	probeWantURL(t, b.Port, targetURL, "DIRECT-TARGET")
@@ -488,28 +470,6 @@ func TestProxyCoreEditableRulesLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	probeWantURL(t, b.Port, targetURL, "VIA-A")
-
-	// The log stream (level info) must have picked up core log
-	// lines by now; poll briefly for the buffer to fill.
-	deadline := time.Now().Add(10 * time.Second)
-	found := false
-	for time.Now().Before(deadline) && !found {
-		view, err := f.svc.GetCoreLogs(0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, l := range view.Lines {
-			if strings.Contains(l.Text, "[TCP]") {
-				found = true
-			}
-		}
-		if !found {
-			time.Sleep(300 * time.Millisecond)
-		}
-	}
-	if !found {
-		t.Fatal("the core log stream delivered no connection lines at info level")
-	}
 }
 
 func TestProxyCoreExternalConflict(t *testing.T) {
@@ -1290,12 +1250,12 @@ func TestProxyCoreReassignPort(t *testing.T) {
 
 	// While the instance may be running the reassign is refused
 	// and nothing changes.
-	f.svc.InstanceMayBeRunning = func(string) bool { return true }
+	f.svc.InstanceStatus = func(string) (string, bool) { return "running", true }
 	if _, err := f.svc.ReassignInstancePort("op", inst); err == nil ||
 		!strings.Contains(err.Error(), "请先停止实例") {
 		t.Fatalf("reassign while running = %v, want the stop-first refusal", err)
 	}
-	f.svc.InstanceMayBeRunning = nil
+	f.svc.InstanceStatus = nil
 
 	// One click: fresh port, listener up, traffic flows.
 	view, err := f.svc.ReassignInstancePort("op", inst)
