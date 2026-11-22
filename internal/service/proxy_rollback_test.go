@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/onbeee/DeBrowser/internal/database"
+	"github.com/onbeee/DeBrowser/internal/store"
 )
 
 // Rollback-path tests for regenerateState and the port
@@ -234,5 +237,198 @@ func TestReassignPortProbeFailureRollbackFails(t *testing.T) {
 	got, err := f.store.GetBinding(ctx, instID)
 	if err != nil || got.Port != before.Port {
 		t.Fatalf("binding = %+v, %v; the recorded port must stay %d", got, err, before.Port)
+	}
+}
+
+// swapConfigToDir replaces the configuration file with a
+// directory of the same name, so a later write-back of the
+// previous configuration fails deterministically.
+func swapConfigToDir(t *testing.T, f *proxyFixture) {
+	t.Helper()
+	p := f.svc.configPath()
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p, 0o750); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Fix 1a: a configuration file that exists but cannot be read
+// aborts the change before anything is replaced.
+func TestRegeneratePrevConfigUnreadableAborts(t *testing.T) {
+	f, _ := gateHealFixture(t)
+	ctx := context.Background()
+	_ = os.Remove(f.svc.configPath()) // the fixture's setup already wrote one
+	if err := os.Mkdir(f.svc.configPath(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	state, err := f.svc.loadConfigState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.svc.regenerateState(ctx, state)
+	if err == nil || !strings.Contains(err.Error(), "读取现有核心配置失败") {
+		t.Fatalf("err = %v, want the unreadable-previous-config abort", err)
+	}
+}
+
+// Fix 1b: the core rejects the new configuration AND writing
+// the previous file back fails — the error must combine both
+// and must not claim the previous configuration was preserved.
+func TestRegenerateRestoreWriteFailureReload(t *testing.T) {
+	f, _ := runningCoreFixture(t)
+	ctx := context.Background()
+	f.svc.coreRunningOverride = func() bool { return false }
+	if err := f.svc.regenerate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.coreRunningOverride = func() bool { return true }
+	f.svc.reloadOverride = func(ctx context.Context) error {
+		swapConfigToDir(t, f)
+		return errors.New("core refused")
+	}
+	state, err := f.svc.loadConfigState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.svc.regenerateState(ctx, state)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"核心拒绝了新配置", "原配置文件恢复失败", "不一致"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "已保留原有配置") {
+		t.Fatalf("err = %v, must not claim the previous configuration was preserved", err)
+	}
+}
+
+// Fix 1c: same write-back discipline on the GeoIP preparation
+// failure path.
+func TestRegenerateRestoreWriteFailureGeoIP(t *testing.T) {
+	f, _ := gateHealFixture(t) // rule-mode binding, no GeoIP database seeded
+	ctx := context.Background()
+	if err := f.svc.regenerate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.coreRunningOverride = func() bool { return true }
+	f.svc.geoipDownloadOverride = func(ctx context.Context, dir string) error {
+		swapConfigToDir(t, f)
+		return errors.New("network down")
+	}
+	state, err := f.svc.loadConfigState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.svc.regenerateState(ctx, state)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"GeoIP", "原配置文件恢复失败", "不一致"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+}
+
+// Fix 2a: adding a URL source whose provider refresh fails,
+// with the compensation's database delete ALSO failing (the
+// database is closed from inside the refresh seam): the error
+// must report the cleanup failure and the source row must
+// really still be there afterwards — no false "rolled back".
+func TestAddURLSourceCompensationFailure(t *testing.T) {
+	f, _ := runningCoreFixture(t)
+	f.svc.refreshOverride = func(ctx context.Context, provider string) error {
+		_ = f.db.Close() // every later store call fails
+		return errors.New("core cannot load provider")
+	}
+	_, err := f.svc.AddURLSource("op", "坏源", testSubURL)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"回滚清理失败", "残留"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "已回滚") {
+		t.Fatalf("err = %v, must not claim a clean rollback", err)
+	}
+	// The residue is real: reopen the database file and find
+	// the source row still present.
+	db2, err := database.Open(f.cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	sources, err := store.New(db2).ListProxySources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range sources {
+		if s.Name == "坏源" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the uncompensated source row should still exist")
+	}
+}
+
+// Fix 2b: importing a file source whose reload fails, with the
+// compensation's file delete ALSO failing (the copy is swapped
+// for a non-empty directory from inside the reload seam): the
+// row cleanup succeeds, the file residue remains, and the
+// error reports the cleanup failure instead of a clean
+// rollback.
+func TestAddFileSourceCompensationFailure(t *testing.T) {
+	f := testProxyFixture(t)
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "nodes.yaml")
+	writeSourceYAML(t, srcFile, "NodeA=18101")
+	f.svc.SourceFilePicker = func() (string, error) { return srcFile, nil }
+	f.svc.coreRunningOverride = func() bool { return true }
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error { return nil }
+	swapped := ""
+	f.svc.reloadOverride = func(ctx context.Context) error {
+		copies, _ := filepath.Glob(filepath.Join(f.svc.sourcesDir(), "*.yaml"))
+		if len(copies) == 1 {
+			swapped = copies[0]
+			_ = os.Remove(swapped)
+			_ = os.Mkdir(swapped, 0o750)
+			_ = os.WriteFile(filepath.Join(swapped, "child"), []byte("x"), 0o640)
+		}
+		return errors.New("core refused")
+	}
+	_, err := f.svc.AddFileSource("op", "文件源")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"回滚清理失败", "文件副本"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "已回滚") {
+		t.Fatalf("err = %v, must not claim a clean rollback", err)
+	}
+	// Real state: the database row was cleaned up...
+	sources, err := f.svc.ListSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 0 {
+		t.Fatalf("sources = %+v, want the row cleaned up", sources)
+	}
+	// ...but the file residue really remains.
+	if swapped == "" {
+		t.Fatal("the reload seam never saw the source copy")
+	}
+	if info, err := os.Stat(swapped); err != nil || !info.IsDir() {
+		t.Fatalf("residue at %s: info=%v err=%v, want the non-empty directory left behind", swapped, info, err)
 	}
 }

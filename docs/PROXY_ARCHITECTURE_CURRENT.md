@@ -444,7 +444,7 @@ rules:
 ### 9.1 记录机制
 
 - 统一自动记录（`internal/logging`）：operation / error / runtime 三类 JSONL，位于 `data/logs/`；每个用户操作一个 operation_id 贯穿。代理模块经 `beginOp/finishOp`（`internal/service/audit.go`）记录以下操作的结果（成功/失败与错误文本）：`proxy.core_start`、`proxy.core_stop`、`proxy.source_add_url`、`proxy.source_add_file`、`proxy.source_refresh`、`proxy.source_reimport`、`proxy.source_delete`、`proxy.delay_test`、`proxy.binding_set`、`proxy.binding_clear`、`proxy.binding_reassign_port`。实例启动被代理门禁拒绝时，错误进入该实例的启动操作记录。
-- 核心自身日志：`data/mihomo/core.log`（核心 stdout/stderr，warning 级别）。这是核心内部事件（provider 加载细节、Listener 冲突、连接错误）的**唯一**出处，不进入 JSONL。
+- 核心自身日志：`data/mihomo/core.log`（核心 stdout/stderr，默认 warning 级别，用户可在代理设置中调整为 info / debug）。这是核心内部事件（provider 加载细节、Listener 冲突、连接错误）的**唯一**出处，不进入 JSONL。
 - 脱敏：操作记录只带动作名与目标 ID；订阅 URL、控制器密钥从不进入任何记录（代码检索确认）；错误消息由服务层构造，不拼接 URL/凭据。数据管理页的日志导出只含三类 JSONL 并经敏感扫描与路径脱敏；`config.yaml`、Vault 内容、核心目录**不在任何导出范围内**。
 
 ### 9.2 可诊断性矩阵（当前代码）
@@ -453,7 +453,7 @@ rules:
 |---|---|---|
 | Provider 加载失败 | **部分** | 添加/刷新操作记录报错；来源状态显示 error/empty 与提示；细节（核心为何拒绝）只在 `core.log` |
 | 节点测速失败 | **部分** | 测速操作本身有记录；逐节点失败只是返回给 UI 的数据（-1），不逐条记录，事后无法从日志还原哪个节点失败 |
-| DNS 解析失败 | **否** | 核心内部行为，DeBrowser 无观测点；至多见于 `core.log`（warning 级别下未必记录） |
+| DNS 解析失败 | **否** | 核心内部行为，DeBrowser 无观测点；至多见于 `core.log`（默认 warning 级别下未必记录） |
 | 节点连接失败 | **部分** | 绑定状态派生（down）与健康历史可在 UI 实时看到，但不落入日志；连接级错误只在 `core.log` |
 | Listener 创建失败 | **部分** | 核心只在 `core.log` 记录（如端口冲突时核心不退出、仅丢弃该 Listener）；控制 API 无 Listener 运行时状态（见 10.3）；DeBrowser 通过 SOCKS5 握手探测（`ProbeListener`）间接发现：绑定列表显示 Listener 状态 down、实例启动被拒绝并记录。握手是协议探测而非归属验证——外部 SOCKS5 代理占用同一端口时无法区分（归属靠端口分配与配置来源纪律） |
 | Mihomo 配置更新失败 | **能** | `regenerateState` 的重载失败/回滚都是操作的同步返回值，进入操作记录并直接提示用户（含恢复失败的双错误） |
@@ -494,7 +494,7 @@ rules:
 
 ### 10.4 未实现的功能（明确清单）
 
-- 规则集的用户编辑/启停、订阅规则导入：未实现（已实现的是固定共享规则集 + 每实例路由模式，见第 8 节）；
+- 订阅自带规则的导入：未实现（订阅只取节点，见第 4 节）；DeBrowser 内置规则集的策略编辑（走节点/直连/拦截/停用）与自定义置顶规则已实现（见第 8 节）；
 - TUN、系统代理设置：未实现（且不在产品范围内）；
 - 实际连接测试（经 Listener 的真实请求测试）：未实现；
 - 节点手动添加/编辑、节点参数查看（服务器/密码等）：未实现（节点参数只在核心内）；

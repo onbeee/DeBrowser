@@ -582,7 +582,27 @@ func (s *ProxyService) regenerateStateGuarded(ctx context.Context, state proxyCo
 		return err
 	}
 	cfgPath := s.configPath()
-	prev, _ := os.ReadFile(cfgPath)
+	// The previous file is the rollback anchor for every
+	// failure below: read it BEFORE replacing it. A file that
+	// exists but cannot be read aborts the change — proceeding
+	// would destroy the only copy of the configuration the core
+	// may still be running. A missing file is the only "no
+	// previous configuration" case.
+	prev, rerr := os.ReadFile(cfgPath)
+	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return fmt.Errorf("读取现有核心配置失败，已中止本次变更：%w", rerr)
+	}
+	// restorePrev writes the previous configuration bytes back.
+	// Its error is part of the caller's result: a failed restore
+	// means the file on disk may no longer match the
+	// configuration the core is running, and no caller may
+	// claim the previous configuration was preserved.
+	restorePrev := func() error {
+		if prev == nil {
+			return nil
+		}
+		return os.WriteFile(cfgPath, prev, 0o640)
+	}
 	tmp := cfgPath + ".tmp"
 	if err := os.MkdirAll(s.layout.Mihomo, 0o750); err != nil {
 		return fmt.Errorf("创建核心工作目录失败：%w", err)
@@ -602,16 +622,16 @@ func (s *ProxyService) regenerateStateGuarded(ctx context.Context, state proxyCo
 		// valid binding change. Preparation failure rolls the
 		// file back exactly like a refused reload does.
 		if err := s.ensureGeoIP(ctx, state.bindings); err != nil {
-			if prev != nil {
-				_ = os.WriteFile(cfgPath, prev, 0o640)
+			if werr := restorePrev(); werr != nil {
+				return fmt.Errorf("GeoIP 数据库准备失败：%w；且原配置文件恢复失败（%v），磁盘上的配置可能与核心正在运行的配置不一致，请重启代理核心恢复一致性", err, werr)
 			}
 			return err
 		}
 		if err := s.reloadConfig(ctx); err != nil {
 			// Roll the file back so the next start loads the same
 			// configuration the core is still running.
-			if prev != nil {
-				_ = os.WriteFile(cfgPath, prev, 0o640)
+			if werr := restorePrev(); werr != nil {
+				return fmt.Errorf("核心拒绝了新配置：%w；且原配置文件恢复失败（%v），磁盘上的配置可能与核心正在运行的配置不一致，请重启代理核心恢复一致性", err, werr)
 			}
 			return fmt.Errorf("核心拒绝了新配置，已保留原有配置：%w", err)
 		}
@@ -820,6 +840,36 @@ func validateSourceName(name string) (string, error) {
 	return name, nil
 }
 
+// rollbackSourceAdd removes everything an in-flight source
+// addition created — the database row, the vault entry and the
+// local file copy (empty identifiers skip their step) — and
+// reports every step that failed. A step that already reached
+// its goal (row absent, file absent) is not a failure. When
+// this returns non-nil, residue may remain and the caller must
+// say so instead of claiming a clean rollback.
+func (s *ProxyService) rollbackSourceAdd(ctx context.Context, id, secretRef, fileName string) error {
+	var failed []string
+	if id != "" {
+		if err := s.store.DeleteProxySource(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+			failed = append(failed, "删除来源记录失败："+err.Error())
+		}
+	}
+	if secretRef != "" && s.vault != nil {
+		if _, err := s.vault.DeleteCompensating(secretRef); err != nil {
+			failed = append(failed, "删除凭据条目失败："+err.Error())
+		}
+	}
+	if fileName != "" {
+		if err := os.Remove(filepath.Join(s.sourcesDir(), fileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failed = append(failed, "删除本地文件副本失败："+err.Error())
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%s", strings.Join(failed, "；"))
+	}
+	return nil
+}
+
 // AddURLSource archives a subscription URL (in the credential
 // vault; the database holds only the vault reference). Adding a
 // source never starts the core; when the core is already running
@@ -853,7 +903,9 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 	}
 	id, err := store.NewID()
 	if err != nil {
-		_, _ = s.vault.DeleteCompensating(ref)
+		if cerr := s.rollbackSourceAdd(ctx, "", ref, ""); cerr != nil {
+			return SourceView{}, fmt.Errorf("%w；且凭据补偿清理失败（%v），可能残留凭据条目", err, cerr)
+		}
 		return SourceView{}, err
 	}
 	src, err := s.store.CreateProxySource(ctx, model.ProxySource{
@@ -861,7 +913,9 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 		SecretRef: ref, ProviderName: providerNameFor(id),
 	})
 	if err != nil {
-		_, _ = s.vault.DeleteCompensating(ref)
+		if cerr := s.rollbackSourceAdd(ctx, "", ref, ""); cerr != nil {
+			return SourceView{}, fmt.Errorf("保存订阅失败：%w；且凭据补偿清理失败（%v），可能残留凭据条目", err, cerr)
+		}
 		return SourceView{}, fmt.Errorf("保存订阅失败：%w", err)
 	}
 	s.mu.Lock()
@@ -869,9 +923,11 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 		if err := s.regenerate(ctx); err != nil {
 			// The core rejected the configuration with the new
 			// source: roll the archive back.
-			_ = s.store.DeleteProxySource(ctx, id)
-			_, _ = s.vault.DeleteCompensating(ref)
+			cerr := s.rollbackSourceAdd(ctx, id, ref, "")
 			s.mu.Unlock()
+			if cerr != nil {
+				return SourceView{}, fmt.Errorf("添加订阅失败，核心配置更新未生效，且回滚清理失败（%v），可能残留来源记录或凭据条目（原始错误：%w）", cerr, err)
+			}
 			return SourceView{}, fmt.Errorf("添加订阅失败，核心配置更新未生效，已回滚：%w", err)
 		}
 		// Ask the core to fetch the new provider now. A source
@@ -880,13 +936,15 @@ func (s *ProxyService) addURLSource(name string, rawURL string) (SourceView, err
 		// vault entry and the live configuration) instead of
 		// reporting success for a source that does not work.
 		if err := s.refreshProvider(ctx, src.ProviderName); err != nil {
-			_ = s.store.DeleteProxySource(ctx, id)
-			_, _ = s.vault.DeleteCompensating(ref)
-			if rbErr := s.regenerate(ctx); rbErr != nil {
-				s.mu.Unlock()
+			cerr := s.rollbackSourceAdd(ctx, id, ref, "")
+			rbErr := s.regenerate(ctx)
+			s.mu.Unlock()
+			if cerr != nil {
+				return SourceView{}, fmt.Errorf("添加订阅失败，核心未能加载该订阅，且回滚清理失败（%v），可能残留来源记录或凭据条目（加载错误：%w）", cerr, err)
+			}
+			if rbErr != nil {
 				return SourceView{}, fmt.Errorf("添加订阅失败，核心未能加载该订阅，且运行配置恢复失败（加载错误：%v；恢复错误：%v），请重启核心以恢复一致", err, rbErr)
 			}
-			s.mu.Unlock()
 			return SourceView{}, fmt.Errorf("添加订阅失败，核心未能加载该订阅，已回滚：%w", err)
 		}
 	}
@@ -944,15 +1002,19 @@ func (s *ProxyService) addFileSource(name string) (SourceView, error) {
 		FileName: fileName, ProviderName: providerNameFor(id),
 	})
 	if err != nil {
-		os.Remove(filepath.Join(s.sourcesDir(), fileName))
+		if cerr := s.rollbackSourceAdd(ctx, "", "", fileName); cerr != nil {
+			return SourceView{}, fmt.Errorf("保存本地来源失败：%w；且本地文件补偿清理失败（%v），可能残留文件副本", err, cerr)
+		}
 		return SourceView{}, fmt.Errorf("保存本地来源失败：%w", err)
 	}
 	s.mu.Lock()
 	if s.coreRunning(ctx) {
 		if err := s.regenerate(ctx); err != nil {
-			_ = s.store.DeleteProxySource(ctx, id)
-			os.Remove(filepath.Join(s.sourcesDir(), fileName))
+			cerr := s.rollbackSourceAdd(ctx, id, "", fileName)
 			s.mu.Unlock()
+			if cerr != nil {
+				return SourceView{}, fmt.Errorf("导入文件失败，核心配置更新未生效，且回滚清理失败（%v），可能残留来源记录或文件副本（原始错误：%w）", cerr, err)
+			}
 			return SourceView{}, fmt.Errorf("导入文件失败，核心配置更新未生效，已回滚：%w", err)
 		}
 	}
