@@ -296,7 +296,7 @@ func TestRegenerateRestoreWriteFailureReload(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	for _, want := range []string{"核心拒绝了新配置", "原配置文件恢复失败", "不一致"} {
+	for _, want := range []string{"核心拒绝了新配置", "原配置恢复失败", "不一致"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %v, want it to contain %q", err, want)
 		}
@@ -327,7 +327,7 @@ func TestRegenerateRestoreWriteFailureGeoIP(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	for _, want := range []string{"GeoIP", "原配置文件恢复失败", "不一致"} {
+	for _, want := range []string{"GeoIP", "原配置恢复失败", "不一致"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %v, want it to contain %q", err, want)
 		}
@@ -430,5 +430,151 @@ func TestAddFileSourceCompensationFailure(t *testing.T) {
 	}
 	if info, err := os.Stat(swapped); err != nil || !info.IsDir() {
 		t.Fatalf("residue at %s: info=%v err=%v, want the non-empty directory left behind", swapped, info, err)
+	}
+}
+
+// Fix 1d: with NO previous configuration file, a refused
+// reload removes the just-written new file — the disk returns
+// to the pre-change state (no file at all).
+func TestRegenerateRollbackDeletesNewConfigWhenNoPrev(t *testing.T) {
+	f, _ := gateHealFixture(t)
+	ctx := context.Background()
+	// GeoIP present so the flow reaches the reload; no config
+	// file on disk when the change starts.
+	if err := os.WriteFile(filepath.Join(f.cfg.Layout.Mihomo, "geoip.metadb"), []byte("seed"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.svc.configPath()); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.coreRunningOverride = func() bool { return true }
+	f.svc.reloadOverride = func(ctx context.Context) error { return errors.New("core refused") }
+	state, err := f.svc.loadConfigState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.svc.regenerateState(ctx, state)
+	if err == nil || !strings.Contains(err.Error(), "已删除新配置文件") {
+		t.Fatalf("err = %v, want the refused-reload error noting the new file was removed", err)
+	}
+	if _, err := os.Stat(f.svc.configPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config file stat err = %v, want it removed by the rollback", err)
+	}
+}
+
+// Fix 1e: same path, but removing the new file ALSO fails
+// (the path was swapped for a non-empty directory inside the
+// reload seam): the combined error reports both failures and
+// claims neither preservation nor removal.
+func TestRegenerateRollbackDeleteNewConfigFails(t *testing.T) {
+	f, _ := gateHealFixture(t)
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(f.cfg.Layout.Mihomo, "geoip.metadb"), []byte("seed"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.svc.configPath()); err != nil {
+		t.Fatal(err)
+	}
+	f.svc.coreRunningOverride = func() bool { return true }
+	f.svc.reloadOverride = func(ctx context.Context) error {
+		p := f.svc.configPath()
+		_ = os.Remove(p)
+		_ = os.Mkdir(p, 0o750)
+		_ = os.WriteFile(filepath.Join(p, "child"), []byte("x"), 0o640)
+		return errors.New("core refused")
+	}
+	state, err := f.svc.loadConfigState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.svc.regenerateState(ctx, state)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"核心拒绝了新配置", "原配置恢复失败", "不一致"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	for _, banned := range []string{"已删除新配置文件", "已保留原有配置"} {
+		if strings.Contains(err.Error(), banned) {
+			t.Fatalf("err = %v, must not claim %q", err, banned)
+		}
+	}
+}
+
+// Fix 2c: reference order — when the database row deletion
+// fails, the vault entry the row still references must NOT be
+// deleted. (Extends the scenario of
+// TestAddURLSourceCompensationFailure with the vault check.)
+func TestAddURLSourceRowDeleteFailureKeepsVaultEntry(t *testing.T) {
+	f, _ := runningCoreFixture(t)
+	f.svc.refreshOverride = func(ctx context.Context, provider string) error {
+		_ = f.db.Close()
+		return errors.New("core cannot load provider")
+	}
+	_, err := f.svc.AddURLSource("op", "顺序源", testSubURL)
+	if err == nil || !strings.Contains(err.Error(), "删除来源记录失败") {
+		t.Fatalf("err = %v, want the row-deletion failure reported", err)
+	}
+	db2, err := database.Open(f.cfg.Layout.DatabaseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	sources, err := store.New(db2).ListProxySources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref string
+	for _, s := range sources {
+		if s.Name == "顺序源" {
+			ref = s.SecretRef
+		}
+	}
+	if ref == "" {
+		t.Fatal("the source row should still exist with its vault reference")
+	}
+	got, err := f.vault.Get(ref)
+	if err != nil {
+		t.Fatalf("vault entry must survive while the row references it: %v", err)
+	}
+	if string(got) != testSubURL {
+		t.Fatalf("vault entry = %q, want the subscription URL intact", got)
+	}
+}
+
+// Fix 2d: reference order for file sources — when the row
+// deletion fails, the local file copy must NOT be deleted.
+func TestAddFileSourceRowDeleteFailureKeepsFile(t *testing.T) {
+	f := testProxyFixture(t)
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "nodes.yaml")
+	writeSourceYAML(t, srcFile, "NodeA=18101")
+	f.svc.SourceFilePicker = func() (string, error) { return srcFile, nil }
+	f.svc.coreRunningOverride = func() bool { return true }
+	f.svc.selectOverride = func(ctx context.Context, group, node string) error { return nil }
+	f.svc.reloadOverride = func(ctx context.Context) error {
+		_ = f.db.Close() // the compensation's row deletion will fail
+		return errors.New("core refused")
+	}
+	_, err := f.svc.AddFileSource("op", "顺序文件源")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"回滚清理失败", "删除来源记录失败"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "已回滚") {
+		t.Fatalf("err = %v, must not claim a clean rollback", err)
+	}
+	copies, _ := filepath.Glob(filepath.Join(f.svc.sourcesDir(), "*.yaml"))
+	if len(copies) != 1 {
+		t.Fatalf("copies = %v, want the file copy kept while its row survives", copies)
+	}
+	if info, err := os.Stat(copies[0]); err != nil || info.IsDir() {
+		t.Fatalf("copy stat: info=%v err=%v, want the regular file intact", info, err)
 	}
 }
