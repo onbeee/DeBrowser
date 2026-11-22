@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/onbeee/DeBrowser/internal/config"
 	"github.com/onbeee/DeBrowser/internal/database"
@@ -204,6 +205,22 @@ func TestAddSubscriptionFailuresLeaveNothing(t *testing.T) {
 	}
 	if len(sources) != 0 {
 		t.Fatalf("failed imports must leave no source, got %+v", sources)
+	}
+}
+
+// TestFetchSubscriptionErrorHasNoURL pins the privacy rule:
+// subscription URLs (which usually carry a token) must never
+// appear in errors — operation errors are recorded verbatim in
+// the unified log.
+func TestFetchSubscriptionErrorHasNoURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := fetchSubscriptionHTTP(ctx, "https://127.0.0.1:1/sub?token=SECRETTOKEN")
+	if err == nil {
+		t.Fatal("want a connection failure")
+	}
+	if strings.Contains(err.Error(), "SECRETTOKEN") || strings.Contains(err.Error(), "/sub?") {
+		t.Fatalf("fetch error leaks the subscription URL: %v", err)
 	}
 }
 

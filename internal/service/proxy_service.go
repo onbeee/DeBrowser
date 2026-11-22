@@ -397,6 +397,15 @@ func fetchSubscriptionHTTP(ctx context.Context, rawURL string) ([]byte, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		// *url.Error embeds the full subscription URL (token
+		// included) in its message. Operation errors are
+		// recorded verbatim in the unified log, and subscription
+		// URLs must never be logged — unwrap to the inner
+		// network error, which carries the useful cause only.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
