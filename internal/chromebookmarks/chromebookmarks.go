@@ -465,11 +465,10 @@ func SetName(n map[string]any, name string) { n["name"] = name }
 // SetURL rewrites a url node's target in place.
 func SetURL(n map[string]any, url string) { n["url"] = url }
 
-// NameOf / URLOf / IDOf expose node fields to callers verifying a
+// NameOf / URLOf expose node fields to callers verifying a
 // located node before mutating it.
 func NameOf(n map[string]any) string { return nodeName(n) }
 func URLOf(n map[string]any) string  { return nodeURL(n) }
-func IDOf(n map[string]any) string   { return nodeID(n) }
 
 // TypeOf exposes the node type ("url" or "folder").
 func TypeOf(n map[string]any) string { return nodeType(n) }
